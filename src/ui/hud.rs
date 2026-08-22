@@ -470,50 +470,98 @@ fn update_scoreboard(
 fn update_prompt(
     phase: Res<Phase>,
     am: Option<Res<ActiveMatch>>,
-    mut q: Query<&mut Text, (With<PromptText>, Without<ScoreText>)>,
+    mut root_q: Query<&mut Visibility, With<PromptRoot>>,
+    mut text_q: Query<(&PromptField, &mut Text)>,
 ) {
-    let Ok(mut t) = q.single_mut() else { return };
-    **t = match &phase.0 {
+    let prompt = match &phase.0 {
         PhaseEnum::ReadyToBall { .. } => match am.as_deref().map(|m| m.user_bowling()) {
-            Some(true) => "SPACE / A: start your run-up".into(),
-            _ => String::new(),
+            Some(true) => Some(("BOWLING", "PRESS SPACE / A TO START RUN-UP")),
+            _ => None,
         },
         PhaseEnum::AimLength { lock, .. } => match lock {
-            None => "SPACE: lock LENGTH  (marker sweeps down the pitch)".into(),
-            Some(_) => "SPACE: lock LINE  (marker sweeps across)".into(),
+            None => Some(("BOWLING", "PRESS SPACE TO LOCK LENGTH")),
+            Some(_) => Some(("BOWLING", "PRESS SPACE TO LOCK LINE")),
         },
-        PhaseEnum::RunUp { p } => {
-            if *p < 1.0 { "Bowler running in...".into() } else { String::new() }
-        }
         PhaseEnum::BallLive => {
-            let user_batting =
-                am.as_deref().map(|m| m.user_batting()).unwrap_or(false);
-            if user_batting {
-                "SPACE: play shot | SHIFT+SPACE: loft | A/D: aim".into()
+            if am.as_deref().map(|m| m.user_batting()).unwrap_or(false) {
+                Some(("BATTING", "SPACE SHOT   •   SHIFT + SPACE LOFT   •   A / D AIM"))
             } else {
-                String::new()
+                None
             }
         }
-        PhaseEnum::OverBreak { .. } => "Over complete. Next bowler coming on...".into(),
-        PhaseEnum::InningsBreak => {
-            "INNINGS BREAK — SPACE / A to begin the chase".into()
-        }
-        PhaseEnum::MatchOver => "Match over — SPACE / A: continue".into(),
-        _ => String::new(),
+        PhaseEnum::OverBreak { .. } => Some(("END OF OVER", "NEXT BOWLER COMING ON")),
+        PhaseEnum::InningsBreak => Some(("INNINGS BREAK", "PRESS SPACE / A TO BEGIN THE CHASE")),
+        PhaseEnum::MatchOver => Some(("MATCH RESULT", "PRESS SPACE / A TO CONTINUE")),
+        _ => None,
     };
+
+    let Ok(mut visibility) = root_q.single_mut() else { return };
+    let Some((kind, message)) = prompt else {
+        *visibility = Visibility::Hidden;
+        return;
+    };
+    *visibility = Visibility::Visible;
+    for (field, mut text) in &mut text_q {
+        **text = match field {
+            PromptField::Kind => kind.into(),
+            PromptField::Message => message.into(),
+        };
+    }
 }
 
 fn update_outcome(
     phase: Res<Phase>,
-    mut q: Query<(&mut Text, &mut Visibility), With<OutcomeText>>,
+    mut root_q: Query<&mut Visibility, With<OutcomeRoot>>,
+    mut panel_q: Query<(&mut BackgroundColor, &mut BorderColor), With<OutcomePanel>>,
+    mut accent_q: Query<&mut BackgroundColor, (With<OutcomeAccent>, Without<OutcomePanel>)>,
+    mut text_q: Query<(&OutcomeField, &mut Text, &mut TextColor)>,
 ) {
-    let Ok((mut t, mut vis)) = q.single_mut() else { return };
-    match &phase.0 {
-        PhaseEnum::ResultPause { text, .. } => {
-            **t = text.clone();
-            *vis = Visibility::Visible;
+    let Ok(mut visibility) = root_q.single_mut() else { return };
+    let PhaseEnum::ResultPause { text, .. } = &phase.0 else {
+        *visibility = Visibility::Hidden;
+        return;
+    };
+    *visibility = Visibility::Visible;
+    let (kind, accent, panel) = outcome_style(text);
+    if let Ok((mut background, mut border)) = panel_q.single_mut() {
+        background.0 = panel;
+        *border = BorderColor::all(accent.with_alpha(0.58));
+    }
+    if let Ok(mut background) = accent_q.single_mut() {
+        background.0 = accent;
+    }
+    for (field, mut value, mut color) in &mut text_q {
+        match field {
+            OutcomeField::Kind => {
+                **value = kind.into();
+                color.0 = accent;
+            }
+            OutcomeField::Message => {
+                **value = text.to_uppercase();
+                color.0 = Color::WHITE;
+            }
         }
-        _ => *vis = Visibility::Hidden,
+    }
+}
+
+fn outcome_style(text: &str) -> (&'static str, Color, Color) {
+    let upper = text.to_uppercase();
+    if ["BOWLED", "CAUGHT", "RUN OUT", "WICKET", "TAKEN"]
+        .iter()
+        .any(|word| upper.contains(word))
+    {
+        ("WICKET", Color::srgb(0.98, 0.28, 0.24), Color::srgba(0.16, 0.025, 0.03, 0.96))
+    } else if ["FOUR", "SIX", "MAXIMUM", "BOUNDARY"]
+        .iter()
+        .any(|word| upper.contains(word))
+    {
+        ("BOUNDARY", Color::srgb(0.98, 0.76, 0.24), Color::srgba(0.08, 0.055, 0.015, 0.96))
+    } else if upper.contains("WIDE") || upper.contains("NO BALL") {
+        ("EXTRAS", Color::srgb(0.25, 0.82, 0.92), Color::srgba(0.015, 0.09, 0.12, 0.96))
+    } else if upper.contains("RUN") {
+        ("RUNS", Color::srgb(0.30, 0.84, 0.48), Color::srgba(0.02, 0.11, 0.055, 0.96))
+    } else {
+        ("DELIVERY", Color::srgb(0.64, 0.72, 0.82), Color::srgba(0.035, 0.05, 0.075, 0.96))
     }
 }
 
