@@ -120,27 +120,44 @@ fn autotest_drive(
     mut last_milestone: Local<u32>,
     mut last_swing_t: Local<f32>,
 ) {
-    if std::env::var("CRICKET_AUTOTEST").unwrap_or_default() != "1" {
+    let mode = std::env::var("CRICKET_AUTOTEST").unwrap_or_default();
+    if mode != "1" && mode != "tournament" {
         return;
     }
     *t += time.delta_secs();
     let now = *t;
 
-    // Scripted menu Confirm presses.
-    let presses = [
-        2.0_f32, // Quick Match -> team select
-        3.5,     // pick your team
-        5.0,     // pick opponent
-        6.5,     // overs
-        8.0,     // stadium (random)
-        9.5,     // bat first -> match starts
-    ];
-    for (i, when) in presses.iter().enumerate() {
+    // Scripted menu presses: quick-match path by default.
+    let tournament =
+        std::env::var("CRICKET_AUTOTEST").unwrap_or_default() == "tournament";
+    let presses: [(f32, input::Action); 7] = if tournament {
+        [
+            (2.0, input::Action::Next),    // highlight Tournament
+            (3.5, input::Action::Confirm), // enter Tournament
+            (5.0, input::Action::Confirm), // pick your team -> bracket
+            (8.5, input::Action::Confirm), // play semifinal
+            (12.0, input::Action::Confirm),
+            (14.0, input::Action::Confirm),
+            (16.0, input::Action::Confirm),
+        ]
+    } else {
+        [
+            (2.0, input::Action::Confirm), // Quick Match -> team select
+            (3.5, input::Action::Confirm), // pick your team
+            (5.0, input::Action::Confirm), // pick opponent
+            (6.5, input::Action::Confirm), // overs
+            (8.0, input::Action::Confirm), // stadium (random)
+            (9.5, input::Action::Confirm), // bat first -> match starts
+            (99.0, input::Action::Confirm),
+        ]
+    };
+    let _ = tournament;
+    for (i, (when, action)) in presses.iter().enumerate() {
         let step = i as u32 + 1;
         if now >= *when && *last_press < step {
-            input.just_pressed.push(input::Action::Confirm);
+            input.just_pressed.push(*action);
             *last_press = step;
-            info!("AUTOTEST: menu press #{step}");
+            info!("AUTOTEST: menu press #{step} ({action:?})");
         }
     }
 
@@ -152,7 +169,11 @@ fn autotest_drive(
     }
 
     // Milestones: screenshots + clean exit.
-    let milestones = [1.5_f32, 5.0, 30.0, 45.0];
+    let milestones = if tournament {
+        [1.5_f32, 5.0, 7.0, 14.0]
+    } else {
+        [1.5_f32, 16.0, 30.0, 45.0]
+    };
     for (i, when) in milestones.iter().enumerate() {
         let step = 100 + i as u32;
         if now >= *when && *last_milestone < step {
@@ -160,7 +181,8 @@ fn autotest_drive(
             *last_milestone = step;
         }
     }
-    if now >= 50.0 && *last_milestone < 200 {
+    let end = if tournament { 20.0 } else { 50.0 };
+    if now >= end && *last_milestone < 200 {
         *last_milestone = 200;
         std::process::exit(0);
     }

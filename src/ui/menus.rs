@@ -1,7 +1,7 @@
 //! Menus: main menu, match-setup wizard, controls help and the tournament
 //! bracket screen. Keyboard/gamepad driven (see input::Action mapping).
 
-use crate::core::tournament::{Entrant, Fixture, Tournament};
+use crate::core::tournament::{Entrant, Fixture, Stage, Tournament};
 use crate::game::*;
 use crate::input::{Action, PlayerInput};
 use crate::state::AppState;
@@ -31,6 +31,8 @@ pub struct MenuState {
     /// Index into stadiums; usize::MAX means "random each match".
     pub stadium_idx: usize,
     pub bat_first: bool,
+    /// true when the current setup wizard leads into a tournament.
+    pub tournament_mode: bool,
 }
 
 impl Default for MenuState {
@@ -43,6 +45,7 @@ impl Default for MenuState {
             overs_idx: 2,
             stadium_idx: usize::MAX,
             bat_first: true,
+            tournament_mode: false,
         }
     }
 }
@@ -194,6 +197,11 @@ fn bracket_lines(ct: &CurrentTournament) -> Vec<String> {
             Some(crate::core::rules::Result::Tie) => "TIE".into(),
             None => "-".into(),
         };
+        // Final round shows TBD placeholders until both semis resolve.
+        if f.stage == Stage::Final && f.home == 0 && f.away == 1 && f.result.is_none() {
+            out.push(format!("{}: TBD v TBD @ {}", f.stage.label(), t.stadiums[f.stadium].name));
+            continue;
+        }
         out.push(format!(
             "{}: {} v {}  |  {} @ {}",
             f.stage.label(),
@@ -262,7 +270,9 @@ fn refresh_menu(
             for (i, line) in
                 screen_items(&ms, &wd, &ct).into_iter().enumerate()
             {
-                let selected = i == ms.sel;
+                let selectable =
+                    !matches!(ms.screen, Screen::Bracket | Screen::Controls);
+                let selected = i == ms.sel && selectable;
                 items.spawn((
                     Node {
                         padding: UiRect::horizontal(px(18)),
@@ -293,12 +303,13 @@ fn refresh_menu(
 // Input handling / navigation
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn handle_menu_input(
     mut ms: ResMut<MenuState>,
     input: Res<PlayerInput>,
     wd: Res<WorldData>,
     mut ct: ResMut<CurrentTournament>,
-    mut active_fixture: ResMut<ActiveFixture>,
+    mut af: ResMut<ActiveFixture>,
     mut next_state: ResMut<NextState<AppState>>,
     mut exit: MessageWriter<AppExit>,
     mut commands: Commands,
@@ -315,8 +326,16 @@ fn handle_menu_input(
             if input.pressed(Action::Prev) { wrap(&mut ms.sel, -1, 4); }
             if input.pressed(Action::Confirm) {
                 match ms.sel {
-                    0 => { ms.screen = SetupTeam; ms.sel = ms.team; }
-                    1 => { ms.screen = SetupTeam; ms.sel = ms.team; }
+                    0 => {
+                        ms.tournament_mode = false;
+                        ms.screen = SetupTeam;
+                        ms.sel = ms.team;
+                    }
+                    1 => {
+                        ms.tournament_mode = true;
+                        ms.screen = SetupTeam;
+                        ms.sel = ms.team;
+                    }
                     2 => { ms.screen = Controls; }
                     _ => {
                         exit.write(AppExit::Success);
@@ -334,9 +353,16 @@ fn handle_menu_input(
             navigate_list(&input, &mut ms.sel, wd.teams.len());
             if input.pressed(Action::Confirm) {
                 ms.team = ms.sel;
-                if ms.opp == ms.team { ms.opp = (ms.team + 1) % wd.teams.len(); }
-                ms.screen = SetupOpp;
-                ms.sel = ms.opp;
+                if ms.tournament_mode {
+                    let t = start_tournament(ms.team, &wd);
+                    ct.0 = Some(t);
+                    ms.screen = Screen::Bracket;
+                    ms.sel = 0;
+                } else {
+                    if ms.opp == ms.team { ms.opp = (ms.team + 1) % wd.teams.len(); }
+                    ms.screen = SetupOpp;
+                    ms.sel = ms.opp;
+                }
             }
             if input.pressed(Action::Cancel) { back_to_main(&mut ms); }
         }
@@ -403,7 +429,7 @@ fn handle_menu_input(
                     ct.0 = None;
                 } else if let Some((idx, f)) = t.next_user_fixture() {
                     launch_tournament_match(
-                        t, idx, &f, &wd, &mut active_fixture,
+                        t, idx, &f, &wd, &mut af,
                         &mut commands, &mut next_state,
                     );
                 }
