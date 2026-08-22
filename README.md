@@ -47,9 +47,11 @@ full batting / bowling / fielding gameplay on both keyboard and gamepad.
   16k tris, 55-bone humanoid). Skinned, code-driven skeletal animation
   (idle waggle, run, bowling windmill, bat swing) — fully MIT-distributable
   and retarget-friendly for future Mixamo clips.
-- **Atmosphere** — sky gradient, distance fog, warm late-afternoon sun,
-  ball trail on big hits, camera shake on wickets/boundaries, illuminated
-  fictional sponsor ribbons, and alternating team-crest boundary pylons.
+- **Atmosphere** — procedural sky sphere (day: pale→deep blue, night:
+  starry navy with floodlights, `N` to toggle), distance fog, sun/moon +
+  4 floodlights, ball trail, camera shake, sponsor ribbons & crest pylons.
+- **Ground** — tilable grass (mown stripes, 8×8 repeat) + dirt pitch (worn
+  centre) via procedural `Image` + `Affine2` UV, PBR 0.94/0.92 roughness.
 - **Sound** — procedural audio (bat crack, stump clatter, crowd, murmur)
   + Master/SFX volume controls.
 - **Animation** — skeletal `slerp` blending (14 rad/s) on Mixamo bones:

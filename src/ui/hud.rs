@@ -8,13 +8,40 @@ use bevy::prelude::*;
 #[derive(Component)]
 struct HudRoot;
 #[derive(Component)]
-struct ScoreText;
+struct ScoreBug;
 #[derive(Component)]
-struct InfoText;
+struct ScoreAccent;
 #[derive(Component)]
-struct PromptText;
+struct ScoreCrest;
 #[derive(Component)]
-struct OutcomeText;
+enum ScoreField {
+    Innings,
+    Team,
+    Runs,
+    Overs,
+    Equation,
+    Batters,
+    Bowler,
+    Delivery,
+}
+#[derive(Component)]
+struct PromptRoot;
+#[derive(Component)]
+enum PromptField {
+    Kind,
+    Message,
+}
+#[derive(Component)]
+struct OutcomeRoot;
+#[derive(Component)]
+struct OutcomePanel;
+#[derive(Component)]
+struct OutcomeAccent;
+#[derive(Component)]
+enum OutcomeField {
+    Kind,
+    Message,
+}
 #[derive(Component)]
 struct MeterRoot;
 #[derive(Component)]
@@ -28,6 +55,9 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
+        bevy::asset::embedded_asset!(app, "../../assets/fonts/Lato-Black.ttf");
+        bevy::asset::embedded_asset!(app, "../../assets/fonts/Lato-Bold.ttf");
+        bevy::asset::embedded_asset!(app, "../../assets/fonts/Lato-Regular.ttf");
         app.add_systems(OnEnter(AppState::InMatch), spawn_hud)
             .add_systems(OnExit(AppState::InMatch), despawn_hud)
             .add_systems(
@@ -52,7 +82,28 @@ fn panel_bg() -> BackgroundColor {
     BackgroundColor(Color::srgba(0.05, 0.05, 0.08, 0.72))
 }
 
-fn spawn_hud(mut commands: Commands) {
+fn text_shadow() -> TextShadow {
+    TextShadow {
+        offset: Vec2::new(0.0, 2.0),
+        color: Color::srgba(0.0, 0.0, 0.0, 0.7),
+    }
+}
+
+fn spawn_hud(mut commands: Commands, assets: Res<AssetServer>) {
+    let display = bevy::asset::load_embedded_asset!(
+        assets.as_ref(),
+        "../../assets/fonts/Lato-Black.ttf"
+    );
+    let bold = bevy::asset::load_embedded_asset!(
+        assets.as_ref(),
+        "../../assets/fonts/Lato-Bold.ttf"
+    );
+    let regular = bevy::asset::load_embedded_asset!(
+        assets.as_ref(),
+        "../../assets/fonts/Lato-Regular.ttf"
+    );
+    let default_crest = crate::render::load_team_crest(&assets, "branding/teams/ind.png");
+
     commands
         .spawn((
             HudRoot,
@@ -65,65 +116,182 @@ fn spawn_hud(mut commands: Commands) {
             // HUD must never intercept input.
         ))
         .with_children(|p| {
-            // ---- scoreboard, top-left ----
+            // ---- television scorebug, top-left ----
             p.spawn((
+                ScoreBug,
                 Node {
                     position_type: PositionType::Absolute,
-                    top: px(12),
-                    left: px(12),
+                    top: px(18),
+                    left: px(18),
+                    width: px(445),
                     flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(px(10)),
-                    row_gap: px(4),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(6)),
+                    overflow: Overflow::clip(),
                     ..default()
                 },
-                panel_bg(),
+                BackgroundColor(Color::srgba(0.015, 0.025, 0.04, 0.96)),
+                BorderColor::all(Color::srgba(0.72, 0.82, 0.90, 0.26)),
             ))
             .with_children(|c| {
                 c.spawn((
-                    ScoreText,
-                    Text::new(""),
-                    TextFont { font_size: 34.0, ..default() },
-                    TextColor(Color::WHITE),
+                    ScoreAccent,
+                    Node { width: percent(100), height: px(4), ..default() },
+                    BackgroundColor(Color::srgb(0.08, 0.38, 0.82)),
                 ));
-                c.spawn((
-                    InfoText,
-                    Text::new(""),
-                    TextFont { font_size: 17.0, ..default() },
-                    TextColor(Color::srgb(0.85, 0.85, 0.9)),
-                ));
+                c.spawn((Node {
+                    width: percent(100), height: px(25), align_items: AlignItems::Center,
+                    justify_content: JustifyContent::SpaceBetween,
+                    padding: UiRect::horizontal(px(12)), ..default()
+                }, BackgroundColor(Color::srgba(0.08, 0.10, 0.14, 0.98))))
+                .with_children(|header| {
+                    header.spawn((ScoreField::Innings, Text::new("1ST INNINGS"), TextFont {
+                        font: bold.clone(), font_size: 10.0, ..default()
+                    }, TextColor(Color::srgb(0.76, 0.81, 0.86))));
+                    header.spawn((Text::new("WILLOW  •  LIVE"), TextFont {
+                        font: bold.clone(), font_size: 10.0, ..default()
+                    }, TextColor(Color::srgb(0.98, 0.72, 0.25))));
+                });
+                c.spawn(Node {
+                    width: percent(100), height: px(75), align_items: AlignItems::Center,
+                    padding: UiRect::horizontal(px(12)), column_gap: px(11), ..default()
+                }).with_children(|main| {
+                    main.spawn((ScoreCrest, ImageNode::new(default_crest.clone()), Node {
+                        width: px(48), height: px(48), ..default()
+                    }));
+                    main.spawn((ScoreField::Team, Text::new("IND"), TextFont {
+                        font: display.clone(), font_size: 22.0, ..default()
+                    }, TextColor(Color::srgb(0.93, 0.95, 0.97)), text_shadow(), Node {
+                        width: px(52), ..default()
+                    }));
+                    main.spawn((ScoreField::Runs, Text::new("0/0"), TextFont {
+                        font: display.clone(), font_size: 39.0, ..default()
+                    }, TextColor(Color::WHITE), text_shadow(), Node {
+                        flex_grow: 1.0, ..default()
+                    }));
+                    main.spawn((Node {
+                        height: px(31), padding: UiRect::horizontal(px(11)),
+                        align_items: AlignItems::Center, border_radius: BorderRadius::all(px(3)),
+                        ..default()
+                    }, BackgroundColor(Color::srgba(0.20, 0.23, 0.29, 0.92))))
+                    .with_children(|overs| {
+                        overs.spawn((ScoreField::Overs, Text::new("0.0 OV"), TextFont {
+                            font: bold.clone(), font_size: 14.0, ..default()
+                        }, TextColor(Color::srgb(0.94, 0.95, 0.97))));
+                    });
+                });
+                c.spawn((ScoreAccent, Node {
+                    width: percent(100), height: px(27), align_items: AlignItems::Center,
+                    padding: UiRect::horizontal(px(12)), ..default()
+                }, BackgroundColor(Color::srgb(0.08, 0.38, 0.82))))
+                .with_children(|ribbon| {
+                    ribbon.spawn((ScoreField::Equation, Text::new("CURRENT RUN RATE  0.00"), TextFont {
+                        font: bold.clone(), font_size: 11.0, ..default()
+                    }, TextColor(Color::WHITE), text_shadow()));
+                });
+                c.spawn((Node {
+                    width: percent(100), height: px(31), align_items: AlignItems::Center,
+                    padding: UiRect::horizontal(px(12)), ..default()
+                }, BackgroundColor(Color::srgba(0.075, 0.09, 0.12, 0.98))))
+                .with_children(|batters| {
+                    batters.spawn((ScoreField::Batters, Text::new(""), TextFont {
+                        font: bold.clone(), font_size: 13.0, ..default()
+                    }, TextColor(Color::srgb(0.92, 0.94, 0.96))));
+                });
+                c.spawn((Node {
+                    width: percent(100), height: px(29), align_items: AlignItems::Center,
+                    justify_content: JustifyContent::SpaceBetween,
+                    padding: UiRect::horizontal(px(12)), ..default()
+                }, BackgroundColor(Color::srgba(0.035, 0.045, 0.065, 0.98))))
+                .with_children(|delivery| {
+                    delivery.spawn((ScoreField::Bowler, Text::new(""), TextFont {
+                        font: regular.clone(), font_size: 12.0, ..default()
+                    }, TextColor(Color::srgb(0.77, 0.81, 0.85))));
+                    delivery.spawn((ScoreField::Delivery, Text::new(""), TextFont {
+                        font: bold.clone(), font_size: 11.0, ..default()
+                    }, TextColor(Color::srgb(0.98, 0.72, 0.25))));
+                });
             });
 
-            // ---- big centre outcome banner ----
+            // ---- result sting, matching a replay/boundary television graphic ----
             p.spawn((
-                OutcomeText,
+                OutcomeRoot,
                 Node {
                     position_type: PositionType::Absolute,
-                    top: percent(28),
+                    top: percent(27),
                     width: percent(100),
                     justify_content: JustifyContent::Center,
                     ..default()
                 },
-                Text::new(""),
-                TextFont { font_size: 54.0, ..default() },
-                TextLayout::new_with_justify(Justify::Center),
-                TextColor(Color::srgb(1.0, 0.9, 0.3)),
                 Visibility::Hidden,
-            ));
+            )).with_children(|root| {
+                root.spawn((OutcomePanel, Node {
+                    min_width: px(390), height: px(76), align_items: AlignItems::Stretch,
+                    border: UiRect::all(px(1)), border_radius: BorderRadius::all(px(5)),
+                    overflow: Overflow::clip(), ..default()
+                }, BackgroundColor(Color::srgba(0.08, 0.055, 0.015, 0.96)),
+                BorderColor::all(Color::srgba(1.0, 0.78, 0.30, 0.55))))
+                .with_children(|panel| {
+                    panel.spawn((OutcomeAccent, Node { width: px(7), height: percent(100), ..default() },
+                        BackgroundColor(Color::srgb(0.98, 0.76, 0.24))));
+                    panel.spawn((Node {
+                        width: px(96), height: percent(100), align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center, ..default()
+                    }, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.22))))
+                    .with_children(|kind| {
+                        kind.spawn((OutcomeField::Kind, Text::new("BOUNDARY"), TextFont {
+                            font: bold.clone(), font_size: 11.0, ..default()
+                        }, TextColor(Color::srgb(0.98, 0.76, 0.24))));
+                    });
+                    panel.spawn(Node {
+                        flex_grow: 1.0, height: percent(100), align_items: AlignItems::Center,
+                        padding: UiRect::horizontal(px(22)), ..default()
+                    }).with_children(|message| {
+                        message.spawn((OutcomeField::Message, Text::new("FOUR"), TextFont {
+                            font: display.clone(), font_size: 31.0, ..default()
+                        }, TextColor(Color::WHITE), text_shadow()));
+                    });
+                });
+            });
 
-            // ---- bottom prompt ----
+            // ---- lower-third control / phase prompt ----
             p.spawn((
-                PromptText,
+                PromptRoot,
                 Node {
                     position_type: PositionType::Absolute,
-                    bottom: percent(7),
+                    bottom: px(24),
                     width: percent(100),
                     justify_content: JustifyContent::Center,
                     ..default()
                 },
-                Text::new(""),
-                TextFont { font_size: 21.0, ..default() },
-                TextColor(Color::WHITE),
-            ));
+                Visibility::Hidden,
+            )).with_children(|root| {
+                root.spawn((Node {
+                    min_width: px(520), height: px(39), align_items: AlignItems::Stretch,
+                    border: UiRect::all(px(1)), border_radius: BorderRadius::all(px(4)),
+                    overflow: Overflow::clip(), ..default()
+                }, BackgroundColor(Color::srgba(0.02, 0.03, 0.045, 0.94)),
+                BorderColor::all(Color::srgba(0.78, 0.84, 0.90, 0.30))))
+                .with_children(|panel| {
+                    panel.spawn((Node {
+                        width: px(112), align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center, ..default()
+                    }, BackgroundColor(Color::srgb(0.76, 0.55, 0.16))))
+                    .with_children(|kind| {
+                        kind.spawn((PromptField::Kind, Text::new("BATTING"), TextFont {
+                            font: bold.clone(), font_size: 11.0, ..default()
+                        }, TextColor(Color::srgb(0.04, 0.05, 0.06))));
+                    });
+                    panel.spawn(Node {
+                        flex_grow: 1.0, align_items: AlignItems::Center,
+                        padding: UiRect::horizontal(px(17)), ..default()
+                    }).with_children(|message| {
+                        message.spawn((PromptField::Message, Text::new(""), TextFont {
+                            font: bold.clone(), font_size: 13.0, ..default()
+                        }, TextColor(Color::srgb(0.94, 0.96, 0.98))));
+                    });
+                });
+            });
 
             // ---- match summary panel (only on MatchOver) ----
             p.spawn((
@@ -146,7 +314,7 @@ fn spawn_hud(mut commands: Commands) {
                 c.spawn((
                     SummaryText,
                     Text::new(""),
-                    TextFont { font_size: 20.0, ..default() },
+                    TextFont { font: bold.clone(), font_size: 20.0, ..default() },
                     TextColor(Color::WHITE),
                     TextLayout::new_with_justify(Justify::Center),
                 ));
@@ -210,45 +378,31 @@ fn update_scoreboard(
     am: Option<Res<ActiveMatch>>,
     wd: Res<WorldData>,
     del: Res<CurrentDelivery>,
-    mut score_q: Query<&mut Text, With<ScoreText>>,
-    mut info_q: Query<
-        &mut Text,
-        (With<InfoText>, Without<ScoreText>, Without<PromptText>),
-    >,
+    assets: Res<AssetServer>,
+    mut text_q: Query<(&ScoreField, &mut Text)>,
+    mut accent_q: Query<&mut BackgroundColor, With<ScoreAccent>>,
+    mut crest_q: Query<&mut ImageNode, With<ScoreCrest>>,
 ) {
     let Some(am) = am else { return };
-    let Ok(mut score) = score_q.single_mut() else { return };
     let inns = &am.state.innings;
     let bat = am.batting_team(&wd);
-    **score = format!(
-        "{}  {}/{}   ({}.{} ov)",
-        bat.short,
-        inns.runs,
-        inns.wickets,
-        inns.legal_balls / 6,
-        inns.legal_balls % 6,
-    );
-
-    let Ok(mut info) = info_q.single_mut() else { return };
-    let team = bat;
-    if team.players.get(inns.striker).is_none()
-        || team.players.get(inns.non_striker).is_none()
+    if bat.players.get(inns.striker).is_none()
+        || bat.players.get(inns.non_striker).is_none()
     {
         return;
     }
-    let s = &team.players[inns.striker];
-    let ns = &team.players[inns.non_striker];
+    let s = &bat.players[inns.striker];
+    let ns = &bat.players[inns.non_striker];
     let sc = inns.card_of(inns.striker);
     let nc = inns.card_of(inns.non_striker);
 
-    let bowler_line = match inns.current_bowler {
+    let bowler = match inns.current_bowler {
         Some(b) => {
             let bp = &am.fielding_team(&wd).players[b];
             let bc = inns.bowler_card_of(b);
             format!(
-                "Bowling: {} [{}]  {}/{} ({}.{})",
-                bp.name,
-                bp.style.map_or("-", |st| st.label()),
+                "BOWLER  {}   {}/{}  ({}.{})",
+                bp.name.to_uppercase(),
                 bc.wickets,
                 bc.runs,
                 bc.balls / 6,
@@ -258,30 +412,59 @@ fn update_scoreboard(
         None => String::new(),
     };
 
-    let target_line = match inns.target {
+    let equation = match inns.target {
         Some(tg) => {
-            let need = tg.saturating_sub(inns.runs) as f32;
-            let overs_left = ((am.state.overs * 6).saturating_sub(inns.legal_balls) as f32 / 6.0).max(0.1);
+            let need = tg.saturating_sub(inns.runs);
+            let balls_left = (am.state.overs * 6).saturating_sub(inns.legal_balls);
+            let required = if balls_left == 0 {
+                0.0
+            } else {
+                need as f32 * 6.0 / balls_left as f32
+            };
             format!(
-                "  |  Target {} · need {:.0} · RR req {:.2}",
-                tg, tg.saturating_sub(inns.runs), need / overs_left
+                "TARGET {tg}   •   NEED {need} FROM {balls_left}   •   RRR {required:.2}"
             )
         }
-        None => format!("  |  CRR {:.2}", inns.run_rate()),
+        None => format!("CURRENT RUN RATE   {:.2}", inns.run_rate()),
     };
 
-    **info = format!(
-        "*{} {}({})   {} {}({})\n{}\n{}{}",
-        s.name,
-        sc.runs,
-        sc.balls,
-        ns.name,
-        nc.runs,
-        nc.balls,
-        bowler_line,
-        del.0.as_ref().map_or(String::new(), |p| p.label.clone()),
-        target_line,
+    let innings_label = if inns.target.is_some() {
+        "2ND INNINGS  •  CHASE"
+    } else {
+        "1ST INNINGS"
+    };
+    let batters = format!(
+        "●  {}  {} ({})       {}  {} ({})",
+        s.name.to_uppercase(), sc.runs, sc.balls,
+        ns.name.to_uppercase(), nc.runs, nc.balls,
     );
+    let delivery = del
+        .0
+        .as_ref()
+        .map(|plan| plan.label.to_uppercase())
+        .unwrap_or_default();
+
+    for (field, mut text) in &mut text_q {
+        **text = match field {
+            ScoreField::Innings => innings_label.into(),
+            ScoreField::Team => bat.short.to_uppercase(),
+            ScoreField::Runs => format!("{}/{}", inns.runs, inns.wickets),
+            ScoreField::Overs => format!("{}.{} OV", inns.legal_balls / 6, inns.legal_balls % 6),
+            ScoreField::Equation => equation.clone(),
+            ScoreField::Batters => batters.clone(),
+            ScoreField::Bowler => bowler.clone(),
+            ScoreField::Delivery => delivery.clone(),
+        };
+    }
+    for mut background in &mut accent_q {
+        background.0 = bat.primary_color;
+    }
+    if let Ok(mut crest) = crest_q.single_mut() {
+        *crest = ImageNode::new(crate::render::load_team_crest(
+            &assets,
+            &bat.crest_asset(),
+        ));
+    }
 }
 
 fn update_prompt(

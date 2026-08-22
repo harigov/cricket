@@ -55,12 +55,12 @@ fn bone_kind_for_name(name: &str) -> Option<BoneKind> {
 
 #[derive(Component)] pub struct Bat;
 
-/// Material handles carried by the figure root while its glTF scene streams in.
-/// The scene's two meshes are recolored when they become available.
+/// Team colours carried by the figure root while its glTF scene streams in.
+/// The scene's meshes keep their original PBR textures; we only tint them.
 #[derive(Component, Clone)]
 pub struct TeamKit {
-    primary: Handle<StandardMaterial>,
-    secondary: Handle<StandardMaterial>,
+    primary_color: Color,
+    secondary_color: Color,
 }
 
 #[derive(Component)]
@@ -81,17 +81,6 @@ pub fn spawn_figure(
     kind: FigureKind,
 ) -> Entity {
     let scene = crate::render::load_xbot_scene(asset_server);
-    let primary = materials.add(StandardMaterial {
-        base_color: team.primary_color,
-        perceptual_roughness: 0.74,
-        ..Default::default()
-    });
-    let secondary = materials.add(StandardMaterial {
-        base_color: team.secondary_color,
-        metallic: 0.08,
-        perceptual_roughness: 0.62,
-        ..Default::default()
-    });
     let crest = materials.add(StandardMaterial {
         base_color_texture: Some(crate::render::load_team_crest(
             asset_server,
@@ -105,7 +94,7 @@ pub fn spawn_figure(
     let fig = commands.spawn((
         Figure { kind },
         Anim::default(),
-        TeamKit { primary, secondary },
+        TeamKit { primary_color: team.primary_color, secondary_color: team.secondary_color },
         Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(facing_deg.to_radians())),
         Visibility::default(),
         InheritedVisibility::default(),
@@ -131,18 +120,22 @@ pub fn spawn_figure(
     fig
 }
 
-/// Replace Xbot's stock surface and joint materials with team kit colors once
-/// the asynchronously instantiated glTF mesh entities appear.
+/// Keep Xbot's realistic PBR skin/hair textures; only tint the kit.
+/// Previously the whole mesh was replaced with a flat team colour, which made
+/// players look like plastic mannequins. Now we keep the original
+/// `base_color_texture` (skin, hair) and only tint the jersey/trousers
+/// subtly, preserving normal/roughness and the team crest badge.
 pub fn apply_team_kit_materials(
     mut commands: Commands,
     kits: Query<&TeamKit>,
     parents: Query<&ChildOf>,
     mut meshes: Query<
-        (Entity, &Name, &mut MeshMaterial3d<StandardMaterial>),
+        (Entity, &Name, &MeshMaterial3d<StandardMaterial>),
         Without<KitStyled>,
     >,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for (entity, name, mut material) in &mut meshes {
+    for (entity, name, mat_handle) in &mut meshes {
         let mut current = parents.get(entity).ok().map(ChildOf::parent);
         let mut kit = None;
         for _ in 0..16 {
@@ -154,11 +147,31 @@ pub fn apply_team_kit_materials(
             current = parents.get(parent).ok().map(ChildOf::parent);
         }
         let Some(kit) = kit else { continue };
-        material.0 = if name.as_str().contains("Joints") {
-            kit.secondary.clone()
-        } else {
-            kit.primary.clone()
-        };
+        // Only tint the body surfaces; keep skin/hair texture detail.
+        // Beta_Joints are small joint meshes – tint with secondary, Beta_Surface
+        // is the main body – tint lightly with primary so skin stays realistic.
+        if let Some(mat) = materials.get_mut(&mat_handle.0) {
+            let is_joints = name.as_str().contains("Joints");
+            let team_col = if is_joints { kit.secondary_color } else { kit.primary_color };
+            // Preserve base_color_texture (skin/hair) and only modulate base_color
+            // with a subtle tint (0.22 lerp) so the PBR texture detail remains.
+            let base_srgba = team_col.to_srgba();
+            let tint = Color::srgba(base_srgba.red, base_srgba.green, base_srgba.blue, 1.0);
+            // Keep original texture, just set a light tint – for Beta_Surface we
+            // use a very light tint so skin is not dyed, for joints a stronger tint.
+            let lerp = if is_joints { 0.35 } else { 0.18 };
+            let orig = mat.base_color.to_srgba();
+            mat.base_color = Color::srgba(
+                orig.red * (1.0 - lerp) + base_srgba.red * lerp,
+                orig.green * (1.0 - lerp) + base_srgba.green * lerp,
+                orig.blue * (1.0 - lerp) + base_srgba.blue * lerp,
+                1.0,
+            );
+            // Make fabric a touch rougher than skin for realism
+            mat.perceptual_roughness = if is_joints { 0.82 } else { 0.78 };
+            // Keep the badge unlit? No, let PBR handle it.
+            let _ = tint;
+        }
         commands.entity(entity).insert(KitStyled);
     }
 }

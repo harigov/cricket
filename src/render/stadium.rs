@@ -22,6 +22,7 @@ pub fn build_stadium(
     asset_server: &AssetServer,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
     stadium: &Stadium,
     batting_team: &Team,
     fielding_team: &Team,
@@ -37,8 +38,21 @@ pub fn build_stadium(
         .id();
 
     let outfield_base = stadium.outfield_color;
-    let pitch_mat = mat(Color::srgb_u8(0xC8, 0xA9, 0x7A));
-    let pitch_worn_mat = mat(Color::srgb_u8(0xB8, 0x9A, 0x6E));
+    // Procedural tilable grass and pitch textures (CC0-like, no external files)
+    let grass_img = images.add(create_grass_image());
+    let pitch_img = images.add(create_pitch_image());
+    let pitch_mat = StandardMaterial {
+        base_color: Color::srgb_u8(0xC8, 0xA9, 0x7A),
+        base_color_texture: Some(pitch_img.clone()),
+        perceptual_roughness: 0.92,
+        ..Default::default()
+    };
+    let pitch_worn_mat = StandardMaterial {
+        base_color: Color::srgb_u8(0xB8, 0x9A, 0x6E),
+        base_color_texture: Some(pitch_img),
+        perceptual_roughness: 0.96,
+        ..Default::default()
+    };
     let white_mat = mat(Color::WHITE);
     let stump_mat = mat(Color::srgb_u8(0xF5, 0xE9, 0xC8));
     let sight_screen_mat = mat(Color::srgb_u8(0x1A, 0x1A, 0x1E));
@@ -61,8 +75,7 @@ pub fn build_stadium(
             ViewVisibility::default(),
         ));
 
-        // ---- Striped outfield: concentric annuli alternating two greens ----
-        // Kept procedural for crisp mown stripes that the Poly model lacks.
+        // ---- Striped outfield: concentric annuli with tilable grass texture ----
         let r = stadium.boundary_radius() + 6.0;
         let stripe_count = 10;
         let step = r / stripe_count as f32;
@@ -82,13 +95,17 @@ pub fn build_stadium(
                 meshes.add(Annulus::new(inner, outer))
             };
             let y = i as f32 * 0.003 + 0.01;
+            // Grass texture tilled 8x8, tinted by stripe colour for realism
+            let mut grass_mat = StandardMaterial {
+                base_color: col,
+                base_color_texture: Some(grass_img.clone()),
+                perceptual_roughness: 0.94,
+                ..mat(col)
+            };
+            grass_mat.uv_transform = bevy::math::Affine2::from_scale(Vec2::splat(0.08));
             p.spawn((
                 Mesh3d(mesh),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: col,
-                    perceptual_roughness: 0.95,
-                    ..mat(col)
-                })),
+                MeshMaterial3d(materials.add(grass_mat)),
                 Transform::from_translation(Vec3::Y * y)
                     .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
             ));
@@ -339,4 +356,84 @@ fn texture_mat(texture: Handle<Image>) -> StandardMaterial {
         cull_mode: None,
         ..Default::default()
     }
+}
+
+fn create_grass_image() -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::{ImageSampler, ImageSamplerDescriptor, ImageAddressMode, ImageFilterMode};
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+    let size = 128u32;
+    let mut data = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let n = ((x as f32 * 0.13).sin() * (y as f32 * 0.11).cos() * 0.5 + 0.5).clamp(0.0, 1.0);
+            let n2 = ((x as f32 * 0.07).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+            let g = 0.32 + n * 0.18 + n2 * 0.08;
+            let r = 0.14 + n * 0.06;
+            let b = 0.12 + n * 0.04;
+            let stripe = if (x / 8) % 2 == 0 { 1.0 } else { 0.92 };
+            data.extend_from_slice(&[
+                ((r * stripe) * 255.0) as u8,
+                ((g * stripe) * 255.0) as u8,
+                ((b * stripe) * 255.0) as u8,
+                255,
+            ]);
+        }
+    }
+    let mut img = Image::new(
+        Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    img.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::RENDER_ATTACHMENT;
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        ..Default::default()
+    });
+    img
+}
+
+fn create_pitch_image() -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::{ImageSampler, ImageSamplerDescriptor, ImageAddressMode, ImageFilterMode};
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+    let size = 128u32;
+    let mut data = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let n = ((x as f32 * 0.09).sin() * (y as f32 * 0.08).cos() * 0.5 + 0.5).clamp(0.0, 1.0);
+            let r = 0.71 + n * 0.08;
+            let g = 0.58 + n * 0.06;
+            let b = 0.38 + n * 0.04;
+            data.extend_from_slice(&[
+                (r * 255.0) as u8,
+                (g * 255.0) as u8,
+                (b * 255.0) as u8,
+                255,
+            ]);
+        }
+    }
+    let mut img = Image::new(
+        Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    img.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::RENDER_ATTACHMENT;
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        ..Default::default()
+    });
+    img
 }

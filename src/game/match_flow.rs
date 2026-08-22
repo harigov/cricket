@@ -93,6 +93,7 @@ pub fn spawn_match_scene(
     asset_server: &AssetServer,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
     wd: &WorldData,
     am: &ActiveMatch,
 ) -> MatchScene {
@@ -100,7 +101,7 @@ pub fn spawn_match_scene(
     let bat_team = am.batting_team(wd);
     let fld_team = am.fielding_team(wd);
     let stadium_root = crate::render::stadium::build_stadium(
-        commands, asset_server, meshes, materials, stadium, bat_team, fld_team);
+        commands, asset_server, meshes, materials, images, stadium, bat_team, fld_team);
 
     commands.insert_resource(BoundaryRadius(stadium.boundary_radius()));
 
