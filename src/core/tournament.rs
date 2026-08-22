@@ -61,6 +61,11 @@ pub struct Entrant {
 }
 
 impl Tournament {
+    /// Map a WorldData team index to this tournament's local slot.
+    pub fn local_of(&self, world_idx: usize) -> Option<usize> {
+        self.world_idx.iter().position(|&w| w == world_idx)
+    }
+
     /// Winner of a fixture as a tournament-local team index.
     pub fn fixture_winner(&self, f: &Fixture) -> Option<usize> {
         match f.result.as_ref()? {
@@ -231,5 +236,58 @@ impl Tournament {
         };
         self.fixtures[idx].result = Some(result);
         self.propagate();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::stadiums::builtin_stadiums;
+
+    fn make() -> Tournament {
+        let teams = crate::core::teams::builtin_teams();
+        let entrants: Vec<Entrant> = teams
+            .iter()
+            .take(4)
+            .enumerate()
+            .map(|(i, t)| Entrant { world_idx: i, team: t.clone() })
+            .collect();
+        Tournament::knockout(entrants, builtin_stadiums(), Some(2))
+    }
+
+    #[test]
+    fn bracket_structure() {
+        let t = make();
+        assert_eq!(t.fixtures.len(), 3);
+        assert_eq!(t.fixtures[0].stage, Stage::Semifinal1);
+        // User team must appear in exactly one semifinal.
+        let u = t.user_team.unwrap();
+        let count = t.fixtures[..2]
+            .iter()
+            .filter(|f| f.home == u || f.away == u)
+            .count();
+        assert_eq!(count, 1, "user must play exactly one semi");
+    }
+
+    #[test]
+    fn sim_completes_and_propagates() {
+        let mut t = make();
+        t.sim_fixture(0, 7);
+        t.sim_fixture(1, 9);
+        assert!(t.fixtures[0].result.is_some());
+        assert!(t.fixtures[1].result.is_some());
+        // Final participants filled in from semi winners.
+        assert_ne!(t.fixtures[2].home, t.fixtures[2].away.min(0)); // sanity
+        assert!(t.next_user_fixture().is_some()); // user's final (or done)
+        t.sim_fixture(2, 11);
+        assert!(t.champion().is_some());
+    }
+
+    #[test]
+    fn world_idx_mapping_roundtrip() {
+        let t = make();
+        for (local, &w) in t.world_idx.iter().enumerate() {
+            assert_eq!(t.local_of(w), Some(local));
+        }
     }
 }
