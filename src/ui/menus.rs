@@ -2,8 +2,9 @@
 //! bracket screen. Keyboard/gamepad driven (see input::Action mapping).
 
 use crate::core::tournament::{Entrant, Fixture, Stage, Tournament};
+use crate::game::audio::AudioSettings;
 use crate::game::*;
-use crate::input::{Action, PlayerInput};
+use crate::input::{key_label, Action, KeyBindings, PlayerInput, RebindState};
 use crate::state::AppState;
 use bevy::prelude::*;
 
@@ -17,7 +18,7 @@ pub enum Screen {
     SetupOvers,
     SetupStadium,
     SetupBatFirst,
-    Controls,
+    Settings,
     Bracket,
 }
 
@@ -126,7 +127,7 @@ fn screen_title(ms: &MenuState) -> &'static str {
         Screen::SetupOvers => "MATCH LENGTH",
         Screen::SetupStadium => "SELECT STADIUM",
         Screen::SetupBatFirst => "TOSS",
-        Screen::Controls => "CONTROLS",
+        Screen::Settings => "SETTINGS",
         Screen::Bracket => "TOURNAMENT BRACKET",
     }
 }
@@ -135,12 +136,15 @@ fn screen_items(
     ms: &MenuState,
     wd: &WorldData,
     ct: &CurrentTournament,
+    bindings: &KeyBindings,
+    audio: &AudioSettings,
+    rebind: &RebindState,
 ) -> Vec<String> {
     match ms.screen {
         Screen::Main => vec![
             "Quick Match".into(),
             "Tournament".into(),
-            "Controls".into(),
+            "Settings".into(),
             "Quit".into(),
         ],
         Screen::SetupTeam | Screen::SetupOpp => wd
@@ -159,24 +163,48 @@ fn screen_items(
             .chain(std::iter::once("Random venue".into()))
             .collect(),
         Screen::SetupBatFirst => vec!["We will BAT first".into(), "We will BOWL first".into()],
-        Screen::Controls => CONTROLS_LINES.iter().map(|s| s.to_string()).collect(),
+        Screen::Settings => settings_lines(bindings, audio, rebind),
         Screen::Bracket => bracket_lines(ct),
     }
 }
 
-const CONTROLS_LINES: &[&str] = &[
-    "BATTING:",
-    "  SPACE / A ......... play shot (time it as the ball arrives)",
-    "  hold SHIFT / LT ... loft the shot (risky)",
-    "  ← → / stick ....... aim leg side or off side",
-    "",
-    "BOWLING:",
-    "  SPACE / A ......... lock length, then lock line",
-    "",
-    "GENERAL:",
-    "  W/S or ↑↓ ......... navigate menus",
-    "  ESC / B ........... back",
+const SETTINGS_ACTIONS: &[(Action, &str)] = &[
+    (Action::Confirm, "Confirm / Shot"),
+    (Action::Cancel, "Cancel / Back"),
+    (Action::Loft, "Loft"),
+    (Action::Sprint, "Sprint"),
+    (Action::Next, "Menu Down"),
+    (Action::Prev, "Menu Up"),
+    (Action::Left, "Aim Left"),
+    (Action::Right, "Aim Right"),
+    (Action::CycleType, "Cycle Delivery"),
+    (Action::CycleCam, "Cycle Camera"),
 ];
+
+fn settings_lines(
+    bindings: &KeyBindings,
+    audio: &AudioSettings,
+    rebind: &RebindState,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    out.push(format!("Master Volume : {:>3}%  (A/D to adjust)", (audio.master * 100.0) as i32));
+    out.push(format!("SFX Volume    : {:>3}%  (A/D to adjust)", (audio.sfx * 100.0) as i32));
+    for (action, label) in SETTINGS_ACTIONS {
+        let key_str = if rebind.0 == Some(*action) {
+            "Press any key...".to_string()
+        } else {
+            bindings
+                .map
+                .get(action)
+                .map(|k| key_label(*k))
+                .unwrap_or_else(|| "-".into())
+        };
+        out.push(format!("{label:16} : {key_str}"));
+    }
+    out.push("Reset to defaults".into());
+    out.push("Back".into());
+    out
+}
 
 fn bracket_lines(ct: &CurrentTournament) -> Vec<String> {
     let Some(t) = &ct.0 else {
@@ -230,6 +258,9 @@ fn refresh_menu(
     ms: Res<MenuState>,
     wd: Res<WorldData>,
     mut ct: ResMut<CurrentTournament>,
+    bindings: Res<KeyBindings>,
+    audio: Res<AudioSettings>,
+    rebind: Res<RebindState>,
     root_q: Query<Entity, With<MenuList>>,
     children_q: Query<&Children>,
     mut commands: Commands,
@@ -268,10 +299,9 @@ fn refresh_menu(
             },
         )).with_children(|items| {
             for (i, line) in
-                screen_items(&ms, &wd, &ct).into_iter().enumerate()
+                screen_items(&ms, &wd, &ct, &bindings, &audio, &rebind).into_iter().enumerate()
             {
-                let selectable =
-                    !matches!(ms.screen, Screen::Bracket | Screen::Controls);
+                let selectable = !matches!(ms.screen, Screen::Bracket);
                 let selected = i == ms.sel && selectable;
                 items.spawn((
                     Node {
@@ -307,9 +337,13 @@ fn refresh_menu(
 fn handle_menu_input(
     mut ms: ResMut<MenuState>,
     input: Res<PlayerInput>,
+    keys: Res<ButtonInput<KeyCode>>,
     wd: Res<WorldData>,
     mut ct: ResMut<CurrentTournament>,
     mut af: ResMut<ActiveFixture>,
+    mut bindings: ResMut<KeyBindings>,
+    mut rebind: ResMut<RebindState>,
+    mut audio: ResMut<AudioSettings>,
     mut next_state: ResMut<NextState<AppState>>,
     mut exit: MessageWriter<AppExit>,
     mut commands: Commands,
@@ -336,17 +370,78 @@ fn handle_menu_input(
                         ms.screen = SetupTeam;
                         ms.sel = ms.team;
                     }
-                    2 => { ms.screen = Controls; }
+                    2 => { ms.screen = Settings; }
                     _ => {
                         exit.write(AppExit::Success);
                     }
                 }
             }
         }
-        Controls => {
-            if input.pressed(Action::Confirm) || input.pressed(Action::Cancel) {
-                ms.screen = Main;
-                ms.sel = 0;
+        Settings => {
+            // Rebind capture mode
+            if let Some(action) = rebind.0 {
+                if input.pressed(Action::Cancel) {
+                    rebind.0 = None;
+                } else if let Some(&k) = keys.get_just_pressed().next() {
+                    // Ignore pure modifier presses
+                    if !matches!(
+                        k,
+                        KeyCode::ShiftLeft
+                            | KeyCode::ShiftRight
+                            | KeyCode::ControlLeft
+                            | KeyCode::ControlRight
+                            | KeyCode::AltLeft
+                            | KeyCode::AltRight
+                    ) {
+                        bindings.map.insert(action, k);
+                        bindings.save();
+                        rebind.0 = None;
+                    }
+                }
+                return;
+            }
+            // Navigation among 14 rows
+            navigate_list(&input, &mut ms.sel, 14);
+            // Volume sliders: rows 0 and 1
+            if ms.sel == 0 || ms.sel == 1 {
+                let delta = if input.pressed(Action::Right) {
+                    0.05
+                } else if input.pressed(Action::Left) {
+                    -0.05
+                } else {
+                    0.0
+                };
+                if delta != 0.0 {
+                    if ms.sel == 0 {
+                        audio.master = (audio.master + delta).clamp(0.0, 1.0);
+                    } else {
+                        audio.sfx = (audio.sfx + delta).clamp(0.0, 1.0);
+                    }
+                }
+            }
+            if input.pressed(Action::Confirm) {
+                match ms.sel {
+                    0 | 1 => {} // volumes handled via Left/Right
+                    2..=11 => {
+                        let idx = ms.sel - 2;
+                        if let Some((action, _)) = SETTINGS_ACTIONS.get(idx) {
+                            rebind.0 = Some(*action);
+                        }
+                    }
+                    12 => {
+                        // Reset to defaults
+                        *bindings = KeyBindings::default();
+                        bindings.save();
+                        audio.master = 0.85;
+                        audio.sfx = 0.9;
+                    }
+                    _ => {
+                        // Back
+                        back_to_main(&mut ms);
+                    }
+                }
+            } else if input.pressed(Action::Cancel) {
+                back_to_main(&mut ms);
             }
         }
         SetupTeam => {
@@ -455,7 +550,8 @@ fn screen_item_count(ms: &MenuState, wd: &WorldData) -> usize {
         Screen::SetupOvers => OVERS_CHOICES.len(),
         Screen::SetupStadium => wd.stadiums.len() + 1,
         Screen::SetupBatFirst => 2,
-        Screen::Controls | Screen::Bracket => 0,
+        Screen::Settings => 14,
+        Screen::Bracket => 0,
     }
 }
 

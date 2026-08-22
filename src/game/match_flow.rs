@@ -358,20 +358,59 @@ pub fn build_plan(
     }
 }
 
-/// AI bowler plan with skill-based scatter.
+/// AI bowler plan with skill-based scatter and situational variety.
 fn ai_plan(bowler: &Player, pitch: crate::core::stadiums::PitchType) -> DeliveryPlan {
     let style = bowler.style.unwrap_or(BowlStyle::FastMedium);
     let skill = bowler.bowling as f32 / 100.0;
     let scatter = (1.25 - skill) * 0.55;
-    let line = gauss() * 0.30 * scatter.max(0.25);
-    // Spinners hunt the stumps; quick mix lengths.
+    // Line: usually tight, occasionally wider to set up
+    let line = gauss() * 0.32 * scatter.max(0.25);
+
+    // Length variety: yorkers, bouncers, and pitch-aware fuller/shorter bias
     let length = match style {
-        s if s.is_spin() => 6.5 + gauss() * 2.0 + pitch.turn_mul().min(1.2),
-        _ => 7.5 + gauss() * 2.8,
+        s if s.is_spin() => {
+            let roll = unit();
+            if roll < 0.14 {
+                3.2 + unit() * 1.6 // arm ball / yorker-ish
+            } else if roll < 0.82 {
+                6.2 + gauss() * 1.7 + pitch.turn_mul() * 0.22
+            } else {
+                9.2 + unit() * 2.4
+            }
+        }
+        _ => {
+            let roll = unit();
+            if roll < 0.09 {
+                2.0 + unit() * 1.3 // yorker
+            } else if roll < 0.20 {
+                12.2 + unit() * 1.6 // bouncer
+            } else {
+                7.0 + gauss() * 2.6
+            }
+        }
     }
-    .clamp(2.0, 14.0);
-    let mut plan = build_plan(style, line, length);
-    plan.speed *= 0.94 + unit() * 0.12;
+    .clamp(2.0, 14.0)
+        + match pitch {
+            crate::core::stadiums::PitchType::Green => -0.35,
+            crate::core::stadiums::PitchType::Dusty => 0.45,
+            _ => 0.0,
+        };
+
+    let mut plan = build_plan(style, line, length.clamp(2.0, 14.0));
+    // Speed variation including slower balls for seamers
+    let mut speed_mul = 0.94 + unit() * 0.14;
+    if !style.is_spin() && unit() < 0.13 {
+        speed_mul *= 0.75;
+        plan.label = format!("{} (slower)", plan.label);
+    }
+    // Extra swing on green tops occasionally
+    if matches!(style, BowlStyle::Fast | BowlStyle::FastMedium)
+        && pitch == crate::core::stadiums::PitchType::Green
+        && unit() < 0.32
+    {
+        plan.swing *= 1.7;
+    }
+    plan.speed *= speed_mul;
     plan.wide = plan.line_z.abs() > 1.35;
     plan
 }
@@ -533,26 +572,57 @@ pub fn sys_shot_input(
             attempt.dir_x = input.move_vec.x;
         }
     } else if !attempt.ai_scheduled && rel.t > rel.t_arrive - 0.45 {
-        // AI batter: decide once, just before the ball arrives.
+        // AI batter: line/length aware decision
         attempt.ai_scheduled = true;
         if plan.wide {
-            return; // leaves anything too far outside off
+            return;
         }
         let batsman = am.striker(&wd);
         let q = plan.quality_vs_batsman();
         let skill = batsman.batting as f32 / 100.0;
-        let sigma = (0.05 + (1.0 - q) * 0.10 - (skill - 0.7) * 0.04)
-            .clamp(0.03, 0.30);
-        let agg = chase_pressure(am.state.innings.target, am.state.innings.runs,
-            am.state.innings.legal_balls);
-        let swing_prob = (0.55 + agg * 0.4 - q * 0.35).clamp(0.2, 0.97);
+        // Fuller / good-length balls are easier to time; short balls harder
+        let length_factor = if plan.length_from_stumps < 4.5 {
+            0.04
+        } else if plan.length_from_stumps > 11.0 {
+            0.025
+        } else {
+            0.0
+        };
+        let sigma = (0.045 + (1.0 - q) * 0.10 - (skill - 0.7) * 0.04 + length_factor)
+            .clamp(0.028, 0.30);
+        let agg = chase_pressure(
+            am.state.innings.target,
+            am.state.innings.runs,
+            am.state.innings.legal_balls,
+        );
+        // Defend good balls more often unless chasing hard
+        let defend_bias = if q > 0.75 && agg < 0.6 { 0.18 } else { 0.0 };
+        let swing_prob = (0.58 + agg * 0.38 - q * 0.32 - defend_bias).clamp(0.18, 0.96);
         if coin(swing_prob) {
             attempt.pressed = true;
             attempt.offset = Some((gauss() * sigma).clamp(-0.5, 0.5));
-            attempt.loft = coin((agg * 0.5 * (1.25 - q)).clamp(0.05, 0.9));
-            attempt.dir_x = (unit() * 2.0 - 1.0)
-                * (0.4 + agg * 0.6)
-                * if unit() < 0.55 { -1.0 } else { 1.0 };
+            // Direction mapped to line & length
+            let mut preferred = 0.0f32;
+            if plan.line_z > 0.45 {
+                preferred = 0.55; // wide off -> square through off
+            } else if plan.line_z < -0.30 {
+                preferred = -0.55; // leg stump -> flick / pull leg side
+            } else if plan.length_from_stumps < 4.5 {
+                preferred = 0.10; // yorker -> straight
+            } else if plan.length_from_stumps > 11.0 {
+                preferred = -0.40; // bouncer -> pull leg side
+                // short balls lofted more often
+                attempt.loft = coin((0.35 + agg * 0.45).clamp(0.1, 0.85));
+            }
+            if plan.length_from_stumps <= 11.0 && plan.length_from_stumps >= 4.5 {
+                // good length: loft only when chasing or bad ball
+                attempt.loft = coin((agg * 0.45 * (1.25 - q)).clamp(0.05, 0.88));
+            } else if attempt.loft {
+                // already set for short balls; keep
+            }
+            // Add variation around preferred
+            let spread = 0.32 + (1.0 - skill) * 0.18;
+            attempt.dir_x = (preferred + (unit() * 2.0 - 1.0) * spread).clamp(-1.0, 1.0);
         }
     }
 }
@@ -932,6 +1002,34 @@ fn finalize_ball(
     });
 }
 
+pub fn wicket_shake_trigger(
+    phase: Res<Phase>,
+    mut rig: ResMut<CameraRig>,
+    mut last_text: Local<String>,
+) {
+    if let PhaseEnum::ResultPause { text, .. } = &phase.0 {
+        if text != &*last_text {
+            let upper = text.to_uppercase();
+            if upper.contains("BOWLED")
+                || upper.contains("CAUGHT")
+                || upper.contains("TAKEN")
+                || upper.contains("RUN OUT")
+                || upper.contains("WICKET")
+            {
+                rig.shake = 1.4;
+            } else if upper.contains("FOUR") || upper.contains("SIX") || upper.contains("MAXIMUM") {
+                rig.shake = 0.5;
+            }
+            *last_text = text.clone();
+        }
+    } else {
+        // clear when leaving result pause so next wicket retriggers
+        if !last_text.is_empty() && !matches!(phase.0, PhaseEnum::ResultPause { .. }) {
+            // keep for re-entry detection; do nothing
+        }
+    }
+}
+
 fn enter_ready(commands: &mut Commands, phase_enum: &mut PhaseEnum) {
     *phase_enum = PhaseEnum::ReadyToBall { t: 0.0 };
     reset_delivery_resources(commands);
@@ -1041,8 +1139,8 @@ pub fn sys_runners(
                 }
                 let u = p.elapsed / RUN_SECONDS;
                 let legs = u.floor();
+                let bob = (p.elapsed * 9.5).sin().abs() * 0.09;
                 if legs as i32 >= p.runs_anim as i32 {
-                    // Made ground: settle at the appropriate crease.
                     let done = legs as i32 % 2 == 1;
                     tf.translation = Vec3::new(
                         if done { n_crease } else { s_crease },
@@ -1057,7 +1155,7 @@ pub fn sys_runners(
                 let x = flerp(s_crease, n_crease, tri);
                 let z = geo::BATSMAN_POS.y
                     + if legs as i32 % 2 == 0 { 0.45 } else { -0.45 };
-                tf.translation = Vec3::new(x, 0.0, z);
+                tf.translation = Vec3::new(x, bob, z);
                 anim.state = AnimState::Run { t: p.elapsed };
             }
             FigureKind::NonStriker => {
@@ -1066,6 +1164,7 @@ pub fn sys_runners(
                 }
                 let u = p.elapsed / RUN_SECONDS;
                 let legs = u.floor();
+                let bob = (p.elapsed * 9.5 + 0.6).sin().abs() * 0.09;
                 if legs as i32 >= p.runs_anim as i32 {
                     let done = legs as i32 % 2 == 1;
                     tf.translation = Vec3::new(
@@ -1080,7 +1179,7 @@ pub fn sys_runners(
                 let tri = if legs as i32 % 2 == 0 { frac } else { 1.0 - frac };
                 let x = flerp(n_crease, s_crease, tri);
                 let z = if legs as i32 % 2 == 0 { 0.45 } else { -0.45 };
-                tf.translation = Vec3::new(x, 0.0, z);
+                tf.translation = Vec3::new(x, bob, z);
                 anim.state = AnimState::Run { t: p.elapsed };
             }
             _ => {}

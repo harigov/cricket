@@ -29,13 +29,18 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "sysinfo_plugin",
     "tonemapping_luts",
     "vorbis",
+    "wav",
     "webgl2",
     "x11",
     "ktx2",
     "zstd_rust",
     "debug",
+    "serialize",
 ] }
 rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
 
 # Compile dependencies with optimizations even in dev builds,
 # but keep our own crate fast to compile.

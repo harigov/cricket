@@ -40,6 +40,7 @@ fn main() {
         .add_plugins((
             input::InputPlugin,
             game::GameplayPlugin,
+            game::audio::AudioPlugin,
             render::RenderPlugin,
             ui::UiPlugin,
         ))
@@ -82,6 +83,22 @@ fn main() {
         )
         .add_systems(
             Update,
+            (
+                render::camera_rig::camera_toggle_system,
+                game::match_flow::wicket_shake_trigger,
+            )
+                .run_if(in_live_match()),
+        )
+        .add_systems(
+            Update,
+            (
+                game::ball::trail_spawn_system,
+                game::ball::trail_fade_system,
+            )
+                .run_if(in_live_match()),
+        )
+        .add_systems(
+            Update,
             ui::menus::handle_match_exit.run_if(in_state(AppState::InMatch)),
         )
         .add_systems(Update, debug_screenshot)
@@ -119,22 +136,21 @@ fn autotest_drive(
     time: Res<Time<bevy::time::Real>>,
     mut input: ResMut<input::PlayerInput>,
     mut commands: Commands,
+    mut exit: MessageWriter<AppExit>,
     mut t: Local<f32>,
     mut last_press: Local<u32>,
     mut last_milestone: Local<u32>,
     mut last_swing_t: Local<f32>,
 ) {
     let mode = std::env::var("CRICKET_AUTOTEST").unwrap_or_default();
-    if mode != "1" && mode != "tournament" {
+    if mode != "1" && mode != "tournament" && mode != "settings" {
         return;
     }
     *t += time.delta_secs();
     let now = *t;
 
-    // Scripted menu presses: quick-match path by default.
-    let tournament =
-        std::env::var("CRICKET_AUTOTEST").unwrap_or_default() == "tournament";
-    let presses: [(f32, input::Action); 7] = if tournament {
+    // Scripted menu presses per mode
+    let presses: [(f32, input::Action); 7] = if mode == "tournament" {
         [
             (2.0, input::Action::Next),    // highlight Tournament
             (3.5, input::Action::Confirm), // enter Tournament
@@ -143,6 +159,16 @@ fn autotest_drive(
             (12.0, input::Action::Confirm),
             (14.0, input::Action::Confirm),
             (16.0, input::Action::Confirm),
+        ]
+    } else if mode == "settings" {
+        [
+            (2.0, input::Action::Next),    // highlight Tournament
+            (2.6, input::Action::Next),    // highlight Settings
+            (3.5, input::Action::Confirm), // enter Settings
+            (6.0, input::Action::Next),    // move to SFX row
+            (6.5, input::Action::Right),   // bump volume
+            (7.5, input::Action::Cancel),  // back to main
+            (99.0, input::Action::Confirm),
         ]
     } else {
         [
@@ -155,7 +181,6 @@ fn autotest_drive(
             (99.0, input::Action::Confirm),
         ]
     };
-    let _ = tournament;
     for (i, (when, action)) in presses.iter().enumerate() {
         let step = i as u32 + 1;
         if now >= *when && *last_press < step {
@@ -173,8 +198,10 @@ fn autotest_drive(
     }
 
     // Milestones: screenshots + clean exit.
-    let milestones = if tournament {
+    let milestones = if mode == "tournament" {
         [1.5_f32, 5.0, 7.0, 14.0]
+    } else if mode == "settings" {
+        [1.5_f32, 5.0, 6.8, 8.5]
     } else {
         [1.5_f32, 16.0, 30.0, 45.0]
     };
@@ -185,10 +212,16 @@ fn autotest_drive(
             *last_milestone = step;
         }
     }
-    let end = if tournament { 20.0 } else { 50.0 };
+    let end = if mode == "tournament" {
+        20.0
+    } else if mode == "settings" {
+        10.0
+    } else {
+        50.0
+    };
     if now >= end && *last_milestone < 200 {
         *last_milestone = 200;
-        std::process::exit(0);
+        exit.write(AppExit::Success);
     }
 }
 
@@ -197,27 +230,44 @@ fn setup_basics(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    use bevy::pbr::{DistanceFog, FogFalloff};
+
+    // Warm late-afternoon sun
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 24_000.0,
+            shadows_enabled: true,
+            color: Color::srgb(1.0, 0.98, 0.92),
+            ..default()
+        },
+        Transform::from_translation(Vec3::new(-45.0, 68.0, 22.0))
+            .looking_at(Vec3::ZERO, Vec3::Y),
+    ));
     // Main 3D camera (UI renders onto the primary window camera).
     commands.spawn((
+        Camera {
+            clear_color: bevy::camera::ClearColorConfig::Custom(
+                Color::srgb(0.53, 0.81, 0.98),
+            ),
+            ..default()
+        },
         Camera3d::default(),
         Transform::from_xyz(24.0, 9.0, 2.0)
             .looking_at(Vec3::new(-10.0, 1.0, 0.0), Vec3::Y),
         IsDefaultUiCamera,
-        AmbientLight {
-            color: Color::srgb(0.75, 0.82, 0.95),
-            brightness: 900.0,
-            affects_lightmapped_meshes: true,
-        },
-    ));
-    // Sun + soft ambient fill.
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 18_000.0,
-            shadows_enabled: true,
+        DistanceFog {
+            color: Color::srgba(0.68, 0.80, 0.94, 1.0),
+            falloff: FogFalloff::Linear {
+                start: 55.0,
+                end: 145.0,
+            },
             ..default()
         },
-        Transform::from_translation(Vec3::new(-40.0, 80.0, 30.0))
-            .looking_at(Vec3::ZERO, Vec3::Y),
+        AmbientLight {
+            color: Color::srgb(0.82, 0.88, 1.0),
+            brightness: 1300.0,
+            affects_lightmapped_meshes: true,
+        },
     ));
     // Warm-up the mesh/material registries.
     let _ = meshes.add(Sphere::new(0.1));

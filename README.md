@@ -15,33 +15,53 @@ full batting / bowling / fielding gameplay on both keyboard and gamepad.
   shot power, elevation and direction; edges can be caught behind.
 - **Bowling** — two-stage aim mechanic (lock length, then line) with an
   execution scatter based on bowler skill; AI batsmen punish bad balls and
-  respect match situation (required run rate pressure).
-- **Fielding** — standard field layouts (keeper + 10 fielders), chase AI,
-  catches near the landing point, run-outs on risky second runs,
-  automatic running between wickets.
+  respect match situation (required run rate pressure). Includes yorkers,
+  bouncers and slower balls.
+- **Fielding** — standard field layouts (keeper + 10 fielders), predictive
+  chase AI, catches near the landing point, run-outs on risky second runs,
+  automatic running between wickets with run-bob animation.
 - **Dismissals** — bowled, caught, caught behind, run out, plus wides.
 - **Match flow** — overs/wickets/balls bookkeeping, strike rotation,
   over changes with bowler rotation, innings break, target chases,
-  results & margins.
+  results & margins, end-of-match scorecard summary.
 - **Tournament mode** — 4-team knockout championship seeded across three
   stadiums; your matches are played, the rest are simulated by a
   rating-driven quick-sim engine.
-- **6 teams** of fictional players with individual batting/bowling ratings
-  and bowling styles (fast, fast-medium, medium, off-spin, leg-spin).
+- **10 teams** of fictional players with individual batting/bowling ratings
+  and bowling styles (fast, fast-medium, medium, off-spin, leg-spin):
+  India, Australia, England, Pakistan, South Africa, New Zealand,
+  West Indies, Sri Lanka, Bangladesh, Afghanistan.
 - **4 stadiums** — Harbour Oval, Rose Bowl Gardens, Fortress Arena,
   Highveld Dome — each with its own boundary size and pitch behaviour
-  (green seamer / hard & true / dusty turner / dry).
-- **Keyboard + gamepad** input throughout.
+  (green seamer / hard & true / dusty turner / dry), striped mown outfield,
+  crowd blobs and sight screens.
+- **Atmosphere** — sky gradient, distance fog, warm late-afternoon sun,
+  ball trail on big hits, camera shake on wickets/boundaries.
+- **Sound** — fully procedural audio (no external assets): bat crack,
+  stump clatter, crowd cheers (four/six), ambient ground murmur,
+  UI blips. Master/SFX volume controls.
+- **Animation** — smooth limb blending, batter idle waggle, bowler
+  windmill, run bob, bat swing follow-through.
+- **Camera** — four modes (batting end, bowling end, broadcast, follow ball)
+  with `C` / `Y` to cycle; smooth blending and wicket shake.
+- **Input** — keyboard + gamepad throughout; fully remappable keyboard
+  bindings persisted to `~/.config/willow_cricket/controls.json` and a
+  Settings screen with volume sliders.
 
 ## Controls
 
-| Action | Keyboard | Gamepad |
-|---|---|---|
-| Confirm / play shot / lock aim | Space / Enter | A |
-| Back | Esc | B |
-| Lofted shot (hold while playing shot) | Left Shift | LT |
-| Aim left/right | ← → or A/D | Left stick / D-pad |
-| Menu navigation | ↑ ↓ or W/S | D-pad / left stick |
+| Action | Default Keyboard | Gamepad | Notes |
+|---|---|---|---|
+| Confirm / play shot / lock aim | Space | A |  |
+| Back | Esc | B |  |
+| Lofted shot (hold) | Left Shift | LT |  |
+| Aim left/right | A / D | Left stick / D-pad |  |
+| Cycle delivery type | Q | X | bowling |
+| Cycle camera | C | Y | `Batting → Bowling → Broadcast → Follow` |
+| Menu navigation | W/S or ↑/↓ | D-pad |  |
+| Menu Left/Right | A/D or ←/→ | — | volumes, etc. |
+
+All keyboard bindings can be changed in **Main → Settings**. Gamepad layout is fixed.
 
 ### Bowling sequence
 1. Press **Confirm** to start your run-up from the Ready screen.
@@ -55,7 +75,7 @@ sprays it (wides get called).
 Watch the run-up, then press **Confirm** as the ball arrives at the bat.
 The timing meter shows your swing relative to the perfect-contact window
 (green band). Hold **Loft** for a big hit at extra risk, steer with
-**left/right**.
+**A/D**.
 
 ## Building
 
@@ -92,8 +112,9 @@ A scripted self-test drives the menus into a match, plays deliveries and
 saves screenshots:
 
 ```bash
-CRICKET_AUTOTEST=1 ./cricket          # quick match path
-CRICKET_AUTOTEST=tournament ./cricket # tournament path
+CRICKET_AUTOTEST=1 ./cricket              # quick match
+CRICKET_AUTOTEST=tournament ./cricket     # tournament
+CRICKET_AUTOTEST=settings  ./cricket      # settings screen
 ```
 
 Press **F12** any time to save a screenshot to `/tmp/opencode/`.
@@ -117,25 +138,26 @@ src/
 │   ├── teams.rs     # Teams, players, ratings
 │   └── tournament.rs# Knockout bracket, quick-sim
 ├── game/
-│   ├── ball.rs      # Ball flight: gravity/drag/swing/bounce/turn
-│   ├── fielding.rs  # Fielder entities, chase AI
-│   └── match_flow.rs# Delivery cycle orchestration, contact resolution
+│   ├── audio.rs     # Procedural WAV synthesis + playback
+│   ├── ball.rs      # Ball flight: gravity/drag/swing/bounce/turn + trail
+│   ├── fielding.rs  # Fielder entities, predictive chase AI
+│   └── match_flow.rs# Delivery cycle, contact resolution, AI
 ├── render/
-│   ├── camera_rig.rs# Camera modes (batting end, bowling end, follow…)
-│   ├── player.rs    # Procedural figures + animation
-│   └── stadium.rs   # Procedural stadium construction
+│   ├── camera_rig.rs# Camera modes + toggle + shake
+│   ├── player.rs    # Procedural figures + smooth animation
+│   └── stadium.rs   # Procedural stadium: stripes, crowd, sight screens
 ├── ui/
-│   ├── hud.rs      # Scoreboard, prompts, timing meter
-│   └── menus.rs    # Menus, setup wizard, tournament bracket
-├── input.rs        # Keyboard/gamepad action mapping
-└── state.rs        # App states
+│   ├── hud.rs       # Scoreboard, prompts, timing meter, match summary
+│   └── menus.rs     # Menus, setup wizard, tournament bracket, settings
+├── input.rs         # Action mapping, KeyBindings (persisted), rebind
+└── state.rs         # App states
 ```
 
-## Roadmap ideas
+## Roadmap
 
-- Manual running between wickets (Sprint button already mapped)
+- Manual running between wickets (Sprint already mapped, assist-run today)
 - LBW / stumped dismissals, no-balls, DRS
 - Test-match format with declaration/innings rules
 - Player career stats persistence, team editor
-- Audio (bat crack, crowd), replays, more camera modes
+- Replays, Hawk-Eye, wagon wheels
 - Gamepad rumble on wickets

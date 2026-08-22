@@ -77,7 +77,7 @@ pub fn reset_brains(mut brains: Query<&mut Brain>) {
     }
 }
 
-/// Move chasing fielders toward the live ball; others stay put.
+/// Move chasing fielders toward the live ball, predicting its path.
 pub fn chase_system(
     time: Res<Time>,
     ball_q: Query<&crate::game::ball::BallState, With<CricketBall>>,
@@ -92,18 +92,28 @@ pub fn chase_system(
         if !matches!(brain, Brain::Chase) {
             continue;
         }
-        let target = ball.pos;
-        let to_ball =
-            Vec2::new(target.x - tf.translation.x, target.z - tf.translation.z);
+        let speed = if f.is_keeper { KEEPER_SPEED } else { FIELDER_SPEED };
+        // Predict where the ball will be when we get there (simple lead)
+        let to_ball = Vec2::new(ball.pos.x - tf.translation.x, ball.pos.z - tf.translation.z);
         let dist = to_ball.length();
-        if dist > 0.05 {
-            let speed = if f.is_keeper { KEEPER_SPEED } else { FIELDER_SPEED };
-            let step = (speed * dt * 1.35).min(dist);
-            let dir = to_ball / dist;
-            tf.translation.x += dir.x * step;
-            tf.translation.z += dir.y * step;
-            tf.rotation =
-                Quat::from_rotation_y(crate::render::player::yaw_to_face(dir));
+        if dist < 0.05 {
+            continue;
         }
+        let t_intercept = (dist / speed).clamp(0.0, 0.65);
+        // Only predict horizontal motion; vertical is irrelevant for ground chase
+        let pred = Vec2::new(
+            ball.pos.x + ball.vel.x * t_intercept * 0.55,
+            ball.pos.z + ball.vel.z * t_intercept * 0.55,
+        );
+        let to_pred = Vec2::new(pred.x - tf.translation.x, pred.y - tf.translation.z);
+        let d2 = to_pred.length();
+        if d2 < 0.05 {
+            continue;
+        }
+        let step = (speed * dt * 1.4).min(d2);
+        let dir = to_pred / d2;
+        tf.translation.x += dir.x * step;
+        tf.translation.z += dir.y * step;
+        tf.rotation = Quat::from_rotation_y(crate::render::player::yaw_to_face(dir));
     }
 }

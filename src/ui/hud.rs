@@ -19,6 +19,10 @@ struct OutcomeText;
 struct MeterRoot;
 #[derive(Component)]
 struct MeterMarker;
+#[derive(Component)]
+struct SummaryRoot;
+#[derive(Component)]
+struct SummaryText;
 
 pub struct HudPlugin;
 
@@ -33,6 +37,7 @@ impl Plugin for HudPlugin {
                     update_prompt,
                     update_outcome,
                     update_meter,
+                    update_summary,
                 )
                     .run_if(in_state(AppState::InMatch)),
             );
@@ -119,6 +124,33 @@ fn spawn_hud(mut commands: Commands) {
                 TextFont { font_size: 21.0, ..default() },
                 TextColor(Color::WHITE),
             ));
+
+            // ---- match summary panel (only on MatchOver) ----
+            p.spawn((
+                SummaryRoot,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: percent(38),
+                    left: percent(18),
+                    width: percent(64),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    padding: UiRect::all(px(14)),
+                    row_gap: px(6),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.04, 0.06, 0.05, 0.88)),
+                Visibility::Hidden,
+            ))
+            .with_children(|c| {
+                c.spawn((
+                    SummaryText,
+                    Text::new(""),
+                    TextFont { font_size: 20.0, ..default() },
+                    TextColor(Color::WHITE),
+                    TextLayout::new_with_justify(Justify::Center),
+                ));
+            });
 
             // ---- timing meter ----
             p.spawn((
@@ -323,4 +355,76 @@ fn update_meter(
     if let Ok(mut node) = marker_q.single_mut() {
         node.left = percent(frac * 100.0);
     }
+}
+
+fn update_summary(
+    phase: Res<Phase>,
+    am: Option<Res<ActiveMatch>>,
+    wd: Res<WorldData>,
+    mut root_q: Query<&mut Visibility, With<SummaryRoot>>,
+    mut text_q: Query<&mut Text, With<SummaryText>>,
+) {
+    let Ok(mut vis) = root_q.single_mut() else { return };
+    let Ok(mut txt) = text_q.single_mut() else { return };
+    if !matches!(phase.0, PhaseEnum::MatchOver) {
+        *vis = Visibility::Hidden;
+        return;
+    }
+    let Some(am) = am.as_deref() else {
+        *vis = Visibility::Hidden;
+        return;
+    };
+    *vis = Visibility::Visible;
+    let inns = &am.state.innings;
+    // Current innings team
+    let bat_team = am.batting_team(&wd);
+    let bowl_team = am.fielding_team(&wd);
+    // Top scorer in current innings
+    let top = inns
+        .cards
+        .iter()
+        .max_by_key(|c| c.runs)
+        .map(|c| {
+            let name = &wd.teams[am.state.teams[0]].players[c.player].name;
+            format!("{name} {}({})", c.runs, c.balls)
+        })
+        .unwrap_or_else(|| "-".into());
+    let best_bowler = inns
+        .bowlers
+        .iter()
+        .max_by_key(|b| b.wickets as i32 * 100 - b.runs as i32)
+        .map(|b| {
+            let name = &bowl_team.players[b.player].name;
+            format!("{name} {}/{} ({}.{})", b.wickets, b.runs, b.balls / 6, b.balls % 6)
+        })
+        .unwrap_or_else(|| "-".into());
+
+    let result_line = match &am.state.result {
+        Some(crate::core::rules::Result::Win { winner, margin }) => {
+            let wname = wd.teams[*winner].name.clone();
+            format!("{wname} {margin}")
+        }
+        Some(crate::core::rules::Result::Tie) => "Match Tied".into(),
+        None => "Match Complete".into(),
+    };
+
+    let overs_str = format!("{}.{} ov", inns.legal_balls / 6, inns.legal_balls % 6);
+    let first_line = if let Some(t) = am.state.first_innings_total {
+        format!("First innings: {t}  |  Chase: {}  ->  {}", t + 1, inns.runs)
+    } else {
+        String::new()
+    };
+
+    **txt = format!(
+        "{}\n{}  {}/{}  ({})\n{}\nTop: {}\nBest: {}\n{}",
+        result_line,
+        bat_team.short,
+        inns.runs,
+        inns.wickets,
+        overs_str,
+        first_line,
+        top,
+        best_bowler,
+        "SPACE to continue"
+    );
 }

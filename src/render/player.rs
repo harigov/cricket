@@ -155,14 +155,34 @@ pub fn yaw_to_face(dir: bevy::math::Vec2) -> f32 {
 }
 
 pub fn animate_figures(
-    figures: Query<(&Anim, &Children)>,
+    time: Res<Time>,
+    figures: Query<(&Anim, &Children, Option<&Figure>)>,
     mut parts: Query<(&Part, &mut Transform)>,
 ) {
-    for (anim, children) in &figures {
+    let t_global = time.elapsed_secs();
+    for (anim, children, fig) in &figures {
         // Compute desired rotations per part kind.
+        #[allow(unused_assignments)]
         let (mut ll, mut lr, mut al, mut ar) = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+        let is_batter = fig.is_some_and(|f| {
+            matches!(f.kind, FigureKind::Batter | FigureKind::NonStriker)
+        });
         match anim.state {
-            AnimState::Idle => {}
+            AnimState::Idle => {
+                // Batter idle: subtle bat waggle + weight shift; others breathe
+                if is_batter {
+                    let waggle = (t_global * 1.3).sin() * 0.14;
+                    ar = waggle;
+                    al = -waggle * 0.4;
+                    ll = (t_global * 0.9).sin() * 0.06;
+                    lr = -ll;
+                } else {
+                    // fielders: tiny idle sway
+                    let sway = (t_global * 0.7).sin() * 0.04;
+                    al = sway;
+                    ar = -sway;
+                }
+            }
             AnimState::Run { t } => {
                 let phase = t * RUN_FREQ;
                 ll = phase.sin() * RUN_AMP;
@@ -200,9 +220,10 @@ pub fn animate_figures(
                 if let Some((_, angle)) =
                     targets.iter().find(|(k, _)| *k == part.kind)
                 {
-                    // Rotate pivots about Z (swings limbs in the XY plane,
-                    // which reads well from the standard camera angles).
-                    tf.rotation = Quat::from_rotation_z(*angle);
+                    let target = Quat::from_rotation_z(*angle);
+                    // Smooth interpolation: snappy but not instant (~12 rad/s)
+                    let a = (12.0 * time.delta_secs()).clamp(0.0, 1.0);
+                    tf.rotation = tf.rotation.slerp(target, a);
                 }
             }
         }

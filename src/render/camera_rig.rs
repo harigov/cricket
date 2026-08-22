@@ -9,6 +9,7 @@ pub struct CameraRig {
     pos: Vec3,
     look: Vec3,
     init: bool,
+    pub shake: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -29,6 +30,19 @@ impl CamMode {
             CamMode::FollowBall => CamMode::BattingEnd,
         }
     }
+}
+
+pub fn camera_toggle_system(
+    input: Res<crate::input::PlayerInput>,
+    mut rig: ResMut<CameraRig>,
+) {
+    if input.pressed(crate::input::Action::CycleCam) {
+        rig.mode = rig.mode.toggle_next();
+    }
+}
+
+pub fn trigger_shake(rig: &mut CameraRig, intensity: f32) {
+    rig.shake = rig.shake.max(intensity);
 }
 
 pub fn update_camera(
@@ -68,12 +82,36 @@ pub fn update_camera(
         rig.init = true;
     }
 
+    // Shake decays exponentially
+    if rig.shake > 0.001 {
+        rig.shake *= (-8.0 * time.delta_secs()).exp();
+    } else {
+        rig.shake = 0.0;
+    }
+
     let k = (1.0 - (-6.0 * time.delta_secs()).exp()).clamp(0.0, 1.0);
     rig.pos = rig.pos.lerp(target_pos, k);
     rig.look = rig.look.lerp(target_look, k);
 
+    // Apply shake as random offset
+    let mut pos = rig.pos;
+    let mut look = rig.look;
+    if rig.shake > 0.01 {
+        let n = time.elapsed_secs();
+        pos += Vec3::new(
+            (n * 47.0).sin() * rig.shake * 0.6,
+            (n * 59.0).sin() * rig.shake * 0.35,
+            (n * 37.0).sin() * rig.shake * 0.6,
+        );
+        look += Vec3::new(
+            (n * 31.0).cos() * rig.shake * 0.25,
+            0.0,
+            (n * 43.0).cos() * rig.shake * 0.25,
+        );
+    }
+
     if let Ok(mut tf) = cam.single_mut() {
-        tf.translation = rig.pos;
-        tf.look_at(rig.look, Vec3::Y);
+        tf.translation = pos;
+        tf.look_at(look, Vec3::Y);
     }
 }

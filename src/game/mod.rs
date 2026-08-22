@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod ball;
 pub mod fielding;
 pub mod match_flow;
