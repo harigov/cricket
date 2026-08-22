@@ -63,11 +63,20 @@ pub struct ActiveFixture(pub Option<usize>);
 struct MenuRoot;
 #[derive(Component)]
 struct MenuList;
+#[derive(Component)]
+struct MenuBackdrop {
+    main: Handle<Image>,
+    secondary: Handle<Image>,
+}
 
 pub struct MenusPlugin;
 
 impl Plugin for MenusPlugin {
     fn build(&self, app: &mut App) {
+        // Menu key art is embedded so `target/release/cricket` remains a
+        // self-contained executable, matching the existing launch instructions.
+        bevy::asset::embedded_asset!(app, "../../assets/ui/main-menu-hero.png");
+        bevy::asset::embedded_asset!(app, "../../assets/ui/menu-stadium.png");
         app.init_resource::<MenuState>()
             .init_resource::<CurrentTournament>()
             .init_resource::<ActiveFixture>()
@@ -85,7 +94,7 @@ impl Plugin for MenusPlugin {
 // UI construction (immediate-mode style rebuild each frame)
 // ---------------------------------------------------------------------------
 
-fn spawn_menu_root(mut commands: Commands) {
+fn spawn_menu_root(mut commands: Commands, assets: Res<AssetServer>) {
     info!("MENU ROOT SPAWNED");
     commands.spawn((
         MenuRoot,
@@ -93,22 +102,47 @@ fn spawn_menu_root(mut commands: Commands) {
             position_type: PositionType::Absolute,
             width: percent(100),
             height: percent(100),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            row_gap: px(18),
             ..default()
         },
-        BackgroundColor(Color::srgb(0.03, 0.05, 0.04)),
+        BackgroundColor(Color::srgb(0.015, 0.025, 0.022)),
     )).with_children(|p| {
+        let main = bevy::asset::load_embedded_asset!(assets.as_ref(), "../../assets/ui/main-menu-hero.png");
+        let secondary = bevy::asset::load_embedded_asset!(assets.as_ref(), "../../assets/ui/menu-stadium.png");
+        p.spawn((
+            MenuBackdrop {
+                main: main.clone(),
+                secondary,
+            },
+            ImageNode::new(main),
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                ..default()
+            },
+        ));
+        // A light global grade ties the two pieces of key art to the UI palette
+        // and protects text contrast at unusual window aspect ratios.
+        p.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.01, 0.035, 0.025, 0.18)),
+        ));
         p.spawn((
             MenuList,
             Node {
+                position_type: PositionType::Absolute,
                 flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                row_gap: px(10),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(8)),
                 ..default()
             },
+            BackgroundColor(Color::srgba(0.015, 0.035, 0.028, 0.90)),
+            BorderColor::all(Color::srgba(0.72, 0.82, 0.56, 0.28)),
         ));
     });
 }
@@ -129,6 +163,19 @@ fn screen_title(ms: &MenuState) -> &'static str {
         Screen::SetupBatFirst => "TOSS",
         Screen::Settings => "SETTINGS",
         Screen::Bracket => "TOURNAMENT BRACKET",
+    }
+}
+
+fn screen_kicker(ms: &MenuState) -> &'static str {
+    match ms.screen {
+        Screen::Main => "THE GENTLEMAN'S GAME. YOUR MOMENT.",
+        Screen::SetupTeam => "QUICK MATCH  /  01",
+        Screen::SetupOpp => "QUICK MATCH  /  02",
+        Screen::SetupOvers => "QUICK MATCH  /  03",
+        Screen::SetupStadium => "QUICK MATCH  /  04",
+        Screen::SetupBatFirst => "QUICK MATCH  /  05",
+        Screen::Settings => "AUDIO & CONTROLS",
+        Screen::Bracket => "KNOCKOUT CHAMPIONSHIP",
     }
 }
 
@@ -261,11 +308,41 @@ fn refresh_menu(
     bindings: Res<KeyBindings>,
     audio: Res<AudioSettings>,
     rebind: Res<RebindState>,
-    root_q: Query<Entity, With<MenuList>>,
+    mut root_q: Query<(Entity, &mut Node), With<MenuList>>,
+    mut backdrop_q: Query<(&mut ImageNode, &MenuBackdrop)>,
     children_q: Query<&Children>,
     mut commands: Commands,
 ) {
-    let Ok(root) = root_q.single() else { return };
+    let Ok((root, mut root_node)) = root_q.single_mut() else { return };
+    let is_main = ms.screen == Screen::Main;
+
+    if let Ok((mut image, art)) = backdrop_q.single_mut() {
+        image.image = if is_main {
+            art.main.clone()
+        } else {
+            art.secondary.clone()
+        };
+    }
+
+    // The hero uses the deliberately quiet left half of its artwork. Dense
+    // screens use a broad central panel over the pavilion vista.
+    if is_main {
+        root_node.left = percent(7);
+        root_node.top = percent(17);
+        root_node.width = px(470);
+        root_node.max_height = percent(72);
+        root_node.padding = UiRect::axes(px(34), px(30));
+        root_node.align_items = AlignItems::Stretch;
+        root_node.row_gap = px(9);
+    } else {
+        root_node.left = percent(16);
+        root_node.top = percent(6);
+        root_node.width = percent(68);
+        root_node.max_height = percent(88);
+        root_node.padding = UiRect::axes(px(30), px(20));
+        root_node.align_items = AlignItems::Center;
+        root_node.row_gap = px(6);
+    }
 
     // Clear previous frame's rows.
     if let Ok(children) = children_q.get(root) {
@@ -285,16 +362,31 @@ fn refresh_menu(
 
     commands.entity(root).with_children(|p| {
         p.spawn((
+            Text::new(screen_kicker(&ms)),
+            TextFont { font_size: if is_main { 13.0 } else { 12.0 }, ..default() },
+            TextColor(Color::srgb(0.82, 0.70, 0.36)),
+        ));
+        p.spawn((
             Text::new(screen_title(&ms)),
-            TextFont { font_size: 42.0, ..default() },
-            TextColor(Color::srgb(0.55, 0.9, 0.45)),
+            TextFont { font_size: if is_main { 50.0 } else { 38.0 }, ..default() },
+            TextColor(Color::srgb(0.94, 0.96, 0.90)),
+        ));
+        p.spawn((
+            Node {
+                width: if is_main { percent(45) } else { px(72) },
+                height: px(3),
+                margin: UiRect::vertical(px(8)),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.78, 0.64, 0.25)),
         ));
         p.spawn((
             Node {
                 flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                row_gap: px(8),
-                margin: UiRect::vertical(px(14)),
+                align_items: if is_main { AlignItems::Stretch } else { AlignItems::Center },
+                row_gap: px(if ms.screen == Screen::Settings { 3 } else { 7 }),
+                width: if is_main { percent(100) } else { auto() },
+                margin: UiRect::vertical(px(if is_main { 10 } else { 4 })),
                 ..default()
             },
         )).with_children(|items| {
@@ -305,27 +397,53 @@ fn refresh_menu(
                 let selected = i == ms.sel && selectable;
                 items.spawn((
                     Node {
-                        padding: UiRect::horizontal(px(18)),
+                        min_width: if is_main { percent(100) } else { px(360) },
+                        padding: UiRect::axes(px(18), px(if is_main { 10 } else { 4 })),
+                        border: UiRect {
+                            left: px(if selected { 4 } else { 0 }),
+                            ..default()
+                        },
+                        justify_content: if is_main {
+                            JustifyContent::FlexStart
+                        } else {
+                            JustifyContent::Center
+                        },
                         ..default()
                     },
                     BackgroundColor(if selected {
-                        Color::srgba(0.25, 0.5, 0.2, 0.5)
+                        Color::srgba(0.23, 0.43, 0.23, 0.82)
+                    } else {
+                        Color::NONE
+                    }),
+                    BorderColor::all(if selected {
+                        Color::srgb(0.84, 0.70, 0.29)
                     } else {
                         Color::NONE
                     }),
                 )).with_children(|row| {
                     row.spawn((
-                        Text::new(line),
-                        TextFont { font_size: 22.0, ..default() },
+                        Text::new(if selected { format!(">  {line}") } else { line }),
+                        TextFont {
+                            font_size: if ms.screen == Screen::Settings { 18.0 } else { 21.0 },
+                            ..default()
+                        },
                         TextColor(if selected {
-                            Color::WHITE
+                            Color::srgb(1.0, 0.96, 0.82)
                         } else {
-                            Color::srgb(0.75, 0.78, 0.75)
+                            Color::srgb(0.78, 0.82, 0.77)
                         }),
                     ));
                 });
             }
         });
+        if ms.screen != Screen::Bracket {
+            p.spawn((
+                Text::new("W / S  NAVIGATE     SPACE  SELECT     ESC  BACK"),
+                TextFont { font_size: 11.0, ..default() },
+                TextColor(Color::srgba(0.72, 0.76, 0.70, 0.72)),
+                Node { margin: UiRect::top(px(8)), ..default() },
+            ));
+        }
     });
 }
 

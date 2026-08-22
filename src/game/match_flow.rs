@@ -513,6 +513,8 @@ pub fn sys_ball_physics(
     phase: Res<Phase>,
     time: Res<Time>,
     del: Res<CurrentDelivery>,
+    am: Option<Res<ActiveMatch>>,
+    wd: Option<Res<WorldData>>,
     mut q: Query<
         (&mut BallState, &mut BallFlags, &mut Transform),
         With<CricketBall>,
@@ -529,14 +531,26 @@ pub fn sys_ball_physics(
         return;
     }
 
+    let pitch = am
+        .as_ref()
+        .and_then(|a| wd.as_ref().map(|w| a.pitch(w)))
+        .unwrap_or(crate::core::stadiums::PitchType::Hard);
+
     if !bs.dead {
         if let Some(plan) = del.0.as_ref() {
-            physics_step(&mut bs, &mut flags, plan.swing, plan.turn, time.delta_secs());
+            physics_step_with_pitch(
+                &mut bs,
+                &mut flags,
+                plan.swing,
+                plan.turn,
+                time.delta_secs(),
+                Some(pitch),
+            );
         }
     } else {
         // Dead ball still rolls/settles without delivery forces.
         let mut f = BallFlags::default();
-        physics_step(&mut bs, &mut f, 0.0, 0.0, time.delta_secs());
+        physics_step_with_pitch(&mut bs, &mut f, 0.0, 0.0, time.delta_secs(), Some(pitch));
     }
     tf.translation = bs.pos;
 }
