@@ -4,7 +4,7 @@
 //! can drive them code-driven (no external clips needed).
 
 use bevy::prelude::*;
-use bevy::gltf::GltfAssetLabel;
+use crate::core::teams::Team;
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Figure { pub kind: FigureKind }
@@ -55,6 +55,17 @@ fn bone_kind_for_name(name: &str) -> Option<BoneKind> {
 
 #[derive(Component)] pub struct Bat;
 
+/// Material handles carried by the figure root while its glTF scene streams in.
+/// The scene's two meshes are recolored when they become available.
+#[derive(Component, Clone)]
+pub struct TeamKit {
+    primary: Handle<StandardMaterial>,
+    secondary: Handle<StandardMaterial>,
+}
+
+#[derive(Component)]
+pub struct KitStyled;
+
 // Legacy – kept so old queries don't break, but no longer spawned.
 #[derive(Component)] pub struct Part { pub kind: PartKind }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum PartKind { LegL, LegR, ArmL, ArmR }
@@ -62,16 +73,39 @@ fn bone_kind_for_name(name: &str) -> Option<BoneKind> {
 pub fn spawn_figure(
     commands: &mut Commands,
     asset_server: &AssetServer,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
     pos: Vec3,
     facing_deg: f32,
-    _shirt: Color,
-    _trousers: Color,
+    team: &Team,
     kind: FigureKind,
 ) -> Entity {
-    let scene = asset_server.load(GltfAssetLabel::Scene(0).from_asset("characters/Xbot.glb"));
+    let scene = crate::render::load_xbot_scene(asset_server);
+    let primary = materials.add(StandardMaterial {
+        base_color: team.primary_color,
+        perceptual_roughness: 0.74,
+        ..Default::default()
+    });
+    let secondary = materials.add(StandardMaterial {
+        base_color: team.secondary_color,
+        metallic: 0.08,
+        perceptual_roughness: 0.62,
+        ..Default::default()
+    });
+    let crest = materials.add(StandardMaterial {
+        base_color_texture: Some(crate::render::load_team_crest(
+            asset_server,
+            &team.crest_asset(),
+        )),
+        perceptual_roughness: 0.70,
+        unlit: true,
+        cull_mode: None,
+        ..Default::default()
+    });
     let fig = commands.spawn((
         Figure { kind },
         Anim::default(),
+        TeamKit { primary, secondary },
         Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(facing_deg.to_radians())),
         Visibility::default(),
         InheritedVisibility::default(),
@@ -86,8 +120,47 @@ pub fn spawn_figure(
             InheritedVisibility::default(),
             ViewVisibility::default(),
         ));
+        // A small double-sided badge sits just proud of the torso. Keeping it
+        // outside the imported mesh lets one generated crest serve every kit.
+        p.spawn((
+            Mesh3d(meshes.add(Rectangle::new(0.22, 0.22))),
+            MeshMaterial3d(crest),
+            Transform::from_xyz(0.0, 1.36, 0.185),
+        ));
     });
     fig
+}
+
+/// Replace Xbot's stock surface and joint materials with team kit colors once
+/// the asynchronously instantiated glTF mesh entities appear.
+pub fn apply_team_kit_materials(
+    mut commands: Commands,
+    kits: Query<&TeamKit>,
+    parents: Query<&ChildOf>,
+    mut meshes: Query<
+        (Entity, &Name, &mut MeshMaterial3d<StandardMaterial>),
+        Without<KitStyled>,
+    >,
+) {
+    for (entity, name, mut material) in &mut meshes {
+        let mut current = parents.get(entity).ok().map(ChildOf::parent);
+        let mut kit = None;
+        for _ in 0..16 {
+            let Some(parent) = current else { break };
+            if let Ok(found) = kits.get(parent) {
+                kit = Some(found);
+                break;
+            }
+            current = parents.get(parent).ok().map(ChildOf::parent);
+        }
+        let Some(kit) = kit else { continue };
+        material.0 = if name.as_str().contains("Joints") {
+            kit.secondary.clone()
+        } else {
+            kit.primary.clone()
+        };
+        commands.entity(entity).insert(KitStyled);
+    }
 }
 
 /// Tag newly spawned Mixamo bones. Walks up `ChildOf` chain to find the

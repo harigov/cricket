@@ -97,8 +97,10 @@ pub fn spawn_match_scene(
     am: &ActiveMatch,
 ) -> MatchScene {
     let stadium = &wd.stadiums[am.stadium];
+    let bat_team = am.batting_team(wd);
+    let fld_team = am.fielding_team(wd);
     let stadium_root = crate::render::stadium::build_stadium(
-        commands, meshes, materials, stadium);
+        commands, asset_server, meshes, materials, stadium, bat_team, fld_team);
 
     commands.insert_resource(BoundaryRadius(stadium.boundary_radius()));
 
@@ -115,40 +117,37 @@ pub fn spawn_match_scene(
         ))
         .id();
 
-    let bat_team = am.batting_team(wd);
-    let fld_team = am.fielding_team(wd);
-
     // Batters face the bowler (-X => yaw 0); non-striker turns around.
     let striker = spawn_figure(
-        commands, asset_server,
+        commands, asset_server, meshes, materials,
         Vec3::new(geo::BATSMAN_POS.x, 0.0, geo::BATSMAN_POS.y),
         0.0,
-        bat_team.primary_color, bat_team.secondary_color,
+        bat_team,
         FigureKind::Batter,
     );
     let non_striker = spawn_figure(
-        commands, asset_server,
+        commands, asset_server, meshes, materials,
         Vec3::new(-geo::PITCH_HALF_LEN + 1.6, 0.0, 0.9),
         180.0,
-        bat_team.primary_color, bat_team.secondary_color,
+        bat_team,
         FigureKind::NonStriker,
     );
 
     // Bowler at the top of his mark, facing down the pitch (+X).
     let bowler = spawn_figure(
-        commands, asset_server,
+        commands, asset_server, meshes, materials,
         Vec3::new(-geo::PITCH_HALF_LEN - 8.0, 0.0, 0.35),
         180.0,
-        fld_team.primary_color, fld_team.secondary_color,
+        fld_team,
         FigureKind::Bowler,
     );
 
     // Fielding side.
     let layout = geo::FieldLayout::standard();
     let fielders = fielding::spawn_field_side(
-        commands, asset_server,
+        commands, asset_server, meshes, materials,
         &layout.positions,
-        fld_team.primary_color, fld_team.secondary_color,
+        fld_team,
     );
 
     commands.insert_resource(CurrentLayout(layout));

@@ -32,18 +32,24 @@ full batting / bowling / fielding gameplay on both keyboard and gamepad.
 - **10 teams** of fictional players with individual batting/bowling ratings
   and bowling styles (fast, fast-medium, medium, off-spin, leg-spin):
   India, Australia, England, Pakistan, South Africa, New Zealand,
-  West Indies, Sri Lanka, Bangladesh, Afghanistan.
+  West Indies, Sri Lanka, Bangladesh, Afghanistan. Every side has an original
+  crest, two-color match kit, uniform badge, and match-day stadium branding.
 - **4 stadiums** — Harbour Oval, Rose Bowl Gardens, Fortress Arena,
   Highveld Dome — each with its own boundary size and pitch behaviour
-  (green seamer / hard & true / dusty turner / dry), striped mown outfield,
-  crowd blobs and sight screens.
+  (green seamer / hard & true / dusty turner / dry), striped mown outfield
+  with outer shell from **Poly Pizza Stylized Stadium** (CC-BY 3.0,
+  `assets/stadium/poly_stadium.glb` 104KB) and tiered stands.
+- **Realistic crowd** — ~120 **Kenney Blocky Characters** (CC0,
+  `assets/crowd/crowd-*.glb` 111KB each) seated on stands, varied scale/yaw,
+  replacing 480 cuboid blobs; 1k tris each, instanced via `SceneRoot`.
 - **Realistic human models** — MIT-licensed **Xbot glTF** (Mixamo rig,
   `assets/characters/Xbot.glb` 2.8 MB via three.js `examples` — MIT, PBR,
   16k tris, 55-bone humanoid). Skinned, code-driven skeletal animation
   (idle waggle, run, bowling windmill, bat swing) — fully MIT-distributable
   and retarget-friendly for future Mixamo clips.
 - **Atmosphere** — sky gradient, distance fog, warm late-afternoon sun,
-  ball trail on big hits, camera shake on wickets/boundaries.
+  ball trail on big hits, camera shake on wickets/boundaries, illuminated
+  fictional sponsor ribbons, and alternating team-crest boundary pylons.
 - **Sound** — procedural audio (bat crack, stump clatter, crowd, murmur)
   + Master/SFX volume controls.
 - **Animation** — skeletal `slerp` blending (14 rad/s) on Mixamo bones:

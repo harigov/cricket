@@ -85,6 +85,11 @@ pub struct Team {
 }
 
 impl Team {
+    /// Game-original crest shared by uniforms, menus, and stadium dressing.
+    pub fn crest_asset(&self) -> String {
+        format!("branding/teams/{}.png", self.short.to_ascii_lowercase())
+    }
+
     pub fn batters(&self) -> impl Iterator<Item = usize> + '_ {
         self.players.iter().enumerate().map(|(i, _)| i)
     }

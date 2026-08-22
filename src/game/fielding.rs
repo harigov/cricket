@@ -1,6 +1,7 @@
 //! Fielder entities, placement and chase behaviour.
 
 use crate::core::geometry::{self, FieldPos};
+use crate::core::teams::Team;
 use crate::game::ball::CricketBall;
 use bevy::prelude::*;
 
@@ -31,9 +32,10 @@ const KEEPER_SPEED: f32 = 9.0;
 pub fn spawn_field_side(
     commands: &mut Commands,
     asset_server: &AssetServer,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
     layout: &[FieldPos],
-    shirt: Color,
-    trousers: Color,
+    team: &Team,
 ) -> Vec<Entity> {
     let mut out = Vec::new();
     for (slot, fp) in layout.iter().enumerate() {
@@ -47,10 +49,11 @@ pub fn spawn_field_side(
         let e = crate::render::player::spawn_figure(
             commands,
             asset_server,
+            meshes,
+            materials,
             Vec3::new(pos.x, 0.0, pos.y),
             facing,
-            shirt,
-            trousers,
+            team,
             if is_keeper {
                 crate::render::player::FigureKind::Keeper
             } else {
