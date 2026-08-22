@@ -50,10 +50,17 @@ full batting / bowling / fielding gameplay on both keyboard and gamepad.
 - **Atmosphere** — procedural sky sphere (day: pale→deep blue, night:
   starry navy with floodlights, `N` to toggle), distance fog, sun/moon +
   4 floodlights, ball trail, camera shake, sponsor ribbons & crest pylons.
-- **Ground** — tilable grass (mown stripes, 8×8 repeat) + dirt pitch (worn
-  centre) via procedural `Image` + `Affine2` UV, PBR 0.94/0.92 roughness.
-- **Sound** — procedural audio (bat crack, stump clatter, crowd, murmur)
-  + Master/SFX volume controls.
+- **Ground** — photoreal outfield grass albedo (embedded, ~4 m tile repeat,
+  linear + mipmapped + 8× anisotropic filtering) with runtime mow-band tinting
+  and stadium-specific hue; procedural dirt pitch (worn centre), PBR turf
+  roughness ~0.88 / reflectance ~0.42 (matte live grass, no metallic).
+- **Sound** — tiered bat cracks (light/heavy/edge), woody wicket/catch/bounce,
+  distinct four/six crowd swells, stadium murmur + music bed with smooth side-chain
+  ducking, Kenney CC0 UI sounds, and a **broadcast commentary partnership**
+  (British lead + Australian analyst, 108 mastered clips): short context-safe
+  calls, fact-verified analysis (fifties, hundreds, required rate, dot streaks,
+  clutch wickets), natural gaps between deliveries. Male/female lead toggle;
+  Master/SFX/Music/Commentary controls.
 - **Animation** — skeletal `slerp` blending (14 rad/s) on Mixamo bones:
   batter idle waggle, bowler windmill, run cycle, bat follow-through.
 - **Camera** — four modes (batting end, bowling end, broadcast, follow ball)
@@ -106,6 +113,9 @@ Or run directly:
 cargo run --release
 ```
 
+The game opens at **1920×1080** by default (window remains resizable). The
+3D match camera uses **4× MSAA** and 4096 px directional shadow maps.
+
 ### Linux dependencies
 X11 development headers are required (`libx11`, `libxcursor`, `libxi`,
 `libxrandr`). For gamepad support install `libudev`:
@@ -129,6 +139,8 @@ saves screenshots:
 CRICKET_AUTOTEST=1 ./cricket              # quick match
 CRICKET_AUTOTEST=tournament ./cricket     # tournament
 CRICKET_AUTOTEST=settings  ./cricket      # settings screen
+CRICKET_AUTOTEST=stadium ./cricket        # day broadcast establishing shot @ 16s
+CRICKET_AUTOTEST=stadium-night ./cricket  # night broadcast establishing shot @ 16s
 ```
 
 Press **F12** any time to save a screenshot to `/tmp/opencode/`.
@@ -152,7 +164,7 @@ src/
 │   ├── teams.rs     # Teams, players, ratings
 │   └── tournament.rs# Knockout bracket, quick-sim
 ├── game/
-│   ├── audio.rs     # Hybrid audio: 44.1 kHz procedural SFX + Kenney CC0 OGG + music beds
+│   ├── audio.rs     # Hybrid audio: 44.1 kHz procedural SFX + Kenney CC0 OGG + 142 neural commentary (Guy/Jenny) + dynamic music
 │   ├── ball.rs      # Realistic flight: quadratic drag, Magnus swing/spin, pitch-aware bounce
 │   ├── fielding.rs  # Fielder entities, predictive chase AI
 │   └── match_flow.rs# Delivery cycle, contact resolution, AI

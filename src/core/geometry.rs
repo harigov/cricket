@@ -71,14 +71,17 @@ pub mod positions {
     pub const SHORT_FINE_LEG: FieldPos = fp("Short Fine Leg", -165.0, 16.0);
 }
 
-/// A field layout: keeper + 10 fielders (bowler excluded, they follow through).
+/// Keeper + nine outfielders; the bowler is spawned separately at the crease.
+pub const FIELD_LAYOUT_LEN: usize = 10;
+
+/// A field layout: keeper + 9 outfielders (bowler excluded, spawned separately).
 #[derive(Clone, Debug)]
 pub struct FieldLayout {
     pub positions: Vec<FieldPos>,
 }
 
 impl FieldLayout {
-    /// Balanced T20-style spread field with a slip.
+    /// Balanced T20-style spread: keeper plus nine outfielders.
     pub fn standard() -> Self {
         use positions::*;
         FieldLayout {
@@ -93,7 +96,6 @@ impl FieldLayout {
                 SQUARE_LEG,
                 DEEP_MIDWICKET,
                 LONG_ON,
-                FINE_LEG,
             ],
         }
     }
@@ -112,7 +114,6 @@ impl FieldLayout {
                 MID_ON,
                 SQUARE_LEG,
                 LONG_OFF,
-                DEEP_COVER,
                 DEEP_MIDWICKET,
             ],
         }
@@ -133,7 +134,6 @@ impl FieldLayout {
                 SQUARE_LEG,
                 FINE_LEG,
                 MID_OFF,
-                MID_ON,
             ],
         }
     }
@@ -183,5 +183,13 @@ mod tests {
         let p = positions::KEEPER.world_pos(BATSMAN_POS);
         assert!(p.x > BATSMAN_POS.x + 1.8);
         assert!(p.y.abs() < 1.5); // Vec2.y here maps to world z
+    }
+
+    #[test]
+    fn standard_layout_plus_bowler_is_eleven() {
+        let layout = FieldLayout::standard();
+        assert_eq!(layout.positions.len(), FIELD_LAYOUT_LEN);
+        // keeper + 9 outfield + separate bowler = 11 fielding players
+        assert_eq!(layout.positions.len() + 1, 11);
     }
 }

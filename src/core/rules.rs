@@ -249,8 +249,11 @@ impl Innings {
         self.legal_balls > 0 && self.legal_balls % 6 == 0 && self.balls_this_over == 0
     }
 
+    /// True when the batting side can no longer continue (wickets down or
+    /// no more batters in a short custom order).
     pub fn all_out(&self, wickets_limit: u32) -> bool {
-        self.wickets >= wickets_limit || self.next_batter_slot >= self.order.len()
+        let max_wickets = wickets_limit.min(self.order.len().saturating_sub(1) as u32);
+        self.wickets >= max_wickets
     }
 
     /// True when the allotted overs have been completed.
@@ -309,24 +312,24 @@ impl MatchState {
             self.first_innings_total = Some(self.innings.runs);
             Some(Progression::InningsBreak)
         } else {
-            let t = self.innings.target.unwrap();
-            let winner = if self.innings.runs >= t {
-                Some(1)
-            } else if self.innings.runs == t - 1 {
-                None
-            } else {
-                Some(0)
-            };
-            self.result = Some(match winner {
-                Some(w) if w == 1 => Result::Win {
-                    winner: self.teams[1],
-                    margin: format!("won by {} wickets", 10 - self.innings.wickets),
-                },
-                Some(_) => Result::Win {
+            let target = self.innings.target.unwrap();
+            let chase_runs = self.innings.runs;
+            // After `start_chase`, teams[0] is chasing and teams[1] defended.
+            self.result = Some(if chase_runs >= target {
+                Result::Win {
                     winner: self.teams[0],
-                    margin: format!("won by {} runs", t - 1 - self.innings.runs),
-                },
-                None => Result::Tie,
+                    margin: format!(
+                        "won by {} wickets",
+                        self.wickets_limit.saturating_sub(self.innings.wickets)
+                    ),
+                }
+            } else if chase_runs == target - 1 {
+                Result::Tie
+            } else {
+                Result::Win {
+                    winner: self.teams[1],
+                    margin: format!("won by {} runs", target - 1 - chase_runs),
+                }
             });
             Some(Progression::MatchOver)
         }
@@ -340,11 +343,11 @@ impl MatchState {
         self.teams = [self.teams[1], self.teams[0]];
         self.innings_num = 2;
         self.innings = Innings::new(
-            0, chasing_order, Some(target), bowling_players);
+            self.teams[0], chasing_order, Some(target), bowling_players);
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Progression {
     InningsBreak,
     MatchOver,
@@ -400,6 +403,31 @@ mod tests {
     }
 
     #[test]
+    fn all_out_at_wickets_limit_not_ninth_wicket() {
+        let mut i = Innings::new(0, order(), None, &[11]);
+        for _ in 0..9 {
+            i.apply_ball(&BallOutcome::Wicket(Dismissal::Bowled));
+        }
+        assert_eq!(i.wickets, 9);
+        assert!(!i.all_out(10));
+        i.apply_ball(&BallOutcome::Wicket(Dismissal::Bowled));
+        assert_eq!(i.wickets, 10);
+        assert!(i.all_out(10));
+    }
+
+    #[test]
+    fn all_out_short_order() {
+        let short = vec![0, 1, 2, 3, 4];
+        let mut i = Innings::new(0, short, None, &[5]);
+        for _ in 0..3 {
+            i.apply_ball(&BallOutcome::Wicket(Dismissal::Bowled));
+        }
+        assert!(!i.all_out(10));
+        i.apply_ball(&BallOutcome::Wicket(Dismissal::Bowled));
+        assert!(i.all_out(10));
+    }
+
+    #[test]
     fn chase_win_detection() {
         let mut m = MatchState::new(20, [0, 1], order(), &[11]);
         let mut i = &mut m.innings;
@@ -408,6 +436,7 @@ mod tests {
         assert!(m.innings.overs_done(20));
         assert!(m.check_progression().is_some()); // innings break
         m.start_chase(order(), &[0]);
+        assert_eq!(m.innings.batting_team, 1);
         assert_eq!(m.innings.target, Some(121));
         for _ in 0..110 { m.innings.apply_ball(&BallOutcome::Runs(1)); }
         assert!(m.check_progression().is_none()); // 110 < 121
@@ -416,5 +445,80 @@ mod tests {
             Some(Progression::MatchOver) => {}
             other => panic!("expected match over, got {:?}", other),
         }
+        assert_eq!(
+            m.result,
+            Some(Result::Win {
+                winner: 1,
+                margin: "won by 10 wickets".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn chase_defending_win_by_runs() {
+        let mut m = MatchState::new(5, [0, 1], order(), &[11]);
+        for _ in 0..30 {
+            m.innings.apply_ball(&BallOutcome::Runs(1));
+        }
+        assert_eq!(m.check_progression(), Some(Progression::InningsBreak));
+        m.start_chase(order(), &[0]);
+        for _ in 0..10 {
+            m.innings.apply_ball(&BallOutcome::Runs(0));
+        }
+        for _ in 0..20 {
+            m.innings.apply_ball(&BallOutcome::Runs(1));
+        }
+        assert_eq!(m.innings.runs, 20);
+        assert!(m.innings.overs_done(5));
+        assert_eq!(m.check_progression(), Some(Progression::MatchOver));
+        assert_eq!(
+            m.result,
+            Some(Result::Win {
+                winner: 0,
+                margin: "won by 10 runs".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn chase_tie() {
+        let mut m = MatchState::new(5, [0, 1], order(), &[11]);
+        for _ in 0..30 {
+            m.innings.apply_ball(&BallOutcome::Runs(1));
+        }
+        assert_eq!(m.check_progression(), Some(Progression::InningsBreak));
+        m.start_chase(order(), &[0]);
+        for _ in 0..30 {
+            m.innings.apply_ball(&BallOutcome::Runs(1));
+        }
+        assert_eq!(m.innings.runs, 30);
+        assert!(m.innings.overs_done(5));
+        assert_eq!(m.check_progression(), Some(Progression::MatchOver));
+        assert_eq!(m.result, Some(Result::Tie));
+    }
+
+    #[test]
+    fn chase_win_wickets_margin_uses_limit() {
+        let mut m = MatchState::new(5, [0, 1], order(), &[11]);
+        for _ in 0..30 {
+            m.innings.apply_ball(&BallOutcome::Runs(1));
+        }
+        assert_eq!(m.check_progression(), Some(Progression::InningsBreak));
+        m.start_chase(order(), &[0]);
+        m.wickets_limit = 6;
+        for _ in 0..3 {
+            m.innings.apply_ball(&BallOutcome::Wicket(Dismissal::Bowled));
+        }
+        for _ in 0..31 {
+            m.innings.apply_ball(&BallOutcome::Runs(1));
+        }
+        assert_eq!(m.check_progression(), Some(Progression::MatchOver));
+        assert_eq!(
+            m.result,
+            Some(Result::Win {
+                winner: 1,
+                margin: "won by 3 wickets".into(),
+            })
+        );
     }
 }

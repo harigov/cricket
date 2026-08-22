@@ -344,6 +344,7 @@ dependencies = [
  "bevy_derive",
  "bevy_ecs",
  "bevy_math",
+ "bevy_mesh",
  "bevy_platform",
  "bevy_reflect",
  "bevy_time",
@@ -782,6 +783,7 @@ checksum = "5f37fb52655d0439656ca0a1db027d46926e463c81d893d4b1639668e5d7f1c1"
 dependencies = [
  "async-lock",
  "base64",
+ "bevy_animation",
  "bevy_app",
  "bevy_asset",
  "bevy_camera",

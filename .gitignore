@@ -14,5 +14,7 @@
 *.dSYM/
 *.pdb
 *.profraw
+*.tmp
+*.tmp.*
 perf.data
 perf.data.old

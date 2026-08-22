@@ -223,9 +223,54 @@ pub fn poll_input(
     out.move_vec = mv.clamp_length_max(1.0);
 }
 
+/// Human-friendly keyboard label ("Left Shift" instead of `ShiftLeft`).
 pub fn key_label(code: KeyCode) -> String {
-    format!("{code:?}")
-        .replace("Key", "")
-        .replace("Digit", "")
-        .replace("Arrow", "Arrow ")
+    match code {
+        KeyCode::Space => "Space".into(),
+        KeyCode::Escape => "Esc".into(),
+        KeyCode::Enter => "Enter".into(),
+        KeyCode::Tab => "Tab".into(),
+        KeyCode::ShiftLeft => "Left Shift".into(),
+        KeyCode::ShiftRight => "Right Shift".into(),
+        KeyCode::ControlLeft => "Left Ctrl".into(),
+        KeyCode::ControlRight => "Right Ctrl".into(),
+        KeyCode::AltLeft => "Left Alt".into(),
+        KeyCode::AltRight => "Right Alt".into(),
+        KeyCode::ArrowUp => "Up Arrow".into(),
+        KeyCode::ArrowDown => "Down Arrow".into(),
+        KeyCode::ArrowLeft => "Left Arrow".into(),
+        KeyCode::ArrowRight => "Right Arrow".into(),
+        _ => {
+            let s = format!("{code:?}");
+            s.replace("Key", "").replace("Digit", "")
+        }
+    }
+}
+
+/// Gamepad button glyph for an action (used when a pad is connected).
+pub fn gamepad_glyph(action: Action) -> &'static str {
+    match action {
+        Action::Confirm => "A",
+        Action::Cancel => "B",
+        Action::Loft => "LT",
+        Action::Sprint => "RT",
+        Action::Next => "D▼",
+        Action::Prev => "D▲",
+        Action::Left => "D◀",
+        Action::Right => "D▶",
+        Action::CycleType => "X",
+        Action::CycleCam => "Y",
+    }
+}
+
+/// Best label for an action given the current input device.
+pub fn action_label(action: Action, bindings: &KeyBindings, gamepad: bool) -> String {
+    if gamepad {
+        return gamepad_glyph(action).to_string();
+    }
+    bindings
+        .map
+        .get(&action)
+        .map(|k| key_label(*k))
+        .unwrap_or_else(|| "-".into())
 }

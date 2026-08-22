@@ -198,6 +198,46 @@ pub struct ShotAttempt {
 #[derive(Message)]
 pub struct ProgressionEvt(pub Progression);
 
+/// Rolling last-six delivery symbols for the broadcast scorebug.
+#[derive(Resource, Default)]
+pub struct RecentBalls {
+    pub entries: std::collections::VecDeque<String>,
+}
+
+impl RecentBalls {
+    pub fn push_outcome(&mut self, outcome: &BallOutcome) {
+        self.entries.push_back(outcome_symbol(outcome));
+        while self.entries.len() > 6 {
+            self.entries.pop_front();
+        }
+    }
+
+    pub fn display(&self) -> String {
+        if self.entries.is_empty() {
+            return "—  —  —  —  —  —".into();
+        }
+        let mut slots = vec!["—"; 6];
+        let start = 6usize.saturating_sub(self.entries.len());
+        for (i, sym) in self.entries.iter().enumerate() {
+            slots[start + i] = sym.as_str();
+        }
+        slots.join("  ")
+    }
+}
+
+/// Compact ball-history glyph for the scorebug strip.
+pub fn outcome_symbol(outcome: &BallOutcome) -> String {
+    match outcome {
+        BallOutcome::Runs(0) => "•".into(),
+        BallOutcome::Runs(n) => n.to_string(),
+        BallOutcome::Four => "4".into(),
+        BallOutcome::Six => "6".into(),
+        BallOutcome::Wide => "Wd".into(),
+        BallOutcome::NoBall => "Nb".into(),
+        BallOutcome::Wicket(_) | BallOutcome::WicketAndRuns(_, _) => "W".into(),
+    }
+}
+
 pub struct GameplayPlugin;
 
 impl Plugin for GameplayPlugin {
@@ -205,7 +245,11 @@ impl Plugin for GameplayPlugin {
         app.init_resource::<Phase>()
             .init_resource::<Pending>()
             .init_resource::<ReleaseInfo>()
-            .init_resource::<ShotAttempt>();
+            .init_resource::<ShotAttempt>()
+            .init_resource::<RecentBalls>()
+            .init_resource::<crate::render::camera_rig::BallRecording>()
+            .init_resource::<crate::render::camera_rig::ReplayState>()
+            .init_resource::<crate::render::camera_rig::PresentationState>();
     }
 }
 

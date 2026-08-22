@@ -9,11 +9,15 @@ mod render;
 mod state;
 mod ui;
 
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::Screenshot;
+use bevy::window::WindowResolution;
 use game::match_flow::{self, MatchScene};
 use game::*;
 use render::camera_rig::CameraRig;
+use render::sky::{create_sky_texture, sky_texture_for_time};
+use render::{DayEnvironmentLight, FloodlightFixture, FloodlightMaterials, NightEnvironmentLight, SkyTextures};
 use state::{AppState, RebuildScene};
 
 /// Gameplay systems only run while the match resources actually exist
@@ -28,6 +32,7 @@ fn main() {
             DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Willow Cricket".into(),
+                    resolution: WindowResolution::new(1920, 1080),
                     ..default()
                 }),
                 ..default()
@@ -63,6 +68,7 @@ fn main() {
             Update,
             (
                 match_flow::sys_ball_physics,
+                match_flow::sys_ball_trail,
                 match_flow::sys_shot_input,
                 match_flow::sys_contact_watch,
                 match_flow::sys_pending_watch,
@@ -74,6 +80,7 @@ fn main() {
         .add_systems(
             Update,
             (
+                match_flow::record_ball_flight,
                 match_flow::sys_ready,
                 match_flow::sys_aim,
                 match_flow::sys_runup,
@@ -81,7 +88,9 @@ fn main() {
                 match_flow::sys_over_break,
                 match_flow::sys_innings_break,
                 match_flow::sys_camera_modes,
+                match_flow::sys_stadium_qa_camera.after(match_flow::sys_camera_modes),
                 match_flow::fielding_brain_reset,
+                match_flow::clear_recent_on_innings_change,
             )
                 .run_if(in_live_match()),
         )
@@ -97,13 +106,10 @@ fn main() {
             )
                 .run_if(in_live_match()),
         )
+        // Director sets rig.mode, QA may override for stadium captures, then apply transform.
         .add_systems(
             Update,
-            (
-                game::ball::trail_spawn_system,
-                game::ball::trail_fade_system,
-            )
-                .run_if(in_live_match()),
+            render::camera_rig::update_camera.after(match_flow::sys_stadium_qa_camera),
         )
         .add_systems(
             Update,
@@ -145,13 +151,21 @@ fn autotest_drive(
     mut input: ResMut<input::PlayerInput>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
+    mut stadium_time: ResMut<StadiumTime>,
     mut t: Local<f32>,
     mut last_press: Local<u32>,
     mut last_milestone: Local<u32>,
     mut last_swing_t: Local<f32>,
+    mut night_applied: Local<bool>,
 ) {
     let mode = std::env::var("CRICKET_AUTOTEST").unwrap_or_default();
-    if mode != "1" && mode != "tournament" && mode != "settings" {
+    if mode != "1"
+        && mode != "tournament"
+        && mode != "settings"
+        && mode != "night"
+        && mode != "stadium"
+        && mode != "stadium-night"
+    {
         return;
     }
     *t += time.delta_secs();
@@ -179,6 +193,7 @@ fn autotest_drive(
             (99.0, input::Action::Confirm),
         ]
     } else {
+        // "1", "night", "stadium", and "stadium-night" share the quick-match path.
         [
             (2.0, input::Action::Confirm), // Quick Match -> team select
             (3.5, input::Action::Confirm), // pick your team
@@ -198,20 +213,31 @@ fn autotest_drive(
         }
     }
 
-    // In-match: swing periodically once play is under way.
-    if now > 14.0 && now - *last_swing_t >= 3.0 {
+    // Night / stadium-night: switch to floodlit mode once the match scene is live.
+    if (mode == "night" || mode == "stadium-night") && now > 11.5 && !*night_applied {
+        *stadium_time = StadiumTime::Night;
+        *night_applied = true;
+        info!("AUTOTEST: switched to night stadium lighting");
+    }
+
+    // In-match: swing periodically once play is under way (not stadium captures).
+    if mode != "stadium" && mode != "stadium-night" && now > 14.0 && now - *last_swing_t >= 3.0 {
         *last_swing_t = now;
         input.just_pressed.push(input::Action::Confirm);
         info!("AUTOTEST: shot swing @ {:.1}s", now);
     }
 
     // Milestones: screenshots + clean exit.
-    let milestones = if mode == "tournament" {
-        [1.5_f32, 5.0, 7.0, 14.0]
+    let milestones: &[f32] = if mode == "tournament" {
+        &[1.5, 5.0, 7.0, 14.0]
     } else if mode == "settings" {
-        [1.5_f32, 5.0, 6.8, 8.5]
+        &[1.5, 5.0, 6.8, 8.5]
+    } else if mode == "night" {
+        &[1.5, 16.0, 30.0, 45.0]
+    } else if mode == "stadium" || mode == "stadium-night" {
+        &[16.0]
     } else {
-        [1.5_f32, 16.0, 30.0, 45.0]
+        &[1.5, 16.0, 30.0, 45.0]
     };
     for (i, when) in milestones.iter().enumerate() {
         let step = 100 + i as u32;
@@ -224,6 +250,10 @@ fn autotest_drive(
         20.0
     } else if mode == "settings" {
         10.0
+    } else if mode == "stadium" || mode == "stadium-night" {
+        20.0
+    } else if mode == "night" {
+        50.0
     } else {
         50.0
     };
@@ -238,24 +268,51 @@ pub enum StadiumTime { Day, Night }
 impl Default for StadiumTime { fn default() -> Self { StadiumTime::Day } }
 
 #[derive(Component)]
-struct DayLight;
-#[derive(Component)]
-struct NightLight;
-#[derive(Component)]
 struct SkySphere;
+
+/// Day exposure (ev100). Lower = brighter outfield; keep headroom for sky.
+const DAY_EV100: f32 = 10.2;
+/// Night exposure — ~0.6 stop brighter than prior pass for TV floodlit readability.
+const NIGHT_EV100: f32 = 8.8;
+
+/// Aerial broadcast distances (~150–230 m); fog must not fully occlude the far oval.
+const DAY_FOG_START: f32 = 180.0;
+const DAY_FOG_END: f32 = 450.0;
+const NIGHT_FOG_START: f32 = 110.0;
+const NIGHT_FOG_END: f32 = 350.0;
+
+fn distance_fog_falloff(time: StadiumTime) -> bevy::pbr::FogFalloff {
+    use bevy::pbr::FogFalloff;
+    match time {
+        StadiumTime::Day => FogFalloff::Linear {
+            start: DAY_FOG_START,
+            end: DAY_FOG_END,
+        },
+        StadiumTime::Night => FogFalloff::Linear {
+            start: NIGHT_FOG_START,
+            end: NIGHT_FOG_END,
+        },
+    }
+}
 
 fn setup_basics(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    stadium_time: Res<StadiumTime>,
 ) {
-    use bevy::pbr::{DistanceFog, FogFalloff};
+    use bevy::pbr::DistanceFog;
 
-    // --- Sky sphere with procedural gradient texture (day: blue, night: starry) ---
-    let sky_texture = images.add(create_sky_texture(false));
+    // Sky textures generated once and cached — never per frame.
+    let day_tex = images.add(create_sky_texture(false));
+    let night_tex = images.add(create_sky_texture(true));
+    commands.insert_resource(SkyTextures {
+        day: day_tex.clone(),
+        night: night_tex.clone(),
+    });
     let sky_mat = materials.add(StandardMaterial {
-        base_color_texture: Some(sky_texture),
+        base_color_texture: Some(day_tex),
         unlit: true,
         cull_mode: None,
         double_sided: true,
@@ -267,166 +324,169 @@ fn setup_basics(
         MeshMaterial3d(sky_mat),
         Transform::from_translation(Vec3::Y * -6.0),
         Visibility::default(),
+        NotShadowCaster,
+        NotShadowReceiver,
     ));
 
-    // Day sun (warm late-afternoon)
+    // Day key sun (warm late-afternoon).
     commands.spawn((
-        DayLight,
+        DayEnvironmentLight,
         DirectionalLight {
-            illuminance: 28_000.0,
+            illuminance: 54_000.0,
             shadows_enabled: true,
-            color: Color::srgb(1.0, 0.97, 0.88),
+            color: Color::srgb(1.0, 0.94, 0.82),
             ..default()
         },
-        Transform::from_translation(Vec3::new(-45.0, 68.0, 22.0))
+        Transform::from_translation(Vec3::new(-52.0, 82.0, 22.0))
             .looking_at(Vec3::ZERO, Vec3::Y),
     ));
-    // Night moon + floodlights (cool, dimmer sun + bright spots)
+    // Cool skylight fill — readable shadows without flat wash.
     commands.spawn((
-        NightLight,
+        DayEnvironmentLight,
         DirectionalLight {
-            illuminance: 2_200.0,
-            shadows_enabled: true,
-            color: Color::srgb(0.72, 0.78, 1.0),
+            illuminance: 5_800.0,
+            shadows_enabled: false,
+            color: Color::srgb(0.58, 0.68, 0.92),
+            ..default()
+        },
+        Transform::from_translation(Vec3::new(42.0, 48.0, -28.0))
+            .looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+    // Night moon key (flood spots are built with the stadium).
+    commands.spawn((
+        NightEnvironmentLight,
+        DirectionalLight {
+            illuminance: 1_100.0,
+            shadows_enabled: false,
+            color: Color::srgb(0.62, 0.70, 0.92),
             ..default()
         },
         Transform::from_translation(Vec3::new(30.0, 55.0, -18.0))
             .looking_at(Vec3::ZERO, Vec3::Y),
         Visibility::Hidden,
     ));
-    for (x, z) in [(-42.0, 38.0), (42.0, 38.0), (-42.0, -38.0), (42.0, -38.0)] {
-        commands.spawn((
-            NightLight,
-            PointLight {
-                intensity: 1_800_000.0,
-                range: 90.0,
-                radius: 2.0,
-                shadows_enabled: true,
-                color: Color::srgb(1.0, 0.96, 0.88),
-                ..default()
-            },
-            Transform::from_translation(Vec3::new(x, 26.0, z)),
-            Visibility::Hidden,
-        ));
-    }
 
     // Main 3D camera (UI renders onto the primary window camera).
     commands.spawn((
         Camera {
             clear_color: bevy::camera::ClearColorConfig::Custom(
-                Color::srgb(0.53, 0.81, 0.98),
+                Color::srgb(0.50, 0.68, 0.90),
             ),
             ..default()
         },
         Camera3d::default(),
-        Transform::from_xyz(24.0, 9.0, 2.0)
-            .looking_at(Vec3::new(-10.0, 1.0, 0.0), Vec3::Y),
+        Msaa::Sample4,
+        Transform::from_xyz(36.0, 13.8, 2.2)
+            .looking_at(Vec3::new(-0.6, 0.78, 0.0), Vec3::Y),
         IsDefaultUiCamera,
-        DistanceFog {
-            color: Color::srgba(0.68, 0.80, 0.94, 1.0),
-            falloff: FogFalloff::Linear {
-                start: 55.0,
-                end: 145.0,
+        bevy::core_pipeline::tonemapping::Tonemapping::TonyMcMapface,
+        bevy::camera::Exposure {
+            ev100: match *stadium_time {
+                StadiumTime::Day => DAY_EV100,
+                StadiumTime::Night => NIGHT_EV100,
             },
+        },
+        DistanceFog {
+            color: Color::srgba(0.58, 0.72, 0.88, 1.0),
+            falloff: distance_fog_falloff(*stadium_time),
             ..default()
         },
     ));
     commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.82, 0.88, 1.0),
-        brightness: 1300.0,
+        color: Color::srgb(0.72, 0.78, 0.92),
+        brightness: 520.0,
         affects_lightmapped_meshes: true,
     });
+    commands.insert_resource(bevy::light::DirectionalLightShadowMap { size: 4096 });
     commands.insert_resource(StadiumTime::Day);
-    // Warm-up the mesh/material registries.
     let _ = meshes.add(Sphere::new(0.1));
     let _ = materials.add(Color::WHITE);
 }
 
-fn create_sky_texture(night: bool) -> Image {
-    use bevy::asset::RenderAssetUsages;
-    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-    let size = 512u32;
-    let mut data = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        let v = y as f32 / size as f32; // 0 bottom, 1 top
-        let col = if night {
-            // Night: deep navy top, horizon dark blue, stars
-            let base = Color::srgb(
-                0.04 + v * 0.06,
-                0.06 + v * 0.08,
-                0.14 + v * 0.18,
-            );
-            let mut srgba = base.to_srgba();
-            // Add stars: pseudo-random white dots
-            let hash = ((y * 7919 + (y % 7) * 997) % 512) as f32;
-            if hash < 2.0 && v > 0.35 {
-                srgba.red = 1.0; srgba.green = 1.0; srgba.blue = 1.0;
-            }
-            srgba
-        } else {
-            // Day: horizon pale blue -> zenith deep blue
-            let t = v.powf(0.9);
-            Color::srgb(
-                0.62 + t * 0.18,
-                0.78 + t * 0.12,
-                0.95 + t * 0.03,
-            ).to_srgba()
-        };
-        for _ in 0..size {
-            data.extend_from_slice(&[
-                (col.red * 255.0) as u8,
-                (col.green * 255.0) as u8,
-                (col.blue * 255.0) as u8,
-                255,
-            ]);
-        }
-    }
-    Image::new(
-        Extent3d { width: size, height: size, depth_or_array_layers: 1 },
-        TextureDimension::D2,
-        data,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-}
-
 fn update_stadium_time(
     time: Res<StadiumTime>,
-    mut day_lights: Query<&mut Visibility, (With<DayLight>, Without<NightLight>)>,
-    mut night_lights: Query<&mut Visibility, (With<NightLight>, Without<DayLight>)>,
-    mut sky_q: Query<&mut MeshMaterial3d<StandardMaterial>, With<SkySphere>>,
+    sky_textures: Res<SkyTextures>,
+    mut day_lights: Query<&mut Visibility, (With<DayEnvironmentLight>, Without<NightEnvironmentLight>)>,
+    mut night_lights: Query<&mut Visibility, (With<NightEnvironmentLight>, Without<DayEnvironmentLight>)>,
+    mut sky_q: Query<
+        &mut MeshMaterial3d<StandardMaterial>,
+        (With<SkySphere>, Without<FloodlightFixture>),
+    >,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
     mut fog_q: Query<&mut DistanceFog>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut cam_q: Query<&mut Camera>,
+    mut exposure_q: Query<&mut bevy::camera::Exposure, With<Camera3d>>,
+    mut fixtures: Query<
+        &mut MeshMaterial3d<StandardMaterial>,
+        (With<FloodlightFixture>, Without<SkySphere>),
+    >,
+    fixture_mats: Option<Res<FloodlightMaterials>>,
 ) {
+    if !time.is_changed() {
+        return;
+    }
     let is_night = *time == StadiumTime::Night;
-    for mut v in &mut day_lights { *v = if is_night { Visibility::Hidden } else { Visibility::Visible }; }
-    for mut v in &mut night_lights { *v = if is_night { Visibility::Visible } else { Visibility::Hidden }; }
-    // Fog and ambient
-    if let Ok(mut fog) = fog_q.single_mut() {
-        fog.color = if is_night { Color::srgba(0.08, 0.10, 0.16, 1.0) } else { Color::srgba(0.68, 0.80, 0.94, 1.0) };
+    if let Ok(mut exp) = exposure_q.single_mut() {
+        exp.ev100 = if is_night { NIGHT_EV100 } else { DAY_EV100 };
     }
-    {
-        let new = if is_night {
-            GlobalAmbientLight { color: Color::srgb(0.35, 0.38, 0.55), brightness: 420.0, affects_lightmapped_meshes: true }
+    for mut v in &mut day_lights {
+        *v = if is_night {
+            Visibility::Hidden
         } else {
-            GlobalAmbientLight { color: Color::srgb(0.82, 0.88, 1.0), brightness: 1300.0, affects_lightmapped_meshes: true }
+            Visibility::Visible
         };
-        *ambient = new;
     }
+    for mut v in &mut night_lights {
+        *v = if is_night {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    if let Ok(mut fog) = fog_q.single_mut() {
+        fog.color = if is_night {
+            Color::srgba(0.04, 0.06, 0.12, 1.0)
+        } else {
+            Color::srgba(0.55, 0.70, 0.88, 1.0)
+        };
+        fog.falloff = distance_fog_falloff(*time);
+    }
+    *ambient = if is_night {
+        GlobalAmbientLight {
+            color: Color::srgb(0.36, 0.40, 0.54),
+            brightness: 410.0,
+            affects_lightmapped_meshes: true,
+        }
+    } else {
+        GlobalAmbientLight {
+            color: Color::srgb(0.72, 0.78, 0.92),
+            brightness: 520.0,
+            affects_lightmapped_meshes: true,
+        }
+    };
     if let Ok(mut cam) = cam_q.single_mut() {
-        cam.clear_color = bevy::camera::ClearColorConfig::Custom(
-            if is_night { Color::srgb(0.02, 0.03, 0.08) } else { Color::srgb(0.53, 0.81, 0.98) }
-        );
+        cam.clear_color = bevy::camera::ClearColorConfig::Custom(if is_night {
+            Color::srgb(0.02, 0.03, 0.08)
+        } else {
+            Color::srgb(0.50, 0.68, 0.90)
+        });
     }
-    // Sky texture swap
-    if let Ok(handle) = sky_q.single() {
+    if let Ok(handle) = sky_q.single_mut() {
         if let Some(mat) = materials.get_mut(&handle.0) {
-            // Only recreate if needed (check current is not already correct type is hard, so just recreate)
-            let tex = images.add(create_sky_texture(is_night));
-            mat.base_color_texture = Some(tex);
+            mat.base_color_texture = Some(
+                sky_texture_for_time(is_night, &sky_textures.day, &sky_textures.night).clone(),
+            );
+        }
+    }
+    if let Some(mats) = fixture_mats {
+        let target = if is_night {
+            mats.night.clone()
+        } else {
+            mats.day.clone()
+        };
+        for mut mat_handle in &mut fixtures {
+            mat_handle.0 = target.clone();
         }
     }
 }
@@ -500,5 +560,29 @@ fn handle_rebuild_scene(
             &mut commands, &asset_server, &mut meshes, &mut materials, &mut images, &wd, am);
         commands.insert_resource(new_scene);
         commands.insert_resource(Phase(PhaseEnum::ReadyToBall { t: 0.0 }));
+    }
+}
+
+#[cfg(test)]
+mod fog_tests {
+    use super::*;
+    use bevy::pbr::FogFalloff;
+
+    #[test]
+    fn distance_fog_falloff_matches_day_night_constants() {
+        match distance_fog_falloff(StadiumTime::Day) {
+            FogFalloff::Linear { start, end } => {
+                assert_eq!(start, DAY_FOG_START);
+                assert_eq!(end, DAY_FOG_END);
+            }
+            _ => panic!("expected linear day fog"),
+        }
+        match distance_fog_falloff(StadiumTime::Night) {
+            FogFalloff::Linear { start, end } => {
+                assert_eq!(start, NIGHT_FOG_START);
+                assert_eq!(end, NIGHT_FOG_END);
+            }
+            _ => panic!("expected linear night fog"),
+        }
     }
 }

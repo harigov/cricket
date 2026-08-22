@@ -6,9 +6,43 @@ use crate::game::audio::AudioSettings;
 use crate::game::*;
 use crate::input::{key_label, Action, KeyBindings, PlayerInput, RebindState};
 use crate::state::AppState;
+use crate::ui::theme::{self, MenuTransition, UiPreferences, UiScale};
 use bevy::prelude::*;
 
 const OVERS_CHOICES: [u32; 3] = [5, 10, 20];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsTab {
+    Audio,
+    Controls,
+    Display,
+}
+
+impl SettingsTab {
+    fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Audio => "AUDIO",
+            SettingsTab::Controls => "CONTROLS",
+            SettingsTab::Display => "DISPLAY",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            SettingsTab::Audio => SettingsTab::Controls,
+            SettingsTab::Controls => SettingsTab::Display,
+            SettingsTab::Display => SettingsTab::Audio,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            SettingsTab::Audio => SettingsTab::Display,
+            SettingsTab::Controls => SettingsTab::Audio,
+            SettingsTab::Display => SettingsTab::Controls,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -32,6 +66,10 @@ pub struct MenuState {
     /// Index into stadiums; usize::MAX means "random each match".
     pub stadium_idx: usize,
     pub bat_first: bool,
+    /// Settings screen active tab.
+    pub settings_tab: SettingsTab,
+    /// Toss coin-flip animation timer (SetupBatFirst).
+    pub toss_anim: f32,
     /// true when the current setup wizard leads into a tournament.
     pub tournament_mode: bool,
 }
@@ -46,6 +84,8 @@ impl Default for MenuState {
             overs_idx: 2,
             stadium_idx: usize::MAX,
             bat_first: true,
+            settings_tab: SettingsTab::Audio,
+            toss_anim: 0.0,
             tournament_mode: false,
         }
     }
@@ -93,10 +133,33 @@ impl Plugin for MenusPlugin {
             .add_systems(OnExit(AppState::Menu), despawn_menu_root)
             .add_systems(
                 Update,
-                (refresh_menu, handle_menu_input, handle_match_exit)
+                (
+                    sync_ui_scale,
+                    tick_toss_anim,
+                    refresh_menu,
+                    handle_menu_input,
+                    handle_match_exit,
+                )
                     .run_if(in_state(AppState::Menu)),
             );
     }
+}
+
+fn sync_ui_scale(prefs: Res<UiPreferences>, mut scale: ResMut<UiScale>) {
+    scale.0 = prefs.ui_scale.clamp(0.75, 1.5);
+}
+
+fn tick_toss_anim(time: Res<Time>, mut ms: ResMut<MenuState>) {
+    if ms.screen == Screen::SetupBatFirst {
+        ms.toss_anim += time.delta_secs();
+    } else {
+        ms.toss_anim = 0.0;
+    }
+}
+
+fn trigger_screen_transition(trans: &mut MenuTransition, _screen: Screen) {
+    trans.active = true;
+    trans.t = 0.0;
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +266,7 @@ fn screen_items(
     bindings: &KeyBindings,
     audio: &AudioSettings,
     rebind: &RebindState,
+    ui: &UiPreferences,
 ) -> Vec<String> {
     match ms.screen {
         Screen::Main => vec![
@@ -227,7 +291,7 @@ fn screen_items(
             .chain(std::iter::once("Random venue".into()))
             .collect(),
         Screen::SetupBatFirst => vec!["We will BAT first".into(), "We will BOWL first".into()],
-        Screen::Settings => settings_lines(bindings, audio, rebind),
+        Screen::Settings => settings_lines(ms.settings_tab, bindings, audio, rebind, ui),
         Screen::Bracket => bracket_lines(ct),
     }
 }
@@ -246,29 +310,69 @@ const SETTINGS_ACTIONS: &[(Action, &str)] = &[
 ];
 
 fn settings_lines(
+    tab: SettingsTab,
     bindings: &KeyBindings,
     audio: &AudioSettings,
     rebind: &RebindState,
+    ui: &UiPreferences,
 ) -> Vec<String> {
-    let mut out = Vec::new();
-    out.push(format!("Master Volume : {:>3}%  (A/D to adjust)", (audio.master * 100.0) as i32));
-    out.push(format!("SFX Volume    : {:>3}%  (A/D to adjust)", (audio.sfx * 100.0) as i32));
-    out.push(format!("Music Volume  : {:>3}%  (A/D to adjust)", (audio.music * 100.0) as i32));
-    for (action, label) in SETTINGS_ACTIONS {
-        let key_str = if rebind.0 == Some(*action) {
-            "Press any key...".to_string()
-        } else {
-            bindings
-                .map
-                .get(action)
-                .map(|k| key_label(*k))
-                .unwrap_or_else(|| "-".into())
-        };
-        out.push(format!("{label:16} : {key_str}"));
+    let mut out = vec![format!("Tab: {}", tab.label())];
+    match tab {
+        SettingsTab::Audio => {
+            out.push(format!("Master Volume : {:>3}%  (←/→ adjust)", (audio.master * 100.0) as i32));
+            out.push(format!("SFX Volume    : {:>3}%  (←/→ adjust)", (audio.sfx * 100.0) as i32));
+            out.push(format!("Music Volume  : {:>3}%  (←/→ adjust)", (audio.music * 100.0) as i32));
+            out.push(format!(
+                "Commentary Vol: {:>3}%  (←/→ adjust)",
+                (audio.commentary_volume * 100.0) as i32
+            ));
+            let comm_label = match audio.commentary {
+                crate::game::audio::CommentaryVoice::Off => "Off",
+                crate::game::audio::CommentaryVoice::Male => "Ryan (M lead)",
+                crate::game::audio::CommentaryVoice::Female => "Natasha (F lead)",
+            };
+            out.push(format!("Commentary Voice : {comm_label:16} (←/→ cycle)"));
+        }
+        SettingsTab::Controls => {
+            for (action, label) in SETTINGS_ACTIONS {
+                let key_str = if rebind.0 == Some(*action) {
+                    "Press any key...".to_string()
+                } else {
+                    bindings
+                        .map
+                        .get(action)
+                        .map(|k| key_label(*k))
+                        .unwrap_or_else(|| "-".into())
+                };
+                out.push(format!("{label:16} : {key_str}"));
+            }
+            out.push("Reset controls to defaults".into());
+        }
+        SettingsTab::Display => {
+            out.push(format!(
+                "UI Scale      : {:>4.0}%  (←/→ adjust)",
+                ui.ui_scale * 100.0
+            ));
+            out.push(format!(
+                "High Contrast : {}",
+                if ui.high_contrast { "On" } else { "Off" }
+            ));
+            out.push(format!(
+                "Subtitle Size : {:>4.0}%  (←/→ adjust)",
+                ui.subtitle_scale * 100.0
+            ));
+        }
     }
-    out.push("Reset to defaults".into());
     out.push("Back".into());
     out
+}
+
+fn settings_item_count(tab: SettingsTab) -> usize {
+    match tab {
+        SettingsTab::Audio => 6,    // header + 5 + back
+        SettingsTab::Controls => 12, // header + 10 + reset + back
+        SettingsTab::Display => 5,  // header + 3 + back
+    }
 }
 
 fn bracket_lines(ct: &CurrentTournament) -> Vec<String> {
@@ -326,6 +430,10 @@ fn refresh_menu(
     bindings: Res<KeyBindings>,
     audio: Res<AudioSettings>,
     rebind: Res<RebindState>,
+    ui_prefs: Res<UiPreferences>,
+    ui_scale: Res<UiScale>,
+    trans: Res<MenuTransition>,
+    assets: Res<AssetServer>,
     mut root_q: Query<(Entity, &mut Node, &MenuFonts), With<MenuList>>,
     mut backdrop_q: Query<(&mut ImageNode, &MenuBackdrop)>,
     children_q: Query<&Children>,
@@ -333,6 +441,12 @@ fn refresh_menu(
 ) {
     let Ok((root, mut root_node, fonts)) = root_q.single_mut() else { return };
     let is_main = ms.screen == Screen::Main;
+    let scale = ui_scale.0;
+    let fade = if trans.active {
+        (trans.t / 0.28).min(1.0)
+    } else {
+        0.0
+    };
 
     if let Ok((mut image, art)) = backdrop_q.single_mut() {
         image.image = if is_main {
@@ -418,15 +532,90 @@ fn refresh_menu(
             Node {
                 flex_direction: FlexDirection::Column,
                 align_items: if is_main { AlignItems::Stretch } else { AlignItems::Center },
-                row_gap: px(if ms.screen == Screen::Settings { 3 } else { 7 }),
+                row_gap: theme::spx(if ms.screen == Screen::Settings { 3.0 } else { 7.0 }, scale),
                 width: if is_main { percent(100) } else { auto() },
-                margin: UiRect::vertical(px(if is_main { 10 } else { 4 })),
+                margin: UiRect::vertical(theme::spx(if is_main { 10.0 } else { 4.0 }, scale)),
                 ..default()
             },
         )).with_children(|items| {
-            for (i, line) in
-                screen_items(&ms, &wd, &ct, &bindings, &audio, &rebind).into_iter().enumerate()
+            // Settings tab bar
+            if ms.screen == Screen::Settings {
+                items.spawn((
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: theme::spx(8.0, scale),
+                        margin: UiRect::bottom(theme::spx(6.0, scale)),
+                        ..default()
+                    },
+                )).with_children(|tabs| {
+                    for tab in [SettingsTab::Audio, SettingsTab::Controls, SettingsTab::Display] {
+                        let active = tab == ms.settings_tab;
+                        tabs.spawn((
+                            Node {
+                                padding: UiRect::axes(theme::spx(14.0, scale), theme::spx(5.0, scale)),
+                                border_radius: BorderRadius::all(theme::spx(3.0, scale)),
+                                ..default()
+                            },
+                            BackgroundColor(if active {
+                                theme::palette::accent_blue()
+                            } else {
+                                Color::srgba(0.12, 0.14, 0.18, 0.85)
+                            }),
+                        )).with_children(|t| {
+                            t.spawn((
+                                Text::new(tab.label()),
+                                TextFont {
+                                    font: fonts.bold.clone(),
+                                    font_size: 11.0 * scale,
+                                    ..default()
+                                },
+                                TextColor(if active {
+                                    Color::WHITE
+                                } else {
+                                    theme::palette::text_muted()
+                                }),
+                            ));
+                        });
+                    }
+                });
+            }
+
+            // Visual setup: team cards, stadium cards, toss, versus banner
+            if matches!(
+                ms.screen,
+                Screen::SetupTeam | Screen::SetupOpp | Screen::SetupStadium | Screen::SetupOvers
+                    | Screen::SetupBatFirst
+            ) {
+                spawn_setup_visuals(
+                    items,
+                    &ms,
+                    &wd,
+                    &assets,
+                    &fonts,
+                    scale,
+                    &ui_prefs,
+                );
+            }
+
+            let lines = if ms.screen == Screen::Settings {
+                settings_lines(ms.settings_tab, &bindings, &audio, &rebind, &ui_prefs)
+            } else {
+                screen_items(&ms, &wd, &ct, &bindings, &audio, &rebind, &ui_prefs)
+            };
+
+            for (i, line) in lines.into_iter().enumerate()
             {
+                // Skip plain text rows on visual setup screens (cards replace them).
+                if matches!(
+                    ms.screen,
+                    Screen::SetupTeam | Screen::SetupOpp | Screen::SetupStadium | Screen::SetupOvers
+                ) && !line.starts_with("Tab:")
+                {
+                    continue;
+                }
+                if ms.screen == Screen::SetupBatFirst && i < 2 {
+                    continue;
+                }
                 let selectable = !matches!(ms.screen, Screen::Bracket);
                 let selected = i == ms.sel && selectable;
                 let is_settings = ms.screen == Screen::Settings;
@@ -549,18 +738,342 @@ fn refresh_menu(
             }
         });
         if ms.screen != Screen::Bracket {
+            let hint = if ms.screen == Screen::Settings {
+                "Q / E  SWITCH TAB     W / S  NAVIGATE     SPACE  SELECT     ESC  BACK"
+            } else {
+                "W / S  NAVIGATE     SPACE  SELECT     ESC  BACK"
+            };
             p.spawn((
-                Text::new("W / S  NAVIGATE     SPACE  SELECT     ESC  BACK"),
+                Text::new(hint),
                 TextFont {
                     font: fonts.bold.clone(),
-                    font_size: 10.0,
+                    font_size: 10.0 * scale,
                     ..default()
                 },
                 TextColor(Color::srgba(0.72, 0.76, 0.70, 0.72)),
-                Node { margin: UiRect::top(px(8)), ..default() },
+                Node { margin: UiRect::top(theme::spx(8.0, scale)), ..default() },
+            ));
+        }
+
+        // Transition wipe overlay
+        if fade > 0.0 {
+            p.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: percent(100),
+                    height: percent(100),
+                    left: px(0),
+                    top: px(0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.02, 0.05, 0.04, fade * 0.55)),
             ));
         }
     });
+}
+
+/// Rich setup presentation: team crest cards, stadium info, toss sequence.
+fn spawn_setup_visuals(
+    parent: &mut ChildSpawnerCommands,
+    ms: &MenuState,
+    wd: &WorldData,
+    assets: &AssetServer,
+    fonts: &MenuFonts,
+    scale: f32,
+    ui_prefs: &UiPreferences,
+) {
+    let hc = ui_prefs.high_contrast;
+    match ms.screen {
+        Screen::SetupTeam | Screen::SetupOpp => {
+            parent.spawn((
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    width: theme::spx(620.0, scale),
+                    column_gap: theme::spx(10.0, scale),
+                    row_gap: theme::spx(10.0, scale),
+                    justify_content: JustifyContent::Center,
+                    margin: UiRect::bottom(theme::spx(8.0, scale)),
+                    ..default()
+                },
+            )).with_children(|grid| {
+                for (i, team) in wd.teams.iter().enumerate() {
+                    if ms.screen == Screen::SetupOpp && i == ms.team {
+                        continue;
+                    }
+                    let selected = i == ms.sel;
+                    let crest = crate::render::load_team_crest(assets, &team.crest_asset());
+                    grid.spawn((
+                        Node {
+                            width: theme::spx(140.0, scale),
+                            height: theme::spx(118.0, scale),
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::Center,
+                            padding: UiRect::all(theme::spx(8.0, scale)),
+                            border: UiRect::all(px(if selected { 3 } else { 1 })),
+                            border_radius: BorderRadius::all(theme::spx(6.0, scale)),
+                            ..default()
+                        },
+                        BackgroundColor(if selected {
+                            if hc {
+                                Color::srgba(0.35, 0.35, 0.40, 0.95)
+                            } else {
+                                theme::palette::selection_bg()
+                            }
+                        } else {
+                            Color::srgba(0.08, 0.10, 0.12, 0.88)
+                        }),
+                        BorderColor::all(if selected {
+                            theme::palette::selection_border()
+                        } else {
+                            Color::srgba(0.45, 0.50, 0.55, 0.35)
+                        }),
+                    )).with_children(|card| {
+                        card.spawn((
+                            ImageNode::new(crest),
+                            Node {
+                                width: theme::spx(52.0, scale),
+                                height: theme::spx(52.0, scale),
+                                ..default()
+                            },
+                        ));
+                        card.spawn((
+                            Text::new(team.short.to_uppercase()),
+                            TextFont {
+                                font: fonts.display.clone(),
+                                font_size: 18.0 * scale,
+                                ..default()
+                            },
+                            TextColor(theme::palette::text_primary()),
+                        ));
+                        card.spawn((
+                            Node {
+                                width: theme::spx(90.0, scale),
+                                height: theme::spx(6.0, scale),
+                                margin: UiRect::top(theme::spx(4.0, scale)),
+                                ..default()
+                            },
+                            BackgroundColor(team.primary_color),
+                        ));
+                        card.spawn((
+                            Text::new(&team.name),
+                            TextFont {
+                                font: fonts.regular.clone(),
+                                font_size: 10.0 * scale,
+                                ..default()
+                            },
+                            TextColor(theme::palette::text_muted()),
+                        ));
+                    });
+                }
+            });
+        }
+        Screen::SetupOvers => {
+            parent.spawn((
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: theme::spx(16.0, scale),
+                    margin: UiRect::bottom(theme::spx(10.0, scale)),
+                    ..default()
+                },
+            )).with_children(|row| {
+                for (i, overs) in OVERS_CHOICES.iter().enumerate() {
+                    let selected = i == ms.sel;
+                    row.spawn((
+                        Node {
+                            width: theme::spx(120.0, scale),
+                            height: theme::spx(90.0, scale),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            border: UiRect::all(px(if selected { 3 } else { 1 })),
+                            border_radius: BorderRadius::all(theme::spx(6.0, scale)),
+                            ..default()
+                        },
+                        BackgroundColor(if selected {
+                            theme::palette::selection_bg()
+                        } else {
+                            Color::srgba(0.08, 0.10, 0.12, 0.88)
+                        }),
+                        BorderColor::all(if selected {
+                            theme::palette::gold()
+                        } else {
+                            Color::srgba(0.45, 0.50, 0.55, 0.35)
+                        }),
+                    )).with_children(|card| {
+                        card.spawn((
+                            Text::new(format!("{overs}")),
+                            TextFont {
+                                font: fonts.display.clone(),
+                                font_size: 36.0 * scale,
+                                ..default()
+                            },
+                            TextColor(Color::WHITE),
+                        ));
+                        card.spawn((
+                            Text::new("OVERS"),
+                            TextFont {
+                                font: fonts.bold.clone(),
+                                font_size: 11.0 * scale,
+                                ..default()
+                            },
+                            TextColor(theme::palette::text_muted()),
+                        ));
+                    });
+                }
+            });
+        }
+        Screen::SetupStadium => {
+            parent.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: theme::spx(8.0, scale),
+                    width: theme::spx(560.0, scale),
+                    margin: UiRect::bottom(theme::spx(8.0, scale)),
+                    ..default()
+                },
+            )).with_children(|list| {
+                let count = wd.stadiums.len() + 1;
+                for i in 0..count {
+                    let selected = i == ms.sel;
+                    let (title, detail) = if i >= wd.stadiums.len() {
+                        ("Random Venue".into(), "Surprise pick each match".into())
+                    } else {
+                        let s = &wd.stadiums[i];
+                        (
+                            s.name.clone(),
+                            format!("{}  •  {} pitch  •  {} boundary",
+                                s.city, s.pitch.label(), format!("{:.0}m", s.boundary_radius())),
+                        )
+                    };
+                    list.spawn((
+                        Node {
+                            width: percent(100),
+                            padding: UiRect::all(theme::spx(10.0, scale)),
+                            border: UiRect::left(px(if selected { 4 } else { 0 })),
+                            align_items: AlignItems::FlexStart,
+                            ..default()
+                        },
+                        BackgroundColor(if selected {
+                            theme::palette::selection_bg()
+                        } else {
+                            Color::srgba(0.06, 0.08, 0.10, 0.82)
+                        }),
+                        BorderColor::all(if selected {
+                            theme::palette::gold()
+                        } else {
+                            Color::NONE
+                        }),
+                    )).with_children(|row| {
+                        row.spawn((
+                            Text::new(title),
+                            TextFont {
+                                font: fonts.bold.clone(),
+                                font_size: 15.0 * scale,
+                                ..default()
+                            },
+                            TextColor(if selected {
+                                Color::WHITE
+                            } else {
+                                theme::palette::text_primary()
+                            }),
+                        ));
+                        row.spawn((
+                            Text::new(detail),
+                            TextFont {
+                                font: fonts.regular.clone(),
+                                font_size: 11.0 * scale,
+                                ..default()
+                            },
+                            TextColor(theme::palette::text_muted()),
+                        ));
+                    });
+                }
+            });
+        }
+        Screen::SetupBatFirst => {
+            let user = &wd.teams[ms.team];
+            let opp = &wd.teams[ms.opp];
+            let flip = (ms.toss_anim * 8.0).sin();
+            parent.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: theme::spx(10.0, scale),
+                    margin: UiRect::bottom(theme::spx(12.0, scale)),
+                    ..default()
+                },
+            )).with_children(|toss| {
+                toss.spawn((
+                    Text::new("TOSS"),
+                    TextFont {
+                        font: fonts.display.clone(),
+                        font_size: 28.0 * scale,
+                        ..default()
+                    },
+                    TextColor(theme::palette::gold()),
+                ));
+                toss.spawn((
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        column_gap: theme::spx(24.0, scale),
+                        ..default()
+                    },
+                )).with_children(|versus| {
+                    for team in [user, opp] {
+                        versus.spawn((
+                            Node {
+                                flex_direction: FlexDirection::Column,
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                        )).with_children(|side| {
+                            side.spawn((
+                                ImageNode::new(crate::render::load_team_crest(
+                                    assets,
+                                    &team.crest_asset(),
+                                )),
+                                Node {
+                                    width: theme::spx(64.0, scale),
+                                    height: theme::spx(64.0, scale),
+                                    ..default()
+                                },
+                            ));
+                            side.spawn((
+                                Text::new(team.short.to_uppercase()),
+                                TextFont {
+                                    font: fonts.bold.clone(),
+                                    font_size: 16.0 * scale,
+                                    ..default()
+                                },
+                                TextColor(team.primary_color),
+                            ));
+                        });
+                    }
+                    versus.spawn((
+                        Text::new("VS"),
+                        TextFont {
+                            font: fonts.display.clone(),
+                            font_size: 22.0 * scale,
+                            ..default()
+                        },
+                        TextColor(Color::srgba(0.85, 0.85, 0.85, 0.65)),
+                    ));
+                });
+                let coin_side = if flip > 0.0 { "HEADS" } else { "TAILS" };
+                toss.spawn((
+                    Text::new(format!("Coin: {coin_side}")),
+                    TextFont {
+                        font: fonts.bold.clone(),
+                        font_size: 13.0 * scale,
+                        ..default()
+                    },
+                    TextColor(theme::palette::text_muted()),
+                ));
+            });
+        }
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +1091,8 @@ fn handle_menu_input(
     mut bindings: ResMut<KeyBindings>,
     mut rebind: ResMut<RebindState>,
     mut audio: ResMut<AudioSettings>,
+    mut ui_prefs: ResMut<UiPreferences>,
+    mut trans: ResMut<MenuTransition>,
     mut next_state: ResMut<NextState<AppState>>,
     mut exit: MessageWriter<AppExit>,
     mut commands: Commands,
@@ -612,12 +1127,10 @@ fn handle_menu_input(
             }
         }
         Settings => {
-            // Rebind capture mode
             if let Some(action) = rebind.0 {
                 if input.pressed(Action::Cancel) {
                     rebind.0 = None;
                 } else if let Some(&k) = keys.get_just_pressed().next() {
-                    // Ignore pure modifier presses
                     if !matches!(
                         k,
                         KeyCode::ShiftLeft
@@ -634,50 +1147,93 @@ fn handle_menu_input(
                 }
                 return;
             }
-            // Navigation among 15 rows (3 volumes + 10 bindings + reset + back)
-            navigate_list(&input, &mut ms.sel, 15);
-            // Volume sliders: rows 0,1,2
-            if ms.sel <= 2 {
-                let delta = if input.pressed(Action::Right) {
-                    0.05
-                } else if input.pressed(Action::Left) {
-                    -0.05
-                } else {
-                    0.0
-                };
-                if delta != 0.0 {
-                    match ms.sel {
-                        0 => audio.master = (audio.master + delta).clamp(0.0, 1.0),
-                        1 => audio.sfx = (audio.sfx + delta).clamp(0.0, 1.0),
-                        2 => audio.music = (audio.music + delta).clamp(0.0, 1.0),
-                        _ => {}
+
+            if input.pressed(Action::CycleType) {
+                ms.settings_tab = ms.settings_tab.next();
+                ms.sel = 0;
+            }
+            if input.pressed(Action::CycleCam) {
+                ms.settings_tab = ms.settings_tab.prev();
+                ms.sel = 0;
+            }
+
+            let count = settings_item_count(ms.settings_tab);
+            navigate_list(&input, &mut ms.sel, count);
+
+            let delta = if input.pressed(Action::Right) {
+                0.05
+            } else if input.pressed(Action::Left) {
+                -0.05
+            } else {
+                0.0
+            };
+
+            match ms.settings_tab {
+                SettingsTab::Audio => {
+                    if ms.sel >= 1 && ms.sel <= 4 && delta != 0.0 {
+                        match ms.sel {
+                            1 => audio.master = (audio.master + delta).clamp(0.0, 1.0),
+                            2 => audio.sfx = (audio.sfx + delta).clamp(0.0, 1.0),
+                            3 => audio.music = (audio.music + delta).clamp(0.0, 1.0),
+                            4 => {
+                                audio.commentary_volume =
+                                    (audio.commentary_volume + delta).clamp(0.0, 1.0)
+                            }
+                            _ => {}
+                        }
+                    } else if ms.sel == 5
+                        && (input.pressed(Action::Right) || input.pressed(Action::Left))
+                    {
+                        let dir = if input.pressed(Action::Right) { 1 } else { -1 };
+                        let cur = match audio.commentary {
+                            crate::game::audio::CommentaryVoice::Off => 0,
+                            crate::game::audio::CommentaryVoice::Male => 1,
+                            crate::game::audio::CommentaryVoice::Female => 2,
+                        };
+                        let next = (cur as i32 + dir).rem_euclid(3) as usize;
+                        audio.commentary = match next {
+                            0 => crate::game::audio::CommentaryVoice::Off,
+                            1 => crate::game::audio::CommentaryVoice::Male,
+                            _ => crate::game::audio::CommentaryVoice::Female,
+                        };
+                    }
+                }
+                SettingsTab::Controls => {
+                    if ms.sel >= 1 && ms.sel <= 10 && input.pressed(Action::Confirm) {
+                        if let Some((action, _)) = SETTINGS_ACTIONS.get(ms.sel - 1) {
+                            rebind.0 = Some(*action);
+                        }
+                    } else if ms.sel == 11 && input.pressed(Action::Confirm) {
+                        *bindings = KeyBindings::default();
+                        bindings.save();
+                    }
+                }
+                SettingsTab::Display => {
+                    if ms.sel == 1 && delta != 0.0 {
+                        ui_prefs.ui_scale = (ui_prefs.ui_scale + delta).clamp(0.75, 1.5);
+                        ui_prefs.save();
+                    } else if ms.sel == 2
+                        && (input.pressed(Action::Confirm)
+                            || input.pressed(Action::Left)
+                            || input.pressed(Action::Right))
+                    {
+                        ui_prefs.high_contrast = !ui_prefs.high_contrast;
+                        ui_prefs.save();
+                    } else if ms.sel == 3 && delta != 0.0 {
+                        ui_prefs.subtitle_scale =
+                            (ui_prefs.subtitle_scale + delta).clamp(0.8, 1.4);
+                        ui_prefs.save();
                     }
                 }
             }
-            if input.pressed(Action::Confirm) {
-                match ms.sel {
-                    0 | 1 | 2 => {} // volumes handled via Left/Right
-                    3..=12 => {
-                        let idx = ms.sel - 3;
-                        if let Some((action, _)) = SETTINGS_ACTIONS.get(idx) {
-                            rebind.0 = Some(*action);
-                        }
-                    }
-                    13 => {
-                        // Reset to defaults
-                        *bindings = KeyBindings::default();
-                        bindings.save();
-                        audio.master = 0.85;
-                        audio.sfx = 0.9;
-                        audio.music = 0.70;
-                    }
-                    _ => {
-                        // Back
-                        back_to_main(&mut ms);
-                    }
-                }
+
+            let back_idx = count - 1;
+            if ms.sel == back_idx && input.pressed(Action::Confirm) {
+                back_to_main(&mut ms);
+                trigger_screen_transition(&mut trans, Screen::Main);
             } else if input.pressed(Action::Cancel) {
                 back_to_main(&mut ms);
+                trigger_screen_transition(&mut trans, Screen::Main);
             }
         }
         SetupTeam => {
@@ -786,7 +1342,7 @@ fn screen_item_count(ms: &MenuState, wd: &WorldData) -> usize {
         Screen::SetupOvers => OVERS_CHOICES.len(),
         Screen::SetupStadium => wd.stadiums.len() + 1,
         Screen::SetupBatFirst => 2,
-        Screen::Settings => 15,
+        Screen::Settings => settings_item_count(ms.settings_tab),
         Screen::Bracket => 0,
     }
 }

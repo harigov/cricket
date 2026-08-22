@@ -22,7 +22,44 @@ Menu and HUD feedback sounds are sourced from Kenney's CC0 audio packs:
 
 These packs were selected because every file is CC0 with no per-file split licensing, normalized volume, and a consistent style — ideal for MIT distribution (see research notes in `docs/AUDIO_RESEARCH.md`). They replace the previous 22 kHz mono blip with professionally mixed stereo OGG at 44.1 kHz.
 
-## 2. Procedural SFX & Music (MIT — original synthesis)
+## 2. Commentary — Broadcast Partnership (High-Quality TTS)
+
+**108 voice clips** (54 per role) generated with `edge-tts` and mastered to broadcast loudness:
+
+| Role | Voice | Character |
+|---|---|---|
+| **Lead** (default) | `en-GB-RyanNeural` (British male) | Calls the action — short, context-safe lines |
+| **Analyst** | `en-AU-NatashaNeural` (Australian female) | Statistics & analysis — contextual facts only |
+
+Selecting Female in Settings makes Natasha the lead and Ryan the analyst — both are always loaded so the partnership hand-off works either way.
+
+### Editorial rules enforced
+- Immediate calls under ~8 words; no exclamation marks on routine deliveries.
+- Superlatives reserved for sixes/wickets; routine events often go **uncalled**
+  (probability gates + 7 s cooldown between routine calls).
+- Never mentions shot type, field position, or tactics the game doesn't track.
+- Contextual lines play **only when their fact is verified true**:
+  - `context_fifty` / `context_century` — striker's runs cross 50/100 this ball
+  - `context_team_hundred` — team total crosses 100 this ball
+  - `context_rrr` — required rate climbed above 11 while chasing
+  - `context_dots` — third consecutive dot ball
+  - `context_clutch_wicket` — wicket while chasing with ≤45 needed
+  - `context_bowler` — over ends with bowler on 2+ wkts at <7 econ
+  - `over_complete` variant picked from actual runs in the over (quiet/expensive/generic)
+- Analyst follow-ups are queued behind lead calls (~35% chance), never overlapping.
+
+### Pipeline (`scripts/generate_commentary_fixed.py`)
+1. Plain text via `edge_tts.Communicate(text, voice, rate=…)` — no SSML markup.
+2. Mastering: ffmpeg `loudnorm=I=-16:TP=-1.5:LRA=11`, OGG Vorbis q4 48 kHz.
+3. Validation: auto-reject clips outside 0.8–6.5 s (catches spoken markup).
+4. Writes `durations.json` consumed by the engine for exact scheduling.
+
+Playback scheduling uses real durations (no more fixed 2–3 s guesses), and music/
+ambient ducking is a smooth side-chain (0.25 s attack, 2 s release) rather than an
+abrupt mute. Generated audio is original content, MIT-owned. Piper/Kokoro remain
+documented offline alternatives (see `docs/AUDIO_RESEARCH.md`).
+
+## 3. Procedural SFX & Music (MIT — original synthesis)
 
 All cricket-specific sounds are procedurally synthesized at startup in `src/game/audio.rs` and therefore owned by the project under MIT:
 
@@ -37,7 +74,7 @@ All cricket-specific sounds are procedurally synthesized at startup in `src/game
 
 Synthesis runs at 44.1 kHz mono 16-bit WAV in memory (no external files needed), so the binary remains self-contained per the existing `target/release/cricket` promise.
 
-## 3. Recommended drop-in replacements (all CC0/CC-BY, MIT-compatible)
+## 4. Recommended drop-in replacements (all CC0/CC-BY, MIT-compatible)
 
 If you want to replace the procedural beds with recorded samples, these sources are verified MIT-compatible (no NC/SA restrictions):
 
@@ -55,7 +92,7 @@ If you want to replace the procedural beds with recorded samples, these sources 
 
 To use a replacement, drop an OGG/WAV into `assets/audio/sfx/` or `assets/audio/music/` and update the handle name in `src/game/audio.rs::setup_sfx` — the engine will fallback to procedural if the file is absent (see `AudioPlugin` docs).
 
-## 4. Big Ant Studios Cricket 26 — Sound Research Summary
+## 5. Big Ant Studios Cricket 26 — Sound Research Summary
 
 See `docs/AUDIO_RESEARCH.md` for the full analysis of what makes Cricket 26 sound "premium" (commentary from Gilchrist/Mitchell, dynamic crowd layers, Ashes theatre, press conferences, etc.) and how Willow Cricket maps those to feasible MIT-safe equivalents.
 

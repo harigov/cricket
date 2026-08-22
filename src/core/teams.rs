@@ -73,6 +73,23 @@ impl Player {
     }
 }
 
+/// Visual kit cut/pattern — drives procedural jersey texture on players.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KitStyle {
+    /// Single block colour (e.g. India blue).
+    Solid,
+    /// Classic vertical pinstripes (e.g. England).
+    VerticalStripes,
+    /// Bold chest band (e.g. West Indies maroon).
+    HorizontalBand,
+    /// V-neck chevron (e.g. Australia gold).
+    Chevron,
+    /// Diagonal two-tone split (e.g. Pakistan green/white).
+    DiagonalSplit,
+    /// Hooped sleeves (e.g. South Africa).
+    Hoops,
+}
+
 /// A team of 11 players with a sensible batting order
 /// (keepers/bowlers last).
 #[derive(Clone, Debug)]
@@ -81,6 +98,7 @@ pub struct Team {
     pub short: String,
     pub primary_color: bevy::color::Color,
     pub secondary_color: bevy::color::Color,
+    pub kit_style: KitStyle,
     pub players: Vec<Player>,
 }
 
@@ -104,7 +122,14 @@ impl Team {
     }
 }
 
-fn team(name: &str, short: &str, c1: u32, c2: u32, roster: Vec<Player>) -> Team {
+fn team(
+    name: &str,
+    short: &str,
+    c1: u32,
+    c2: u32,
+    kit_style: KitStyle,
+    roster: Vec<Player>,
+) -> Team {
     Team {
         name: name.into(),
         short: short.into(),
@@ -118,6 +143,7 @@ fn team(name: &str, short: &str, c1: u32, c2: u32, roster: Vec<Player>) -> Team 
             (c2 >> 8) as u8,
             c2 as u8,
         ),
+        kit_style,
         players: roster,
     }
 }
@@ -134,7 +160,7 @@ use BowlStyle::*;
 /// Built-in teams (fictional players).
 pub fn builtin_teams() -> Vec<Team> {
     vec![
-        team("India", "IND", 0x004B_A0, 0xFF99_00, vec![
+        team("India", "IND", 0x004B_A0, 0xFF99_00, KitStyle::Solid, vec![
             p!("R. Shanker", Batter, 88, 10, None),
             p!("A. Deshmukh", Batter, 85, 15, Some(OffSpin)),
             p!("V. Kolli", Batter, 92, 20, Some(Medium)),
@@ -147,7 +173,7 @@ pub fn builtin_teams() -> Vec<Team> {
             p!("M. Siraaj", Bowler, 32, 90, Some(Fast)),
             p!("Y. Chandel", Bowler, 30, 84, Some(Medium)),
         ]),
-        team("Australia", "AUS", 0x1D4E_89, 0xF2C5_11, vec![
+        team("Australia", "AUS", 0x1D4E_89, 0xF2C5_11, KitStyle::Chevron, vec![
             p!("D. Warnick", Batter, 89, 12, Some(OffSpin)),
             p!("T. Headland", Batter, 86, 25, Some(OffSpin)),
             p!("M. Marshel", AllRounder, 82, 66, Some(FastMedium)),
@@ -160,7 +186,7 @@ pub fn builtin_teams() -> Vec<Team> {
             p!("A. Zampaio", Bowler, 30, 86, Some(LegSpin)),
             p!("J. Hazlewick", Bowler, 28, 91, Some(Fast)),
         ]),
-        team("England", "ENG", 0x1B3C_8C, 0xDC26_26, vec![
+        team("England", "ENG", 0x1B3C_8C, 0xDC26_26, KitStyle::VerticalStripes, vec![
             p!("J. Roystone", Batter, 87, 10, None),
             p!("F. Saltburn", Keeper, 81, 0, None),
             p!("H. Brookeside", Batter, 85, 14, Some(Medium)),
@@ -173,7 +199,7 @@ pub fn builtin_teams() -> Vec<Team> {
             p!("M. Woodson", Bowler, 33, 92, Some(Fast)),
             p!("J. Arkle", Bowler, 30, 88, Some(Fast)),
         ]),
-        team("Pakistan", "PAK", 0x0A6B_3D, 0xDDDD_DD, vec![
+        team("Pakistan", "PAK", 0x0A6B_3D, 0xDDDD_DD, KitStyle::DiagonalSplit, vec![
             p!("B. Azzamat", Batter, 89, 12, Some(LegSpin)),
             p!("M. Rizzwan", Keeper, 84, 0, None),
             p!("F. Zamani", Batter, 82, 16, Some(OffSpin)),
@@ -186,7 +212,7 @@ pub fn builtin_teams() -> Vec<Team> {
             p!("N. Shahzad", Bowler, 31, 87, Some(Fast)),
             p!("A. Qadeer", Bowler, 28, 83, Some(LegSpin)),
         ]),
-        team("South Africa", "RSA", 0x0069_3E, 0xFFB6_12, vec![
+        team("South Africa", "RSA", 0x0069_3E, 0xFFB6_12, KitStyle::Hoops, vec![
             p!("Q. de Klerk", Keeper, 86, 0, None),
             p!("R. Hendriks", Batter, 83, 10, None),
             p!("A. Markman", Batter, 85, 21, Some(OffSpin)),
@@ -199,7 +225,7 @@ pub fn builtin_teams() -> Vec<Team> {
             p!("A. Nortier", Bowler, 32, 90, Some(Fast)),
             p!("L. Ngidhi", Bowler, 28, 86, Some(Fast)),
         ]),
-        team("New Zealand", "NZL", 0x111417, 0xC8C8C8, vec![
+        team("New Zealand", "NZL", 0x111417, 0xC8C8C8, KitStyle::Solid, vec![
             p!("F. Allanby", Batter, 84, 10, None),
             p!("D. Conwell", Batter, 86, 15, Some(Medium)),
             p!("K. Willison", Batter, 90, 20, Some(Medium)),
@@ -212,7 +238,7 @@ pub fn builtin_teams() -> Vec<Team> {
             p!("L. Fergusson", Bowler, 32, 93, Some(Fast)),
             p!("T. Southey", Bowler, 34, 89, Some(Fast)),
         ]),
-        team("West Indies", "WIS", 0x7B1F_2A, 0xFDB9_13, vec![
+        team("West Indies", "WIS", 0x7B1F_2A, 0xFDB9_13, KitStyle::HorizontalBand, vec![
             p!("S. Hopewell", Keeper, 85, 5, None),
             p!("B. Kingford", Batter, 88, 12, Some(OffSpin)),
             p!("N. Pooranth", Batter, 83, 10, None),
@@ -225,7 +251,7 @@ pub fn builtin_teams() -> Vec<Team> {
             p!("O. McCoyne", Bowler, 33, 89, Some(Fast)),
             p!("J. Sealeson", Bowler, 30, 87, Some(FastMedium)),
         ]),
-        team("Sri Lanka", "LKA", 0x0030_66, 0xFFCC_00, vec![
+        team("Sri Lanka", "LKA", 0x0030_66, 0xFFCC_00, KitStyle::Chevron, vec![
             p!("P. Nissanka", Batter, 84, 12, Some(OffSpin)),
             p!("K. Mendison", Keeper, 86, 8, None),
             p!("B. Rajapak", Batter, 80, 16, Some(OffSpin)),
@@ -238,7 +264,7 @@ pub fn builtin_teams() -> Vec<Team> {
             p!("M. Kumaran", Bowler, 30, 84, Some(Fast)),
             p!("P. Wellalag", AllRounder, 62, 78, Some(OffSpin)),
         ]),
-        team("Bangladesh", "BGD", 0x006A_4E, 0xF42A_41, vec![
+        team("Bangladesh", "BGD", 0x006A_4E, 0xF42A_41, KitStyle::HorizontalBand, vec![
             p!("T. Iqbalen", Batter, 85, 10, None),
             p!("L. Dasgup", Keeper, 83, 5, None),
             p!("S. Al Hasan", AllRounder, 81, 88, Some(OffSpin)),
@@ -251,7 +277,7 @@ pub fn builtin_teams() -> Vec<Team> {
             p!("H. Mahmadi", Bowler, 32, 88, Some(Fast)),
             p!("N. Ahmedir", Bowler, 30, 84, Some(Fast)),
         ]),
-        team("Afghanistan", "AFG", 0x0A5A_9A, 0xD320_11, vec![
+        team("Afghanistan", "AFG", 0x0A5A_9A, 0xD320_11, KitStyle::VerticalStripes, vec![
             p!("R. Gurbazai", Keeper, 84, 8, None),
             p!("I. Zadranai", Batter, 82, 10, None),
             p!("R. Shahzai", Batter, 80, 14, Some(OffSpin)),

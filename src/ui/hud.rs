@@ -23,6 +23,8 @@ enum ScoreField {
     Batters,
     Bowler,
     Delivery,
+    LastSix,
+    Partnership,
 }
 #[derive(Component)]
 struct PromptRoot;
@@ -47,6 +49,18 @@ struct MeterRoot;
 #[derive(Component)]
 struct MeterMarker;
 #[derive(Component)]
+struct MeterZoneEarly;
+#[derive(Component)]
+struct MeterZonePerfect;
+#[derive(Component)]
+struct MeterZoneLate;
+#[derive(Component)]
+struct MeterLabel;
+#[derive(Component)]
+struct BroadcastChip;
+#[derive(Component)]
+struct ShotDirRoot;
+#[derive(Component)]
 struct SummaryRoot;
 #[derive(Component)]
 struct SummaryText;
@@ -68,6 +82,8 @@ impl Plugin for HudPlugin {
                     update_outcome,
                     update_meter,
                     update_summary,
+                    update_broadcast_chip,
+                    update_shot_direction,
                 )
                     .run_if(in_state(AppState::InMatch)),
             );
@@ -211,6 +227,49 @@ fn spawn_hud(mut commands: Commands, assets: Res<AssetServer>) {
                         font: bold.clone(), font_size: 11.0, ..default()
                     }, TextColor(Color::srgb(0.98, 0.72, 0.25))));
                 });
+                // Last six balls strip
+                c.spawn((Node {
+                    width: percent(100), height: px(24), align_items: AlignItems::Center,
+                    justify_content: JustifyContent::SpaceBetween,
+                    padding: UiRect::horizontal(px(12)), ..default()
+                }, BackgroundColor(Color::srgba(0.04, 0.05, 0.07, 0.98))))
+                .with_children(|strip| {
+                    strip.spawn((ScoreField::LastSix, Text::new("—  —  —  —  —  —"), TextFont {
+                        font: bold.clone(), font_size: 12.0, ..default()
+                    }, TextColor(Color::srgb(0.86, 0.88, 0.90)), text_shadow()));
+                });
+                // Partnership row
+                c.spawn((Node {
+                    width: percent(100), height: px(22), align_items: AlignItems::Center,
+                    padding: UiRect::horizontal(px(12)), ..default()
+                }, BackgroundColor(Color::srgba(0.03, 0.04, 0.06, 0.98))))
+                .with_children(|part| {
+                    part.spawn((ScoreField::Partnership, Text::new(""), TextFont {
+                        font: regular.clone(), font_size: 11.0, ..default()
+                    }, TextColor(Color::srgb(0.72, 0.76, 0.80))));
+                });
+            });
+
+            // ---- replay / impact broadcast chip ----
+            p.spawn((
+                BroadcastChip,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: px(18),
+                    right: px(18),
+                    padding: UiRect::axes(px(14), px(6)),
+                    border_radius: BorderRadius::all(px(3)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.92, 0.14, 0.18, 0.92)),
+                Visibility::Hidden,
+            )).with_children(|chip| {
+                chip.spawn((
+                    Text::new("REPLAY"),
+                    TextFont { font: bold.clone(), font_size: 11.0, ..default() },
+                    TextColor(Color::WHITE),
+                    text_shadow(),
+                ));
             });
 
             // ---- result sting, matching a replay/boundary television graphic ----
@@ -320,43 +379,118 @@ fn spawn_hud(mut commands: Commands, assets: Res<AssetServer>) {
                 ));
             });
 
-            // ---- timing meter ----
+            // ---- timing meter (broadcast-style) ----
             p.spawn((
                 MeterRoot,
                 Node {
                     position_type: PositionType::Absolute,
                     bottom: percent(13),
-                    left: percent(35),
-                    width: percent(30),
-                    height: px(26),
+                    left: percent(32),
+                    width: percent(36),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: px(4),
                     ..default()
                 },
-                panel_bg(),
                 Visibility::Hidden,
             ))
             .with_children(|m| {
-                // sweet-spot band around centre
                 m.spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: percent(43),
-                        width: percent(14),
-                        height: percent(100),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(0.2, 0.8, 0.3, 0.45)),
+                    MeterLabel,
+                    Text::new("TIMING"),
+                    TextFont { font: bold.clone(), font_size: 10.0, ..default() },
+                    TextColor(Color::srgba(0.82, 0.86, 0.90, 0.88)),
                 ));
                 m.spawn((
-                    MeterMarker,
                     Node {
-                        position_type: PositionType::Absolute,
-                        top: px(0),
-                        left: px(0),
-                        width: px(6),
-                        height: percent(100),
+                        width: percent(100),
+                        height: px(32),
+                        border: UiRect::all(px(1)),
+                        border_radius: BorderRadius::all(px(4)),
+                        overflow: Overflow::clip(),
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(1.0, 0.95, 0.4)),
+                    panel_bg(),
+                    BorderColor::all(Color::srgba(0.55, 0.62, 0.72, 0.35)),
+                )).with_children(|track| {
+                    track.spawn((
+                        MeterZoneEarly,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: percent(0),
+                            width: percent(38),
+                            height: percent(100),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.85, 0.22, 0.18, 0.35)),
+                    ));
+                    track.spawn((
+                        MeterZonePerfect,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: percent(38),
+                            width: percent(24),
+                            height: percent(100),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.18, 0.78, 0.32, 0.55)),
+                    ));
+                    track.spawn((
+                        MeterZoneLate,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: percent(62),
+                            width: percent(38),
+                            height: percent(100),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.85, 0.55, 0.12, 0.35)),
+                    ));
+                    track.spawn((
+                        MeterMarker,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            top: px(0),
+                            left: percent(50),
+                            width: px(5),
+                            height: percent(100),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(1.0, 0.98, 0.88)),
+                        BorderColor::all(Color::srgb(0.12, 0.12, 0.14)),
+                    ));
+                });
+            });
+
+            // ---- shot direction hint (leg ← → off) ----
+            p.spawn((
+                ShotDirRoot,
+                Node {
+                    position_type: PositionType::Absolute,
+                    bottom: percent(19),
+                    left: percent(42),
+                    width: percent(16),
+                    height: px(18),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::SpaceBetween,
+                    ..default()
+                },
+                Visibility::Hidden,
+            )).with_children(|dir| {
+                dir.spawn((
+                    Text::new("LEG"),
+                    TextFont { font: bold.clone(), font_size: 9.0, ..default() },
+                    TextColor(Color::srgba(0.72, 0.76, 0.80, 0.75)),
+                ));
+                dir.spawn((
+                    Text::new("▲"),
+                    TextFont { font: bold.clone(), font_size: 12.0, ..default() },
+                    TextColor(Color::srgb(0.98, 0.82, 0.28)),
+                ));
+                dir.spawn((
+                    Text::new("OFF"),
+                    TextFont { font: bold.clone(), font_size: 9.0, ..default() },
+                    TextColor(Color::srgba(0.72, 0.76, 0.80, 0.75)),
                 ));
             });
         });
@@ -378,6 +512,7 @@ fn update_scoreboard(
     am: Option<Res<ActiveMatch>>,
     wd: Res<WorldData>,
     del: Res<CurrentDelivery>,
+    recent: Res<RecentBalls>,
     assets: Res<AssetServer>,
     mut text_q: Query<(&ScoreField, &mut Text)>,
     mut accent_q: Query<&mut BackgroundColor, With<ScoreAccent>>,
@@ -444,6 +579,13 @@ fn update_scoreboard(
         .map(|plan| plan.label.to_uppercase())
         .unwrap_or_default();
 
+    let partnership = format!(
+        "PARTNERSHIP  {} ({} balls)",
+        sc.runs + nc.runs,
+        sc.balls + nc.balls,
+    );
+    let last_six = recent.display();
+
     for (field, mut text) in &mut text_q {
         **text = match field {
             ScoreField::Innings => innings_label.into(),
@@ -454,6 +596,8 @@ fn update_scoreboard(
             ScoreField::Batters => batters.clone(),
             ScoreField::Bowler => bowler.clone(),
             ScoreField::Delivery => delivery.clone(),
+            ScoreField::LastSix => last_six.clone(),
+            ScoreField::Partnership => partnership.clone(),
         };
     }
     for mut background in &mut accent_q {
@@ -570,10 +714,12 @@ fn update_meter(
     am: Option<Res<ActiveMatch>>,
     rel: Res<ReleaseInfo>,
     attempt: Res<ShotAttempt>,
-    mut root_q: Query<(&mut Visibility, &mut Node), With<MeterRoot>>,
-    mut marker_q: Query<&mut Node, (With<MeterMarker>, Without<MeterRoot>)>,
+    time: Res<Time>,
+    mut root_q: Query<&mut Visibility, With<MeterRoot>>,
+    mut marker_q: Query<&mut Node, With<MeterMarker>>,
+    mut label_q: Query<&mut Text, With<MeterLabel>>,
 ) {
-    let Ok((mut vis, _)) = root_q.single_mut() else { return };
+    let Ok(mut vis) = root_q.single_mut() else { return };
     let show = matches!(phase.0, PhaseEnum::BallLive)
         && am.as_deref().map(|m| m.user_batting()).unwrap_or(false)
         && rel.active;
@@ -581,10 +727,78 @@ fn update_meter(
     if !show {
         return;
     }
-    let offset = attempt.offset.unwrap_or(rel.t - rel.t_arrive);
-    let frac = ((offset / METER_WINDOW) + 0.5).clamp(0.0, 1.0);
+    let t = rel.t / rel.t_arrive.max(0.01);
+    let sweep = (time.elapsed_secs() * 2.8).sin() * 0.5 + 0.5;
+    let frac = if attempt.pressed {
+        ((attempt.offset.unwrap_or(rel.t - rel.t_arrive) / METER_WINDOW) + 0.5).clamp(0.0, 1.0)
+    } else {
+        sweep
+    };
     if let Ok(mut node) = marker_q.single_mut() {
         node.left = percent(frac * 100.0);
+    }
+    if let Ok(mut label) = label_q.single_mut() {
+        **label = if attempt.pressed {
+            let off = attempt.offset.unwrap_or(0.0);
+            if off.abs() < 0.055 {
+                "PERFECT".into()
+            } else if off.abs() < 0.12 {
+                "GOOD".into()
+            } else if off < 0.0 {
+                "TOO EARLY".into()
+            } else {
+                "TOO LATE".into()
+            }
+        } else {
+            format!("CONTACT IN {:.1}s", (rel.t_arrive - rel.t).max(0.0))
+        };
+    }
+    let _ = t;
+}
+
+fn update_broadcast_chip(
+    pres: Res<crate::render::camera_rig::PresentationState>,
+    mut chip_q: Query<(&mut Visibility, &mut BackgroundColor, &Children), With<BroadcastChip>>,
+    mut text_q: Query<&mut Text>,
+) {
+    let Ok((mut vis, mut bg, children)) = chip_q.single_mut() else { return };
+    let show = pres.replay_on || pres.impact_on;
+    *vis = if show { Visibility::Visible } else { Visibility::Hidden };
+    if !show {
+        return;
+    }
+    bg.0 = if pres.impact_on {
+        Color::srgba(0.92, 0.14, 0.18, 0.94)
+    } else {
+        Color::srgba(0.08, 0.38, 0.82, 0.94)
+    };
+    for child in children.iter() {
+        if let Ok(mut text) = text_q.get_mut(child) {
+            **text = if pres.impact_on { "IMPACT" } else { "REPLAY" }.into();
+        }
+    }
+}
+
+fn update_shot_direction(
+    phase: Res<Phase>,
+    am: Option<Res<ActiveMatch>>,
+    input: Res<crate::input::PlayerInput>,
+    mut root_q: Query<(&mut Visibility, &Children), With<ShotDirRoot>>,
+    mut arrow_q: Query<&mut Node>,
+) {
+    let Ok((mut vis, children)) = root_q.single_mut() else { return };
+    let show = matches!(phase.0, PhaseEnum::BallLive)
+        && am.as_deref().map(|m| m.user_batting()).unwrap_or(false);
+    *vis = if show { Visibility::Visible } else { Visibility::Hidden };
+    if !show {
+        return;
+    }
+    // Middle child is the arrow indicator (LEG, arrow, OFF)
+    if let Some(arrow_ent) = children.iter().nth(1) {
+        if let Ok(mut node) = arrow_q.get_mut(arrow_ent) {
+            let x = input.move_vec.x.clamp(-1.0, 1.0);
+            node.margin = UiRect::horizontal(px(x * 28.0));
+        }
     }
 }
 

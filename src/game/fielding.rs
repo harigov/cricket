@@ -3,6 +3,7 @@
 use crate::core::geometry::{self, FieldPos};
 use crate::core::teams::Team;
 use crate::game::ball::CricketBall;
+use crate::render::player::{face_target, Anim, AnimState};
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -26,7 +27,21 @@ pub enum Brain {
 pub const FIELDER_SPEED: f32 = 8.2;
 const KEEPER_SPEED: f32 = 9.0;
 
-/// Spawn the fielding side (keeper + 10 fielders). The bowler figure is
+/// Build slot-indexed world positions for fielders (index = `Fielder.slot`).
+pub fn positions_by_slot(
+    fielders: impl IntoIterator<Item = (usize, Vec2)>,
+    slot_count: usize,
+) -> Vec<Vec2> {
+    let mut out = vec![Vec2::ZERO; slot_count];
+    for (slot, pos) in fielders {
+        if slot < slot_count {
+            out[slot] = pos;
+        }
+    }
+    out
+}
+
+/// Spawn the fielding side (keeper + 9 outfielders). The bowler figure is
 /// managed separately by the match flow.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_field_side(
@@ -34,23 +49,21 @@ pub fn spawn_field_side(
     asset_server: &AssetServer,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
     layout: &[FieldPos],
     team: &Team,
 ) -> Vec<Entity> {
     let mut out = Vec::new();
     for (slot, fp) in layout.iter().enumerate() {
         let pos = fp.world_pos(geometry::BATSMAN_POS);
-        let facing = {
-            // Face the striker.
-            let d = geometry::BATSMAN_POS - pos;
-            d.y.atan2(d.x).to_degrees() - 90.0
-        };
+        let facing = face_target(pos, geometry::BATSMAN_POS);
         let is_keeper = slot == 0;
         let e = crate::render::player::spawn_figure(
             commands,
             asset_server,
             meshes,
             materials,
+            images,
             Vec3::new(pos.x, 0.0, pos.y),
             facing,
             team,
@@ -79,19 +92,26 @@ pub fn reset_brains(mut brains: Query<&mut Brain>) {
 }
 
 /// Move chasing fielders toward the live ball, predicting its path.
+#[allow(clippy::type_complexity)]
 pub fn chase_system(
     time: Res<Time>,
     ball_q: Query<&crate::game::ball::BallState, With<CricketBall>>,
-    mut fielders: Query<(&Fielder, &Brain, &mut Transform)>,
+    mut fielders: Query<(&Fielder, &Brain, &mut Transform, &mut Anim)>,
 ) {
     let Ok(ball) = ball_q.single() else { return };
     if ball.dead && ball.vel.length_squared() < 0.01 {
         return;
     }
     let dt = time.delta_secs();
-    for (f, brain, mut tf) in &mut fielders {
+    for (f, brain, mut tf, mut anim) in &mut fielders {
         if !matches!(brain, Brain::Chase) {
             continue;
+        }
+        // Sprint animation while chasing.
+        if !matches!(anim.state, AnimState::Run { .. }) {
+            anim.state = AnimState::Run { t: 0.0 };
+        } else if let AnimState::Run { t } = &mut anim.state {
+            *t += dt;
         }
         let speed = if f.is_keeper { KEEPER_SPEED } else { FIELDER_SPEED };
         // Predict where the ball will be when we get there (simple lead)
@@ -111,10 +131,33 @@ pub fn chase_system(
         if d2 < 0.05 {
             continue;
         }
-        let step = (speed * dt * 1.4).min(d2);
+        let step = (speed * dt).min(d2);
         let dir = to_pred / d2;
         tf.translation.x += dir.x * step;
         tf.translation.z += dir.y * step;
         tf.rotation = Quat::from_rotation_y(crate::render::player::yaw_to_face(dir));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn positions_by_slot_maps_fielder_index() {
+        let positions = positions_by_slot(
+            [(2, Vec2::new(10.0, 5.0)), (0, Vec2::new(1.0, 2.0))],
+            4,
+        );
+        assert_eq!(positions[0], Vec2::new(1.0, 2.0));
+        assert_eq!(positions[2], Vec2::new(10.0, 5.0));
+        assert_eq!(positions[1], Vec2::ZERO);
+    }
+
+    #[test]
+    fn positions_by_slot_ignores_out_of_range() {
+        let positions = positions_by_slot([(9, Vec2::new(3.0, 4.0))], 3);
+        assert_eq!(positions.len(), 3);
+        assert_eq!(positions[2], Vec2::ZERO);
     }
 }
