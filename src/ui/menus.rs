@@ -82,6 +82,7 @@ impl Plugin for MenusPlugin {
 // ---------------------------------------------------------------------------
 
 fn spawn_menu_root(mut commands: Commands) {
+    info!("MENU ROOT SPAWNED");
     commands.spawn((
         MenuRoot,
         Node {
@@ -361,7 +362,11 @@ fn handle_menu_input(
         SetupStadium => {
             navigate_list(&input, &mut ms.sel, wd.stadiums.len() + 1);
             if input.pressed(Action::Confirm) {
-                ms.stadium_idx = ms.sel;
+                ms.stadium_idx = if ms.sel >= wd.stadiums.len() {
+                    usize::MAX // random venue
+                } else {
+                    ms.sel
+                };
                 ms.screen = SetupBatFirst;
                 ms.sel = usize::from(!ms.bat_first);
             }

@@ -44,7 +44,7 @@ impl PlayerInput {
     }
 }
 
-fn poll_input(
+pub fn poll_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
     mut out: ResMut<PlayerInput>,

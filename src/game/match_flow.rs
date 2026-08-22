@@ -202,6 +202,7 @@ pub fn sys_ready(
 ) {
     let PhaseEnum::ReadyToBall { t } = &mut phase.0 else { return };
     *t += time.delta_secs();
+    if unit() < 0.01 { info!("READY t={:.2}", *t); }
 
     // Park everyone at their posts.
     for (fig, mut tf, mut anim) in &mut figs {
@@ -248,6 +249,7 @@ pub fn sys_ready(
         // AI bowling: brief beat, then automatic run-in. Human batting can't
         // hurry it (that's the point of the wait).
         if *t > 0.9 {
+            info!("RUNUP START");
             phase.0 = PhaseEnum::RunUp { p: 0.0 };
         }
     }
@@ -396,6 +398,7 @@ pub fn sys_runup(
     let PhaseEnum::RunUp { p } = &mut phase.0 else { return };
     *p += time.delta_secs() / RUNUP_SECS;
     let p = *p;
+    if unit() < 0.02 { info!("RUNUP p={:.2}", p); }
 
     // Bowler jogs in; delivery stride over the last 30%.
     for (fig, mut tf, mut anim) in &mut figs {
@@ -460,6 +463,7 @@ pub fn sys_runup(
         t: 0.0,
         t_arrive: est_t_arrive,
     });
+    info!("BALL RELEASED: arrive ~{}s speed {}", est_t_arrive.round(), plan.speed.round());
 
     phase.0 = PhaseEnum::BallLive;
 }

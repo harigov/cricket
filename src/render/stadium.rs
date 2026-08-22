@@ -47,7 +47,7 @@ pub fn build_stadium(
                 .mesh()
                 .size(geo::PITCH_LENGTH + 2.0, geo::PITCH_WIDTH))),
             MeshMaterial3d(materials.add(pitch_mat)),
-            Transform::from_translation(Vec3::Y * 0.01)
+            Transform::from_translation(Vec3::Y * 0.05)
                 .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
         ));
 
@@ -57,7 +57,7 @@ pub fn build_stadium(
             p.spawn((
                 Mesh3d(meshes.add(Plane3d::default().mesh().size(0.06, geo::PITCH_WIDTH))),
                 MeshMaterial3d(materials.add(white_mat.clone())),
-                Transform::from_translation(Vec3::new(x, 0.02, 0.0))
+                Transform::from_translation(Vec3::new(x, 0.07, 0.0))
                     .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
             ));
             for z in [-geo::PITCH_WIDTH / 2.0, geo::PITCH_WIDTH / 2.0] {
@@ -66,7 +66,7 @@ pub fn build_stadium(
                         .mesh()
                         .size(geo::CREASE_DEPTH * 2.0, 0.06))),
                     MeshMaterial3d(materials.add(white_mat.clone())),
-                    Transform::from_translation(Vec3::new(x - sign * 1.1, 0.02, z))
+                    Transform::from_translation(Vec3::new(x - sign * 1.1, 0.07, z))
                         .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
                 ));
             }

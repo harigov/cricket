@@ -33,7 +33,7 @@ impl CamMode {
 
 pub fn update_camera(
     time: Res<Time>,
-    ball_q: Query<&Transform, (With<crate::game::ball::CricketBall>, Without<Camera>)>,
+    ball_q: Query<&Transform, (With<crate::game::ball::CricketBall>, Without<Camera3d>)>,
     mut rig: ResMut<CameraRig>,
     mut cam: Query<&mut Transform, With<Camera3d>>,
 ) {

@@ -105,7 +105,7 @@ pub fn physics_step(
     }
 
     flags.crossed_bat_plane = pre_x < BAT_PLANE_X && state.pos.x >= BAT_PLANE_X
-        && pre_y > 0.05;
+        && state.vel.x > 1.0;
 }
 
 /// X position where we test bat contact (just in front of the striker).

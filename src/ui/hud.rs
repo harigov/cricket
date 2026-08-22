@@ -273,7 +273,7 @@ fn update_prompt(
             let user_batting =
                 am.as_deref().map(|m| m.user_batting()).unwrap_or(false);
             if user_batting {
-                "SPACE: play shot   SHIFT+SPACE: loft   ←/→: aim".into()
+                "SPACE: play shot | SHIFT+SPACE: loft | A/D: aim".into()
             } else {
                 String::new()
             }
