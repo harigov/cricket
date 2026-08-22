@@ -2,3 +2,17 @@
 *.log
 .DS_Store
 .cargo/
+
+# Local editor and tooling state
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Native/debug artifacts that may be produced outside Cargo's target dir
+*.dSYM/
+*.pdb
+*.profraw
+perf.data
+perf.data.old

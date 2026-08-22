@@ -68,6 +68,12 @@ struct MenuBackdrop {
     main: Handle<Image>,
     secondary: Handle<Image>,
 }
+#[derive(Component)]
+struct MenuFonts {
+    display: Handle<Font>,
+    bold: Handle<Font>,
+    regular: Handle<Font>,
+}
 
 pub struct MenusPlugin;
 
@@ -77,6 +83,9 @@ impl Plugin for MenusPlugin {
         // self-contained executable, matching the existing launch instructions.
         bevy::asset::embedded_asset!(app, "../../assets/ui/main-menu-hero.png");
         bevy::asset::embedded_asset!(app, "../../assets/ui/menu-stadium.png");
+        bevy::asset::embedded_asset!(app, "../../assets/fonts/Lato-Black.ttf");
+        bevy::asset::embedded_asset!(app, "../../assets/fonts/Lato-Bold.ttf");
+        bevy::asset::embedded_asset!(app, "../../assets/fonts/Lato-Regular.ttf");
         app.init_resource::<MenuState>()
             .init_resource::<CurrentTournament>()
             .init_resource::<ActiveFixture>()
@@ -108,6 +117,9 @@ fn spawn_menu_root(mut commands: Commands, assets: Res<AssetServer>) {
     )).with_children(|p| {
         let main = bevy::asset::load_embedded_asset!(assets.as_ref(), "../../assets/ui/main-menu-hero.png");
         let secondary = bevy::asset::load_embedded_asset!(assets.as_ref(), "../../assets/ui/menu-stadium.png");
+        let display = bevy::asset::load_embedded_asset!(assets.as_ref(), "../../assets/fonts/Lato-Black.ttf");
+        let bold = bevy::asset::load_embedded_asset!(assets.as_ref(), "../../assets/fonts/Lato-Bold.ttf");
+        let regular = bevy::asset::load_embedded_asset!(assets.as_ref(), "../../assets/fonts/Lato-Regular.ttf");
         p.spawn((
             MenuBackdrop {
                 main: main.clone(),
@@ -134,6 +146,11 @@ fn spawn_menu_root(mut commands: Commands, assets: Res<AssetServer>) {
         ));
         p.spawn((
             MenuList,
+            MenuFonts {
+                display,
+                bold,
+                regular,
+            },
             Node {
                 position_type: PositionType::Absolute,
                 flex_direction: FlexDirection::Column,
@@ -169,11 +186,11 @@ fn screen_title(ms: &MenuState) -> &'static str {
 fn screen_kicker(ms: &MenuState) -> &'static str {
     match ms.screen {
         Screen::Main => "THE GENTLEMAN'S GAME. YOUR MOMENT.",
-        Screen::SetupTeam => "QUICK MATCH  /  01",
-        Screen::SetupOpp => "QUICK MATCH  /  02",
-        Screen::SetupOvers => "QUICK MATCH  /  03",
-        Screen::SetupStadium => "QUICK MATCH  /  04",
-        Screen::SetupBatFirst => "QUICK MATCH  /  05",
+        Screen::SetupTeam => "MATCH SETUP  /  01",
+        Screen::SetupOpp => "MATCH SETUP  /  02",
+        Screen::SetupOvers => "MATCH SETUP  /  03",
+        Screen::SetupStadium => "MATCH SETUP  /  04",
+        Screen::SetupBatFirst => "MATCH SETUP  /  05",
         Screen::Settings => "AUDIO & CONTROLS",
         Screen::Bracket => "KNOCKOUT CHAMPIONSHIP",
     }
@@ -308,12 +325,12 @@ fn refresh_menu(
     bindings: Res<KeyBindings>,
     audio: Res<AudioSettings>,
     rebind: Res<RebindState>,
-    mut root_q: Query<(Entity, &mut Node), With<MenuList>>,
+    mut root_q: Query<(Entity, &mut Node, &MenuFonts), With<MenuList>>,
     mut backdrop_q: Query<(&mut ImageNode, &MenuBackdrop)>,
     children_q: Query<&Children>,
     mut commands: Commands,
 ) {
-    let Ok((root, mut root_node)) = root_q.single_mut() else { return };
+    let Ok((root, mut root_node, fonts)) = root_q.single_mut() else { return };
     let is_main = ms.screen == Screen::Main;
 
     if let Ok((mut image, art)) = backdrop_q.single_mut() {
@@ -363,13 +380,29 @@ fn refresh_menu(
     commands.entity(root).with_children(|p| {
         p.spawn((
             Text::new(screen_kicker(&ms)),
-            TextFont { font_size: if is_main { 13.0 } else { 12.0 }, ..default() },
-            TextColor(Color::srgb(0.82, 0.70, 0.36)),
+            TextFont {
+                font: fonts.bold.clone(),
+                font_size: if is_main { 12.0 } else { 11.0 },
+                ..default()
+            },
+            TextColor(Color::srgb(0.88, 0.72, 0.29)),
         ));
         p.spawn((
-            Text::new(screen_title(&ms)),
-            TextFont { font_size: if is_main { 50.0 } else { 38.0 }, ..default() },
-            TextColor(Color::srgb(0.94, 0.96, 0.90)),
+            Text::new(if is_main {
+                "WILLOW\nCRICKET"
+            } else {
+                screen_title(&ms)
+            }),
+            TextFont {
+                font: fonts.display.clone(),
+                font_size: if is_main { 54.0 } else { 38.0 },
+                ..default()
+            },
+            TextColor(Color::srgb(0.97, 0.98, 0.94)),
+            TextShadow {
+                offset: Vec2::new(0.0, 3.0),
+                color: Color::srgba(0.0, 0.0, 0.0, 0.72),
+            },
         ));
         p.spawn((
             Node {
@@ -395,9 +428,16 @@ fn refresh_menu(
             {
                 let selectable = !matches!(ms.screen, Screen::Bracket);
                 let selected = i == ms.sel && selectable;
+                let is_settings = ms.screen == Screen::Settings;
                 items.spawn((
                     Node {
-                        min_width: if is_main { percent(100) } else { px(360) },
+                        min_width: if is_main {
+                            percent(100)
+                        } else if is_settings {
+                            px(570)
+                        } else {
+                            px(400)
+                        },
                         padding: UiRect::axes(px(18), px(if is_main { 10 } else { 4 })),
                         border: UiRect {
                             left: px(if selected { 4 } else { 0 }),
@@ -421,25 +461,100 @@ fn refresh_menu(
                         Color::NONE
                     }),
                 )).with_children(|row| {
-                    row.spawn((
-                        Text::new(if selected { format!(">  {line}") } else { line }),
-                        TextFont {
-                            font_size: if ms.screen == Screen::Settings { 18.0 } else { 21.0 },
-                            ..default()
-                        },
-                        TextColor(if selected {
-                            Color::srgb(1.0, 0.96, 0.82)
+                    let text_color = if selected {
+                        Color::srgb(1.0, 0.95, 0.76)
+                    } else {
+                        Color::srgb(0.78, 0.82, 0.77)
+                    };
+                    let face = if selected {
+                        fonts.bold.clone()
+                    } else {
+                        fonts.regular.clone()
+                    };
+
+                    if is_main {
+                        row.spawn((
+                            Text::new(format!("{:02}", i + 1)),
+                            TextFont {
+                                font: fonts.bold.clone(),
+                                font_size: 11.0,
+                                ..default()
+                            },
+                            TextColor(if selected {
+                                Color::srgb(1.0, 0.81, 0.34)
+                            } else {
+                                Color::srgba(0.72, 0.75, 0.68, 0.58)
+                            }),
+                            Node { width: px(38), ..default() },
+                        ));
+                        row.spawn((
+                            Text::new(line.to_uppercase()),
+                            TextFont { font: face, font_size: 20.0, ..default() },
+                            TextColor(text_color),
+                            TextShadow {
+                                offset: Vec2::new(0.0, 2.0),
+                                color: Color::srgba(0.0, 0.0, 0.0, 0.55),
+                            },
+                        ));
+                    } else if is_settings {
+                        if let Some((label, value)) = line.split_once(" : ") {
+                            row.spawn((
+                                Text::new(label.trim()),
+                                TextFont {
+                                    font: fonts.regular.clone(),
+                                    font_size: 16.0,
+                                    ..default()
+                                },
+                                TextColor(text_color),
+                                Node { width: px(235), ..default() },
+                            ));
+                            row.spawn((
+                                Text::new(value.trim()),
+                                TextFont {
+                                    font: fonts.bold.clone(),
+                                    font_size: 16.0,
+                                    ..default()
+                                },
+                                TextColor(if selected {
+                                    Color::srgb(1.0, 0.86, 0.46)
+                                } else {
+                                    Color::srgb(0.90, 0.92, 0.87)
+                                }),
+                                Node { width: px(270), ..default() },
+                            ));
                         } else {
-                            Color::srgb(0.78, 0.82, 0.77)
-                        }),
-                    ));
+                            row.spawn((
+                                Text::new(line),
+                                TextFont { font: face, font_size: 16.0, ..default() },
+                                TextColor(text_color),
+                            ));
+                        }
+                    } else {
+                        row.spawn((
+                            Text::new(line),
+                            TextFont {
+                                font: face,
+                                font_size: if ms.screen == Screen::Bracket { 18.0 } else { 19.0 },
+                                ..default()
+                            },
+                            TextColor(text_color),
+                            TextShadow {
+                                offset: Vec2::new(0.0, 1.5),
+                                color: Color::srgba(0.0, 0.0, 0.0, 0.48),
+                            },
+                        ));
+                    }
                 });
             }
         });
         if ms.screen != Screen::Bracket {
             p.spawn((
                 Text::new("W / S  NAVIGATE     SPACE  SELECT     ESC  BACK"),
-                TextFont { font_size: 11.0, ..default() },
+                TextFont {
+                    font: fonts.bold.clone(),
+                    font_size: 10.0,
+                    ..default()
+                },
                 TextColor(Color::srgba(0.72, 0.76, 0.70, 0.72)),
                 Node { margin: UiRect::top(px(8)), ..default() },
             ));
