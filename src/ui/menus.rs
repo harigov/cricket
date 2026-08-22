@@ -253,6 +253,7 @@ fn settings_lines(
     let mut out = Vec::new();
     out.push(format!("Master Volume : {:>3}%  (A/D to adjust)", (audio.master * 100.0) as i32));
     out.push(format!("SFX Volume    : {:>3}%  (A/D to adjust)", (audio.sfx * 100.0) as i32));
+    out.push(format!("Music Volume  : {:>3}%  (A/D to adjust)", (audio.music * 100.0) as i32));
     for (action, label) in SETTINGS_ACTIONS {
         let key_str = if rebind.0 == Some(*action) {
             "Press any key...".to_string()
@@ -633,10 +634,10 @@ fn handle_menu_input(
                 }
                 return;
             }
-            // Navigation among 14 rows
-            navigate_list(&input, &mut ms.sel, 14);
-            // Volume sliders: rows 0 and 1
-            if ms.sel == 0 || ms.sel == 1 {
+            // Navigation among 15 rows (3 volumes + 10 bindings + reset + back)
+            navigate_list(&input, &mut ms.sel, 15);
+            // Volume sliders: rows 0,1,2
+            if ms.sel <= 2 {
                 let delta = if input.pressed(Action::Right) {
                     0.05
                 } else if input.pressed(Action::Left) {
@@ -645,28 +646,30 @@ fn handle_menu_input(
                     0.0
                 };
                 if delta != 0.0 {
-                    if ms.sel == 0 {
-                        audio.master = (audio.master + delta).clamp(0.0, 1.0);
-                    } else {
-                        audio.sfx = (audio.sfx + delta).clamp(0.0, 1.0);
+                    match ms.sel {
+                        0 => audio.master = (audio.master + delta).clamp(0.0, 1.0),
+                        1 => audio.sfx = (audio.sfx + delta).clamp(0.0, 1.0),
+                        2 => audio.music = (audio.music + delta).clamp(0.0, 1.0),
+                        _ => {}
                     }
                 }
             }
             if input.pressed(Action::Confirm) {
                 match ms.sel {
-                    0 | 1 => {} // volumes handled via Left/Right
-                    2..=11 => {
-                        let idx = ms.sel - 2;
+                    0 | 1 | 2 => {} // volumes handled via Left/Right
+                    3..=12 => {
+                        let idx = ms.sel - 3;
                         if let Some((action, _)) = SETTINGS_ACTIONS.get(idx) {
                             rebind.0 = Some(*action);
                         }
                     }
-                    12 => {
+                    13 => {
                         // Reset to defaults
                         *bindings = KeyBindings::default();
                         bindings.save();
                         audio.master = 0.85;
                         audio.sfx = 0.9;
+                        audio.music = 0.70;
                     }
                     _ => {
                         // Back
@@ -783,7 +786,7 @@ fn screen_item_count(ms: &MenuState, wd: &WorldData) -> usize {
         Screen::SetupOvers => OVERS_CHOICES.len(),
         Screen::SetupStadium => wd.stadiums.len() + 1,
         Screen::SetupBatFirst => 2,
-        Screen::Settings => 14,
+        Screen::Settings => 15,
         Screen::Bracket => 0,
     }
 }

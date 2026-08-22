@@ -33,6 +33,12 @@ fn main() {
                 ..default()
             }),
         )
+        .register_type::<Transform>()
+        .register_type::<GlobalTransform>()
+        .register_type::<Name>()
+        .register_type::<Visibility>()
+        .register_type::<InheritedVisibility>()
+        .register_type::<ViewVisibility>()
         .init_state::<AppState>()
         .add_message::<RebuildScene>()
         .insert_resource(WorldData::new())
@@ -277,6 +283,7 @@ fn setup_basics(
 /// Enter the match state: create ActiveMatch + first scene.
 fn enter_match(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     wd: Res<WorldData>,
@@ -285,7 +292,7 @@ fn enter_match(
     info!("Entering match");
     let am = build_active_match(&setup, &wd);
     let scene =
-        match_flow::spawn_match_scene(&mut commands, &mut meshes, &mut materials, &wd, &am);
+        match_flow::spawn_match_scene(&mut commands, &asset_server, &mut meshes, &mut materials, &wd, &am);
     commands.insert_resource(am);
     commands.insert_resource(scene);
     commands.insert_resource(CurrentDelivery(None));
@@ -311,6 +318,7 @@ fn exit_match(
 fn handle_rebuild_scene(
     mut ev: MessageReader<RebuildScene>,
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     wd: Res<WorldData>,
@@ -326,7 +334,7 @@ fn handle_rebuild_scene(
     }
     if let Some(am) = am.as_deref() {
         let new_scene = match_flow::spawn_match_scene(
-            &mut commands, &mut meshes, &mut materials, &wd, am);
+            &mut commands, &asset_server, &mut meshes, &mut materials, &wd, am);
         commands.insert_resource(new_scene);
         commands.insert_resource(Phase(PhaseEnum::ReadyToBall { t: 0.0 }));
     }

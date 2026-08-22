@@ -30,8 +30,7 @@ const KEEPER_SPEED: f32 = 9.0;
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_field_side(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    asset_server: &AssetServer,
     layout: &[FieldPos],
     shirt: Color,
     trousers: Color,
@@ -47,8 +46,7 @@ pub fn spawn_field_side(
         let is_keeper = slot == 0;
         let e = crate::render::player::spawn_figure(
             commands,
-            meshes,
-            materials,
+            asset_server,
             Vec3::new(pos.x, 0.0, pos.y),
             facing,
             shirt,

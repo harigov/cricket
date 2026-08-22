@@ -1,235 +1,261 @@
-//! Procedural player figures built from primitives, with lightweight
-//! code-driven animation (running, bowling action, bat swing, throw).
+//! Player figures – realistic human meshes via MIT Xbot glTF (Mixamo rig).
+//! The figure entity holds `Figure` + `Anim` + `Transform` + `SceneRoot`.
+//! A post-spawn system tags Mixamo bones with `Bone` so `animate_skeleton`
+//! can drive them code-driven (no external clips needed).
 
 use bevy::prelude::*;
+use bevy::gltf::GltfAssetLabel;
 
-/// Identifies which player this figure represents on the field.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Figure {
-    pub kind: FigureKind,
-}
+pub struct Figure { pub kind: FigureKind }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FigureKind {
-    Batter,
-    NonStriker,
-    Bowler,
-    Keeper,
-    Fielder(usize),
-    Umpire,
-}
+pub enum FigureKind { Batter, NonStriker, Bowler, Keeper, Fielder(usize), Umpire }
 
-/// Animation state machine, driven by gameplay systems.
 #[derive(Component, Default)]
-pub struct Anim {
-    pub state: AnimState,
-}
+pub struct Anim { pub state: AnimState }
 
 #[derive(Clone, Copy, Debug)]
-pub enum AnimState {
-    Idle,
-    Run { t: f32 },
-    /// Bowling delivery stride; `p` goes 0..1 over the action.
-    BowlAction { p: f32 },
-    BatSwing { p: f32 },
-    Throw { p: f32 },
-}
+pub enum AnimState { Idle, Run { t: f32 }, BowlAction { p: f32 }, BatSwing { p: f32 }, Throw { p: f32 } }
+impl Default for AnimState { fn default() -> Self { AnimState::Idle } }
 
-impl Default for AnimState {
-    fn default() -> Self {
-        AnimState::Idle
+#[derive(Component, Debug)]
+pub struct Bone { pub figure: Entity, pub kind: BoneKind }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoneKind {
+    Hips, Spine, Spine1, Spine2, Neck, Head,
+    LeftArm, LeftForeArm, LeftHand,
+    RightArm, RightForeArm, RightHand,
+    LeftUpLeg, LeftLeg, LeftFoot,
+    RightUpLeg, RightLeg, RightFoot,
+}
+fn bone_kind_for_name(name: &str) -> Option<BoneKind> {
+    match name {
+        "mixamorig:Hips" => Some(BoneKind::Hips),
+        "mixamorig:Spine" => Some(BoneKind::Spine),
+        "mixamorig:Spine1" => Some(BoneKind::Spine1),
+        "mixamorig:Spine2" => Some(BoneKind::Spine2),
+        "mixamorig:Neck" => Some(BoneKind::Neck),
+        "mixamorig:Head" => Some(BoneKind::Head),
+        "mixamorig:LeftArm" => Some(BoneKind::LeftArm),
+        "mixamorig:LeftForeArm" => Some(BoneKind::LeftForeArm),
+        "mixamorig:LeftHand" => Some(BoneKind::LeftHand),
+        "mixamorig:RightArm" => Some(BoneKind::RightArm),
+        "mixamorig:RightForeArm" => Some(BoneKind::RightForeArm),
+        "mixamorig:RightHand" => Some(BoneKind::RightHand),
+        "mixamorig:LeftUpLeg" => Some(BoneKind::LeftUpLeg),
+        "mixamorig:LeftLeg" => Some(BoneKind::LeftLeg),
+        "mixamorig:LeftFoot" => Some(BoneKind::LeftFoot),
+        "mixamorig:RightUpLeg" => Some(BoneKind::RightUpLeg),
+        "mixamorig:RightLeg" => Some(BoneKind::RightLeg),
+        "mixamorig:RightFoot" => Some(BoneKind::RightFoot),
+        _ => None,
     }
 }
 
-// ---- part marker components ----
-#[derive(Component)]
-pub struct Part {
-    pub kind: PartKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PartKind {
-    LegL,
-    LegR,
-    ArmL,
-    ArmR,
-}
 #[derive(Component)] pub struct Bat;
 
-const SKIN: Color = Color::srgb_u8(0xC6, 0x93, 0x6B);
+// Legacy – kept so old queries don't break, but no longer spawned.
+#[derive(Component)] pub struct Part { pub kind: PartKind }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum PartKind { LegL, LegR, ArmL, ArmR }
 
 pub fn spawn_figure(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    asset_server: &AssetServer,
     pos: Vec3,
     facing_deg: f32,
-    shirt: Color,
-    trousers: Color,
+    _shirt: Color,
+    _trousers: Color,
     kind: FigureKind,
 ) -> Entity {
-    let shirt_mat = materials.add(shirt);
-    let trouser_mat = materials.add(trousers);
-    let skin_mat = materials.add(SKIN);
-
-    let torso_mesh = meshes.add(Capsule3d::new(0.17, 0.42));
-    let head_mesh = meshes.add(Sphere::new(0.115));
-    let limb_mesh = meshes.add(Capsule3d::new(0.065, 0.62));
-
-    let is_batter =
-        matches!(kind, FigureKind::Batter | FigureKind::NonStriker);
-
-    let id = commands
-        .spawn((
-            Figure { kind },
-            Anim::default(),
-            Transform::from_translation(pos)
-                .with_rotation(Quat::from_rotation_y(facing_deg.to_radians())),
+    let scene = asset_server.load(GltfAssetLabel::Scene(0).from_asset("characters/Xbot.glb"));
+    let fig = commands.spawn((
+        Figure { kind },
+        Anim::default(),
+        Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(facing_deg.to_radians())),
+        Visibility::default(),
+        InheritedVisibility::default(),
+        ViewVisibility::default(),
+    )).id();
+    // Scene is a child offset so feet sit on y=0 (hips ~0.92m up)
+    commands.entity(fig).with_children(|p| {
+        p.spawn((
+            SceneRoot(scene),
+            Transform::from_xyz(0.0, 0.92, 0.0),
             Visibility::default(),
-        ))
-        .id();
-
-    commands.entity(id).with_children(|p| {
-        // Torso & head
-        p.spawn((
-            Mesh3d(torso_mesh.clone()),
-            MeshMaterial3d(shirt_mat.clone()),
-            Transform::from_xyz(0.0, 1.08, 0.0),
+            InheritedVisibility::default(),
+            ViewVisibility::default(),
         ));
-        p.spawn((
-            Mesh3d(head_mesh.clone()),
-            MeshMaterial3d(skin_mat.clone()),
-            Transform::from_xyz(0.0, 1.52, 0.0),
-        ));
-
-        // Legs: pivot at hip, mesh hangs below so rotation looks natural.
-        for (kind, x) in [(PartKind::LegL, -0.09), (PartKind::LegR, 0.09)] {
-            p.spawn((
-                Part { kind },
-                Transform::from_xyz(x, 0.78, 0.0),
-            )).with_children(|c| {
-                c.spawn((
-                    Mesh3d(limb_mesh.clone()),
-                    MeshMaterial3d(trouser_mat.clone()),
-                    Transform::from_xyz(0.0, -0.38, 0.0),
-                ));
-            });
-        }
-
-        // Arms: pivot at shoulders.
-        for (kind, x) in [(PartKind::ArmL, -0.26), (PartKind::ArmR, 0.26)] {
-            p.spawn((
-                Part { kind },
-                Transform::from_xyz(x, 1.34, 0.0),
-            )).with_children(|c| {
-                c.spawn((
-                    Mesh3d(limb_mesh.clone()),
-                    MeshMaterial3d(shirt_mat.clone()),
-                    Transform::from_xyz(0.0, -0.30, 0.0),
-                ));
-                // Bat hangs off the right arm of batters.
-                if kind == PartKind::ArmR && is_batter {
-                    c.spawn((
-                        Bat,
-                        Mesh3d(meshes.add(Cuboid::new(0.055, 0.85, 0.11))),
-                        MeshMaterial3d(materials.add(
-                            Color::srgb_u8(0xD9, 0xB4, 0x6A))),
-                        Transform::from_xyz(0.02, -0.72, 0.06)
-                            .with_rotation(Quat::from_rotation_x(-0.35)),
-                    ));
-                }
-            });
-        }
     });
-
-    id
+    fig
 }
 
-const RUN_FREQ: f32 = 13.0;
-const RUN_AMP: f32 = 0.75;
-
-/// Yaw (radians) that makes a figure face the given XZ direction.
-/// Figures are modelled facing -X at yaw 0.
-pub fn yaw_to_face(dir: bevy::math::Vec2) -> f32 {
-    dir.y.atan2(-dir.x)
-}
-
-pub fn animate_figures(
-    time: Res<Time>,
-    figures: Query<(&Anim, &Children, Option<&Figure>)>,
-    mut parts: Query<(&Part, &mut Transform)>,
+/// Tag newly spawned Mixamo bones. Walks up `ChildOf` chain to find the
+/// owning `Figure` entity and inserts `Bone`. Also attaches a bat to
+/// batters' right hand.
+pub fn tag_skeleton_bones(
+    mut commands: Commands,
+    figures: Query<(Entity, &Figure)>,
+    // All Name entities without Bone yet (potential bones)
+    candidates: Query<(Entity, &Name, Option<&ChildOf>), Without<Bone>>,
+    // Need to know parent of any entity for walk-up – separate query that
+    // includes all entities that have ChildOf
+    parents: Query<&ChildOf>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let t_global = time.elapsed_secs();
-    for (anim, children, fig) in &figures {
-        // Compute desired rotations per part kind.
-        #[allow(unused_assignments)]
-        let (mut ll, mut lr, mut al, mut ar) = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
-        let is_batter = fig.is_some_and(|f| {
-            matches!(f.kind, FigureKind::Batter | FigureKind::NonStriker)
-        });
-        match anim.state {
-            AnimState::Idle => {
-                // Batter idle: subtle bat waggle + weight shift; others breathe
-                if is_batter {
-                    let waggle = (t_global * 1.3).sin() * 0.14;
-                    ar = waggle;
-                    al = -waggle * 0.4;
-                    ll = (t_global * 0.9).sin() * 0.06;
-                    lr = -ll;
-                } else {
-                    // fielders: tiny idle sway
-                    let sway = (t_global * 0.7).sin() * 0.04;
-                    al = sway;
-                    ar = -sway;
-                }
-            }
-            AnimState::Run { t } => {
-                let phase = t * RUN_FREQ;
-                ll = phase.sin() * RUN_AMP;
-                lr = -ll;
-                al = -phase.sin() * RUN_AMP * 0.7;
-                ar = -al;
-            }
-            AnimState::BowlAction { p } => {
-                // Delivery stride: right arm windmills over the top.
-                ar = lerp(2.6, -2.2, p.clamp(0.0, 1.0));
-                al = -0.4;
-                ll = 0.6 * (1.0 - p);
-                lr = -0.6 * (1.0 - p) + 0.9 * p;
-            }
-            AnimState::BatSwing { p } => {
-                // Horizontal swing across the body.
-                ar = lerp(1.4, -2.4, (p.clamp(0.0, 1.0) * 2.0).min(1.0));
-                al = ar * 0.5;
-                ll = 0.15;
-                lr = -0.15;
-            }
-            AnimState::Throw { p } => {
-                ar = lerp(-2.4, 0.8, p.clamp(0.0, 1.0));
-                al = 0.3;
-            }
+    // Build figure lookup
+    let figure_set: std::collections::HashSet<Entity> = figures.iter().map(|(e,_)| e).collect();
+    let figure_kind: std::collections::HashMap<Entity, FigureKind> =
+        figures.iter().map(|(e,f)| (e, f.kind)).collect();
+
+    for (ent, name, child_of) in &candidates {
+        let Some(kind) = bone_kind_for_name(name.as_str()) else { continue };
+        // Walk up to find Figure
+        let mut cur = child_of.map(|c| c.parent());
+        let mut fig_ent = None;
+        let mut steps = 0;
+        while let Some(p) = cur {
+            if figure_set.contains(&p) { fig_ent = Some(p); break; }
+            // Move up one more level
+            if let Ok(child) = parents.get(p) { cur = Some(child.parent()); } else { break; }
+            steps += 1;
+            if steps > 16 { break; }
         }
-        let targets = [
-            (PartKind::LegL, ll),
-            (PartKind::LegR, lr),
-            (PartKind::ArmL, al),
-            (PartKind::ArmR, ar),
-        ];
-        for child in children.iter() {
-            if let Ok((part, mut tf)) = parts.get_mut(child) {
-                if let Some((_, angle)) =
-                    targets.iter().find(|(k, _)| *k == part.kind)
-                {
-                    let target = Quat::from_rotation_z(*angle);
-                    // Smooth interpolation: snappy but not instant (~12 rad/s)
-                    let a = (12.0 * time.delta_secs()).clamp(0.0, 1.0);
-                    tf.rotation = tf.rotation.slerp(target, a);
+        let Some(fig) = fig_ent else { continue };
+        commands.entity(ent).insert(Bone { figure: fig, kind });
+
+        // Attach bat to batters' right hand (once)
+        if kind == BoneKind::RightHand {
+            if let Some(k) = figure_kind.get(&fig) {
+                if matches!(k, FigureKind::Batter | FigureKind::NonStriker) {
+                    let bat_mesh = meshes.add(Cuboid::new(0.055, 0.85, 0.11));
+                    let bat_mat = materials.add(Color::srgb_u8(0xD9, 0xB4, 0x6A));
+                    commands.entity(ent).with_children(|p| {
+                        p.spawn((
+                            Bat,
+                            Mesh3d(bat_mesh),
+                            MeshMaterial3d(bat_mat),
+                            Transform::from_xyz(0.02, -0.12, 0.06).with_rotation(Quat::from_rotation_x(-0.35)),
+                        ));
+                    });
                 }
             }
         }
     }
 }
 
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
+const RUN_FREQ: f32 = 13.0;
+const RUN_AMP: f32 = 0.72;
+
+pub fn yaw_to_face(dir: bevy::math::Vec2) -> f32 { dir.y.atan2(-dir.x) }
+
+/// Legacy – does nothing now (kept for RenderPlugin compatibility).
+pub fn animate_figures(
+    _time: Res<Time>,
+    _figures: Query<(&Anim, &Children, Option<&Figure>)>,
+    _parts: Query<(&Part, &mut Transform)>,
+) {}
+
+/// Drive Xbot skeleton from `AnimState`.
+pub fn animate_skeleton(
+    time: Res<Time>,
+    figures: Query<(Entity, &Figure, &Anim)>,
+    mut bones: Query<(&Bone, &mut Transform)>,
+) {
+    let t_global = time.elapsed_secs();
+    for (fig_ent, fig, anim) in &figures {
+        // Compute targets
+        let mut hips = Quat::IDENTITY;
+        let mut spine = Quat::IDENTITY;
+        let spine1 = Quat::IDENTITY;
+        let spine2 = Quat::IDENTITY;
+        let head = Quat::IDENTITY;
+        let mut la = Quat::IDENTITY;
+        let mut ra = Quat::IDENTITY;
+        let mut lfa = Quat::IDENTITY;
+        let mut rfa = Quat::IDENTITY;
+        let mut lup = Quat::IDENTITY;
+        let mut rup = Quat::IDENTITY;
+        let mut ll = Quat::IDENTITY;
+        let mut rl = Quat::IDENTITY;
+
+        let is_batter = matches!(fig.kind, FigureKind::Batter | FigureKind::NonStriker);
+        match anim.state {
+            AnimState::Idle => {
+                if is_batter {
+                    let w = (t_global * 1.3).sin() * 0.13;
+                    ra = Quat::from_rotation_z(w);
+                    la = Quat::from_rotation_z(-w * 0.45);
+                    hips = Quat::from_rotation_z((t_global*0.9).sin()*0.05);
+                } else {
+                    let sway = (t_global*0.7).sin()*0.04;
+                    spine = Quat::from_rotation_z(sway);
+                }
+            }
+            AnimState::Run { t } => {
+                let ph = t * RUN_FREQ;
+                let a = ph.sin()*RUN_AMP;
+                lup = Quat::from_rotation_x(a*0.55);
+                rup = Quat::from_rotation_x(-a*0.55);
+                ll = Quat::from_rotation_x(a*0.32);
+                rl = Quat::from_rotation_x(-a*0.32);
+                la = Quat::from_rotation_x(-a*0.62);
+                ra = Quat::from_rotation_x(a*0.62);
+                hips = Quat::from_rotation_x((ph*2.0).sin()*0.05);
+            }
+            AnimState::BowlAction { p } => {
+                let pc = p.clamp(0.0,1.0);
+                ra = Quat::from_rotation_x(lerp(2.6, -2.1, pc));
+                rfa = Quat::from_rotation_x(-0.55*pc);
+                la = Quat::from_rotation_z(-0.42);
+                lup = Quat::from_rotation_x(0.48*(1.0-pc));
+                rup = Quat::from_rotation_x(-0.58*(1.0-pc)+0.78*pc);
+                spine = Quat::from_rotation_x(0.22*pc);
+            }
+            AnimState::BatSwing { p } => {
+                let pc = (p.clamp(0.0,1.0)*2.0).min(1.0);
+                let ang = lerp(1.25, -2.05, pc);
+                ra = Quat::from_rotation_z(ang*0.68) * Quat::from_rotation_x(0.28);
+                la = Quat::from_rotation_z(ang*0.52);
+                rfa = Quat::from_rotation_x(0.42);
+                lfa = Quat::from_rotation_x(0.42);
+                spine = Quat::from_rotation_y(ang*0.14);
+            }
+            AnimState::Throw { p } => {
+                let pc = p.clamp(0.0,1.0);
+                ra = Quat::from_rotation_x(lerp(-2.25, 0.7, pc));
+                rfa = Quat::from_rotation_x(lerp(-0.85, 0.2, pc));
+            }
+        }
+        let blend = (14.0 * time.delta_secs()).clamp(0.0,1.0);
+        let drift = blend*0.45;
+        for (bone, mut tf) in &mut bones {
+            if bone.figure != fig_ent { continue; }
+            let target = match bone.kind {
+                BoneKind::Hips => hips,
+                BoneKind::Spine => spine,
+                BoneKind::Spine1 => spine1,
+                BoneKind::Spine2 => spine2,
+                BoneKind::Neck | BoneKind::Head => head,
+                BoneKind::LeftArm => la,
+                BoneKind::RightArm => ra,
+                BoneKind::LeftForeArm => lfa,
+                BoneKind::RightForeArm => rfa,
+                BoneKind::LeftUpLeg => lup,
+                BoneKind::RightUpLeg => rup,
+                BoneKind::LeftLeg => ll,
+                BoneKind::RightLeg => rl,
+                _ => Quat::IDENTITY,
+            };
+            if target != Quat::IDENTITY {
+                tf.rotation = tf.rotation.slerp(target, blend);
+            } else {
+                tf.rotation = tf.rotation.slerp(Quat::IDENTITY, drift);
+            }
+            let _ = (spine1, spine2, head); // keep bindings used
+        }
+    }
 }
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 { a + (b - a) * t }

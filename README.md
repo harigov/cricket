@@ -8,8 +8,10 @@ full batting / bowling / fielding gameplay on both keyboard and gamepad.
 ## Features
 
 - **Full match simulation** — T20-style matches (5/10/20 overs) with
-  realistic ball physics: gravity, drag, swing in the air, seam/spin
-  deviation off the pitch, bounce variation by surface.
+  **realistic ball physics**: 9.81 m/s² gravity, quadratic drag (`Cd≈0.47`,
+  `ρ=1.225`, `A=πr²`, `m=0.16 kg`), Magnus swing (`Cl≈0.055·|v|`) and
+  post-bounce spin Magnus, pitch-aware restitution/grip/turn
+  (green seamers swing & bounce, dusty turners grip).
 - **Batting** — timing-based shot play with a timing meter, leg/off-side
   aiming, lofted (risky) shots. Perfect/good/late/edge timing tiers drive
   shot power, elevation and direction; edges can be caught behind.
@@ -35,13 +37,17 @@ full batting / bowling / fielding gameplay on both keyboard and gamepad.
   Highveld Dome — each with its own boundary size and pitch behaviour
   (green seamer / hard & true / dusty turner / dry), striped mown outfield,
   crowd blobs and sight screens.
+- **Realistic human models** — MIT-licensed **Xbot glTF** (Mixamo rig,
+  `assets/characters/Xbot.glb` 2.8 MB via three.js `examples` — MIT, PBR,
+  16k tris, 55-bone humanoid). Skinned, code-driven skeletal animation
+  (idle waggle, run, bowling windmill, bat swing) — fully MIT-distributable
+  and retarget-friendly for future Mixamo clips.
 - **Atmosphere** — sky gradient, distance fog, warm late-afternoon sun,
   ball trail on big hits, camera shake on wickets/boundaries.
-- **Sound** — fully procedural audio (no external assets): bat crack,
-  stump clatter, crowd cheers (four/six), ambient ground murmur,
-  UI blips. Master/SFX volume controls.
-- **Animation** — smooth limb blending, batter idle waggle, bowler
-  windmill, run bob, bat swing follow-through.
+- **Sound** — procedural audio (bat crack, stump clatter, crowd, murmur)
+  + Master/SFX volume controls.
+- **Animation** — skeletal `slerp` blending (14 rad/s) on Mixamo bones:
+  batter idle waggle, bowler windmill, run cycle, bat follow-through.
 - **Camera** — four modes (batting end, bowling end, broadcast, follow ball)
   with `C` / `Y` to cycle; smooth blending and wicket shake.
 - **Input** — keyboard + gamepad throughout; fully remappable keyboard
@@ -138,13 +144,13 @@ src/
 │   ├── teams.rs     # Teams, players, ratings
 │   └── tournament.rs# Knockout bracket, quick-sim
 ├── game/
-│   ├── audio.rs     # Procedural WAV synthesis + playback
-│   ├── ball.rs      # Ball flight: gravity/drag/swing/bounce/turn + trail
+│   ├── audio.rs     # Hybrid audio: 44.1 kHz procedural SFX + Kenney CC0 OGG + music beds
+│   ├── ball.rs      # Realistic flight: quadratic drag, Magnus swing/spin, pitch-aware bounce
 │   ├── fielding.rs  # Fielder entities, predictive chase AI
 │   └── match_flow.rs# Delivery cycle, contact resolution, AI
 ├── render/
 │   ├── camera_rig.rs# Camera modes + toggle + shake
-│   ├── player.rs    # Procedural figures + smooth animation
+│   ├── player.rs    # Xbot glTF human (MIT) + skeletal code-driven anim
 │   └── stadium.rs   # Procedural stadium: stripes, crowd, sight screens
 ├── ui/
 │   ├── hud.rs       # Scoreboard, prompts, timing meter, match summary

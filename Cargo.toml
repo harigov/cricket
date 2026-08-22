@@ -28,6 +28,7 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "default_font",
     "multi_threaded",
     "png",
+    "reflect_auto_register",
     "sysinfo_plugin",
     "tonemapping_luts",
     "vorbis",

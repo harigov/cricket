@@ -90,6 +90,7 @@ fn coin(p: f32) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_match_scene(
     commands: &mut Commands,
+    asset_server: &AssetServer,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     wd: &WorldData,
@@ -119,14 +120,14 @@ pub fn spawn_match_scene(
 
     // Batters face the bowler (-X => yaw 0); non-striker turns around.
     let striker = spawn_figure(
-        commands, meshes, materials,
+        commands, asset_server,
         Vec3::new(geo::BATSMAN_POS.x, 0.0, geo::BATSMAN_POS.y),
         0.0,
         bat_team.primary_color, bat_team.secondary_color,
         FigureKind::Batter,
     );
     let non_striker = spawn_figure(
-        commands, meshes, materials,
+        commands, asset_server,
         Vec3::new(-geo::PITCH_HALF_LEN + 1.6, 0.0, 0.9),
         180.0,
         bat_team.primary_color, bat_team.secondary_color,
@@ -135,7 +136,7 @@ pub fn spawn_match_scene(
 
     // Bowler at the top of his mark, facing down the pitch (+X).
     let bowler = spawn_figure(
-        commands, meshes, materials,
+        commands, asset_server,
         Vec3::new(-geo::PITCH_HALF_LEN - 8.0, 0.0, 0.35),
         180.0,
         fld_team.primary_color, fld_team.secondary_color,
@@ -145,7 +146,7 @@ pub fn spawn_match_scene(
     // Fielding side.
     let layout = geo::FieldLayout::standard();
     let fielders = fielding::spawn_field_side(
-        commands, meshes, materials,
+        commands, asset_server,
         &layout.positions,
         fld_team.primary_color, fld_team.secondary_color,
     );

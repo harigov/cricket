@@ -11,7 +11,12 @@ impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (player::animate_figures, camera_rig::update_camera),
+            (
+                player::tag_skeleton_bones,
+                player::animate_skeleton,
+                player::animate_figures,
+                camera_rig::update_camera,
+            ),
         );
     }
 }
