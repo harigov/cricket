@@ -153,6 +153,30 @@ Domain logic (rules, geometry, teams, tournaments) has unit tests:
 cargo test
 ```
 
+## Formatting & linting
+
+Formatting is `rustfmt` with the settings in `rustfmt.toml`; lints are
+`clippy`, configured by the `[lints]` table in `Cargo.toml` and enforced as
+errors in CI. Install the components once:
+
+```bash
+rustup component add rustfmt clippy
+```
+
+Then run the whole gate — formatting, lints and tests — with:
+
+```bash
+scripts/check.sh          # check only (what CI runs)
+scripts/check.sh --fix    # reformat and apply machine-applicable lint fixes
+```
+
+Or invoke the individual tools:
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+```
+
 ## Project structure
 
 ```

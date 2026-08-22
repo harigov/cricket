@@ -3,6 +3,14 @@ name = "cricket"
 version = "0.1.0"
 edition = "2024"
 
+# Lint policy — enforced by `scripts/check.sh` and CI (`cargo clippy -- -D warnings`).
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+# Bevy systems and scene spawners legitimately take many parameters (queries,
+# resources, asset stores). We group them into `SystemParam`/context structs
+# where that aids readability rather than chasing the arity threshold.
+too_many_arguments = "allow"
+
 [dependencies]
 bevy = { version = "0.18.1", default-features = false, features = [
     "std",

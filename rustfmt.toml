@@ -1,0 +1,6 @@
+# Formatting for Willow Cricket — run `cargo fmt --all` (or `scripts/check.sh`).
+# Only stable rustfmt options are used so a plain stable toolchain suffices.
+edition = "2024"
+max_width = 100
+newline_style = "Unix"
+use_field_init_shorthand = true
