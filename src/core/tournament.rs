@@ -40,37 +40,50 @@ pub struct Fixture {
     pub played_by_user: bool,
 }
 
-impl Fixture {
-    pub fn winner(&self) -> Option<usize> {
-        match self.result.clone()? {
-            MatchResult::Win { winner, .. } => Some(winner),
-            MatchResult::Tie => Some(self.home), // tie: home advances
-        }
-    }
-}
+impl Fixture { /* winner resolution lives on Tournament (needs world map) */ }
 
 #[derive(Clone, Debug)]
 pub struct Tournament {
     pub name: String,
     pub teams: Vec<Team>,
+    /// For each entrant, their index into WorldData.teams.
+    pub world_idx: Vec<usize>,
     pub stadiums: Vec<Stadium>,
     pub fixtures: Vec<Fixture>,
+    /// Index into `teams` of the user-controlled side.
     pub user_team: Option<usize>,
 }
 
+/// Entrant pair used to build a tournament.
+pub struct Entrant {
+    pub world_idx: usize,
+    pub team: Team,
+}
+
 impl Tournament {
-    /// 4-team knockout. `user_team` selects the player-controlled side.
+    /// Winner of a fixture as a tournament-local team index.
+    pub fn fixture_winner(&self, f: &Fixture) -> Option<usize> {
+        match f.result.as_ref()? {
+            MatchResult::Win { winner, .. } => {
+                // `winner` is a WorldData team index; map it locally.
+                let local = self.world_idx.iter().position(|&w| w == *winner);
+                Some(local.unwrap_or(f.home))
+            }
+            MatchResult::Tie => Some(f.home),
+        }
+    }
+}
+
+impl Tournament {
+    /// 4-team knockout. `user_local` selects the player-controlled side.
     pub fn knockout(
-        mut entrants: Vec<Team>,
+        mut entrants: Vec<Entrant>,
         stadiums: Vec<Stadium>,
-        user_team: Option<String>,
+        user_local: Option<usize>,
     ) -> Tournament {
-        // Shuffle deterministically-ish by rating spread for variety.
-        entrants.sort_by_key(|t| (team_rating(t) * 10.0) as i64);
+        // Seed strongest vs weakest for variety across runs.
+        entrants.sort_by_key(|e| (team_rating(&e.team) * 10.0) as i64);
         let n = entrants.len();
-        let user_idx = user_team.as_ref().and_then(|name| {
-            entrants.iter().position(|t| &t.name == name)
-        });
         let mk = |stage, a, b, stad| Fixture {
             stage,
             home: a,
@@ -83,13 +96,14 @@ impl Tournament {
         Tournament {
             name: format!("{}-Team Championship", n),
             fixtures: vec![
-                mk(Stage::Semifinal1, 0, 3, 0),
-                mk(Stage::Semifinal2, 1, 2, 1),
-                mk(Stage::Final, 0, 1, 2), // placeholders; filled on advance
+                mk(Stage::Semifinal1, 0, 3, 0 % stadiums.len()),
+                mk(Stage::Semifinal2, 1, 2, 1 % stadiums.len()),
+                mk(Stage::Final, 0, 1, 2 % stadiums.len()), // filled on advance
             ],
-            teams: entrants,
+            world_idx: entrants.iter().map(|e| e.world_idx).collect(),
+            teams: entrants.into_iter().map(|e| e.team).collect(),
             stadiums,
-            user_team: user_idx,
+            user_team: user_local,
         }
     }
 
@@ -125,10 +139,15 @@ impl Tournament {
     }
 
     fn propagate(&mut self) {
-        let s1 = self.fixtures.iter().find(|f| f.stage == Stage::Semifinal1)
-            .and_then(|f| f.winner());
-        let s2 = self.fixtures.iter().find(|f| f.stage == Stage::Semifinal2)
-            .and_then(|f| f.winner());
+        let (s1, s2) = {
+            let this = &*self;
+            (
+                this.fixtures.iter().find(|f| f.stage == Stage::Semifinal1)
+                    .and_then(|f| this.fixture_winner(f)),
+                this.fixtures.iter().find(|f| f.stage == Stage::Semifinal2)
+                    .and_then(|f| this.fixture_winner(f)),
+            )
+        };
         if let (Some(a), Some(b)) = (s1, s2) {
             let fin = self.fixtures.iter_mut()
                 .find(|f| f.stage == Stage::Final).unwrap();
@@ -141,7 +160,10 @@ impl Tournament {
 
     pub fn champion(&self) -> Option<usize> {
         let final_f = self.fixtures.iter().find(|f| f.stage == Stage::Final)?;
-        final_f.winner().filter(|_| final_f.result.is_some())
+        final_f
+            .result
+            .as_ref()
+            .and_then(|_| self.fixture_winner(final_f))
     }
 
     /// Fast statistical simulation of an innings for AI-vs-AI matches.

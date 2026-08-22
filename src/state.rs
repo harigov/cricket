@@ -4,26 +4,14 @@ use bevy::prelude::*;
 
 #[derive(States, Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum AppState {
+    /// Menus: main menu, setup wizard, controls, tournament bracket.
     #[default]
-    MainMenu,
-    /// Team/format/stadium selection before a match.
-    Setup,
+    Menu,
     /// Live match simulation.
     InMatch,
-    /// Between-innings screen (part of InMatch phases, kept for future).
-    InningsBreak,
-    /// Post-match result display.
-    MatchResult,
-    /// Tournament bracket overview.
-    Tournament,
-    ControlsHelp,
 }
 
 /// Fired when the match scene must be torn down and rebuilt
-/// (innings change, new tournament match, etc.).
+/// (innings change).
 #[derive(Message)]
 pub struct RebuildScene;
-
-/// Fired to tear down the scene when leaving the match entirely.
-#[derive(Message)]
-pub struct TeardownScene;

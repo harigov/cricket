@@ -1203,3 +1203,23 @@ pub fn sys_camera_modes(
         _ => {} // ready/aim/runup set their own mode in sys_ready
     }
 }
+
+/// Reset fielder brains when a new delivery cycle starts.
+pub fn fielding_brain_reset(
+    phase: Res<Phase>,
+    mut last: Local<u8>,
+    mut brains: Query<&mut Brain>,
+) {
+    let disc = match phase.0 {
+        PhaseEnum::ReadyToBall { .. } => 1u8,
+        _ => 0,
+    };
+    if disc == 1 && *last != 1 {
+        for mut b in &mut brains {
+            if matches!(*b, Brain::Chase) {
+                *b = Brain::AtPost;
+            }
+        }
+    }
+    *last = disc;
+}
