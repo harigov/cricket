@@ -202,7 +202,6 @@ pub fn sys_ready(
 ) {
     let PhaseEnum::ReadyToBall { t } = &mut phase.0 else { return };
     *t += time.delta_secs();
-    if unit() < 0.01 { info!("READY t={:.2}", *t); }
 
     // Park everyone at their posts.
     for (fig, mut tf, mut anim) in &mut figs {
@@ -398,7 +397,6 @@ pub fn sys_runup(
     let PhaseEnum::RunUp { p } = &mut phase.0 else { return };
     *p += time.delta_secs() / RUNUP_SECS;
     let p = *p;
-    if unit() < 0.02 { info!("RUNUP p={:.2}", p); }
 
     // Bowler jogs in; delivery stride over the last 30%.
     for (fig, mut tf, mut anim) in &mut figs {

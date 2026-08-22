@@ -100,6 +100,7 @@ fn spawn_hud(mut commands: Commands) {
                 },
                 Text::new(""),
                 TextFont { font_size: 54.0, ..default() },
+                TextLayout::new_with_justify(Justify::Center),
                 TextColor(Color::srgb(1.0, 0.9, 0.3)),
                 Visibility::Hidden,
             ));

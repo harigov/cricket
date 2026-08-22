@@ -118,6 +118,7 @@ fn autotest_drive(
     mut t: Local<f32>,
     mut last_press: Local<u32>,
     mut last_milestone: Local<u32>,
+    mut last_swing_t: Local<f32>,
 ) {
     if std::env::var("CRICKET_AUTOTEST").unwrap_or_default() != "1" {
         return;
@@ -144,7 +145,8 @@ fn autotest_drive(
     }
 
     // In-match: swing periodically once play is under way.
-    if now > 14.0 && now % 2.5 < 0.05 {
+    if now > 14.0 && now - *last_swing_t >= 3.0 {
+        *last_swing_t = now;
         input.just_pressed.push(input::Action::Confirm);
         info!("AUTOTEST: shot swing @ {:.1}s", now);
     }
