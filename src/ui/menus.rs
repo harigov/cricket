@@ -315,7 +315,7 @@ fn handle_menu_input(
     mut commands: Commands,
 ) {
     use Screen::*;
-    let count = screen_item_count(&ms, &wd);
+    let _count = screen_item_count(&ms, &wd);
     let wrap = |sel: &mut usize, delta: i32, max: usize| {
         *sel = ((*sel as i32 + delta).rem_euclid(max as i32)) as usize;
     };
@@ -435,7 +435,6 @@ fn handle_menu_input(
                 }
             }
         }
-        _ => {}
     }
 }
 

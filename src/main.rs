@@ -1,3 +1,7 @@
+// Roadmap features (LBW, stumping, replays, extra cameras…) are modelled
+// but not yet wired into gameplay, so some items are intentionally unused.
+#![allow(dead_code)]
+
 mod core;
 mod game;
 mod input;
@@ -9,7 +13,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::Screenshot;
 use game::match_flow::{self, MatchScene};
 use game::*;
-use render::camera_rig::{update_camera, CameraRig};
+use render::camera_rig::CameraRig;
 use state::{AppState, RebuildScene};
 
 /// Gameplay systems only run while the match resources actually exist

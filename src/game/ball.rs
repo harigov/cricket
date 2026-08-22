@@ -64,7 +64,7 @@ pub fn physics_step(
     let dt = dt_raw * BALL_TIME_SCALE;
 
     let pre_x = state.pos.x;
-    let pre_y = state.pos.y;
+    let _pre_y = state.pos.y;
 
     // Gravity + drag + swing (swing only before bouncing or being struck).
     let mut accel = Vec3::new(0.0, -GRAVITY, 0.0);

@@ -45,7 +45,6 @@ impl FieldPos {
     }
 }
 
-use std::f32::consts::PI;
 
 const fn fp(name: &'static str, angle: f32, dist: f32) -> FieldPos {
     FieldPos { name, angle, dist }

@@ -1,7 +1,7 @@
 //! Unified input layer: maps keyboard and gamepad to abstract actions so
 //! every gameplay/menu system works identically on both devices.
 
-use bevy::input::gamepad::{GamepadAxis, GamepadButton};
+use bevy::input::gamepad::GamepadButton;
 use bevy::prelude::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,7 +78,7 @@ pub fn poll_input(
     }
 
     // ---- gamepad ----
-    let gp = pads.iter().next();
+    let _gp = pads.iter().next();
     out.gamepad_connected = pads.iter().next().is_some();
     if let Some(gp) = pads.iter().next() {
         let map_gp = [

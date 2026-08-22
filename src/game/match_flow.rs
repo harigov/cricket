@@ -11,7 +11,7 @@
 //! * All randomness comes from a small LCG so behaviour is reproducible
 //!   in tests and replays.
 
-use crate::core::geometry::{self as geo, FieldPos};
+use crate::core::geometry::{self as geo};
 use crate::core::rules::{BallOutcome, Dismissal};
 use crate::core::teams::{batting_order, pick_bowlers, BowlStyle, Player};
 use crate::game::ball::*;
@@ -390,9 +390,9 @@ pub fn sys_runup(
     mut figs: Query<(&Figure, &mut Transform, &mut Anim)>,
     mut ball_q: Query<&mut BallState, With<CricketBall>>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut scene: ResMut<MatchScene>,
+    _meshes: ResMut<Assets<Mesh>>,
+    _materials: ResMut<Assets<StandardMaterial>>,
+    _scene: ResMut<MatchScene>,
 ) {
     let PhaseEnum::RunUp { p } = &mut phase.0 else { return };
     *p += time.delta_secs() / RUNUP_SECS;
@@ -508,7 +508,7 @@ pub fn sys_ball_physics(
 
 #[allow(clippy::too_many_arguments)]
 pub fn sys_shot_input(
-    mut phase: ResMut<Phase>,
+    phase: ResMut<Phase>,
     time: Res<Time>,
     input: Res<PlayerInput>,
     am: Res<ActiveMatch>,
@@ -944,7 +944,7 @@ pub fn sys_pending_watch(
     time: Res<Time>,
     mut phase: ResMut<Phase>,
     mut am: ResMut<ActiveMatch>,
-    rel: Res<ReleaseInfo>,
+    _rel: Res<ReleaseInfo>,
     br: Res<BoundaryRadius>,
     mut pending: ResMut<Pending>,
     mut ball_q: Query<&mut BallState, With<CricketBall>>,
