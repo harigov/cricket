@@ -1,6 +1,5 @@
 /// Pitch and field geometry constants (metres / degrees), matching real
 /// cricket dimensions so distances feel right.
-
 /// Stump-to-stump length of the pitch.
 pub const PITCH_LENGTH: f32 = 20.12;
 pub const PITCH_HALF_LEN: f32 = PITCH_LENGTH / 2.0;
@@ -13,16 +12,12 @@ pub const STUMP_HEIGHT: f32 = 0.71;
 
 /// Where the striker stands, slightly in front of the stumps and on the
 /// leg side of the stump line.
-pub const BATSMAN_POS: bevy::math::Vec2 =
-    bevy::math::Vec2::new(PITCH_HALF_LEN - 0.9, -0.15);
+pub const BATSMAN_POS: bevy::math::Vec2 = bevy::math::Vec2::new(PITCH_HALF_LEN - 0.9, -0.15);
 /// Keeper crouches just behind the stumps (distance from the batter).
 pub const KEEPER_OFFSET: f32 = 2.6;
 /// Bowler releases the ball roughly here (front foot on the crease).
-pub const RELEASE_POINT: bevy::math::Vec3 = bevy::math::Vec3::new(
-    -PITCH_HALF_LEN + 1.22,
-    2.05,
-    0.0,
-);
+pub const RELEASE_POINT: bevy::math::Vec3 =
+    bevy::math::Vec3::new(-PITCH_HALF_LEN + 1.22, 2.05, 0.0);
 
 /// Default boundary radius; stadiums override this.
 pub const DEFAULT_BOUNDARY_RADIUS: f32 = 65.0;
@@ -45,7 +40,6 @@ impl FieldPos {
     }
 }
 
-
 const fn fp(name: &'static str, angle: f32, dist: f32) -> FieldPos {
     FieldPos { name, angle, dist }
 }
@@ -54,7 +48,8 @@ const fn fp(name: &'static str, angle: f32, dist: f32) -> FieldPos {
 pub mod positions {
     use super::*;
 
-    pub const KEEPER: FieldPos = fp("Keeper", 180.0, super::super::geometry::KEEPER_OFFSET);    pub const SLIP: FieldPos = fp("Slip", 163.0, 11.0);
+    pub const KEEPER: FieldPos = fp("Keeper", 180.0, super::super::geometry::KEEPER_OFFSET);
+    pub const SLIP: FieldPos = fp("Slip", 163.0, 11.0);
     pub const THIRD_MAN: FieldPos = fp("Third Man", 140.0, 55.0);
     pub const POINT: FieldPos = fp("Point", 95.0, 30.0);
     pub const COVER: FieldPos = fp("Cover", 60.0, 30.0);
@@ -154,7 +149,6 @@ pub fn dir_to_angle(dir: bevy::math::Vec2) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::math::Vec2;
 
     #[test]
     fn angle_dir_straight_is_minus_x() {

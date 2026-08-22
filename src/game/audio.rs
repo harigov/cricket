@@ -4,7 +4,8 @@
 //! All synthesis is 44.1 kHz 16-bit mono WAV and runs without external files, but
 //! menu UI also plays embedded CC0 OGG (Kenney) when available — see assets/audio/ATTRIBUTION.md.
 
-use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume, GlobalVolume};
+use bevy::audio::{AudioPlayer, AudioSource, GlobalVolume, PlaybackSettings, Volume};
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use std::collections::HashMap;
 
@@ -155,7 +156,11 @@ pub struct CommentaryPlaying {
 
 impl Default for CommentaryPlaying {
     fn default() -> Self {
-        Self { remaining: 0.0, queued: None, duck_level: 1.0 }
+        Self {
+            remaining: 0.0,
+            queued: None,
+            duck_level: 1.0,
+        }
     }
 }
 
@@ -177,7 +182,13 @@ pub struct AudioSettings {
 
 impl Default for AudioSettings {
     fn default() -> Self {
-        Self { master: 0.85, sfx: 0.90, music: 0.70, commentary: CommentaryVoice::Male, commentary_volume: 0.85 }
+        Self {
+            master: 0.85,
+            sfx: 0.90,
+            music: 0.70,
+            commentary: CommentaryVoice::Male,
+            commentary_volume: 0.85,
+        }
     }
 }
 
@@ -242,55 +253,63 @@ fn hash_noise(i: usize, seed: u32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// Synth helpers (loop / clamp / wav_bytes scaffolding)
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn sine(freq: f32, t: f32) -> f32 {
+    (std::f32::consts::TAU * freq * t).sin()
+}
+
+fn decay(t: f32, rate: f32) -> f32 {
+    (-t * rate).exp()
+}
+
+fn render(dur: f32, mut f: impl FnMut(f32, usize) -> f32) -> Vec<u8> {
+    let n = (SR as f32 * dur) as usize;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f32 / SR as f32;
+        out.push(f(t, i));
+    }
+    wav_bytes(&out, SR)
+}
+
+// ---------------------------------------------------------------------------
 // High-quality synthesis (44.1 kHz)
 // ---------------------------------------------------------------------------
 
 fn gen_bat_light() -> Vec<u8> {
-    let dur = 0.065f32;
-    let n = (SR as f32 * dur) as usize;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = i as f32 / SR as f32;
-        let env = (-t * 65.0).exp();
+    render(0.065f32, |t, i| {
+        let env = decay(t, 65.0);
         let noise = hash_noise(i, 0x1234) * 0.28 * env;
-        let thump = (std::f32::consts::TAU * 180.0 * t).sin() * (-t * 28.0).exp() * 0.35;
-        let crack = (std::f32::consts::TAU * 2200.0 * t).sin() * (-t * 140.0).exp() * 0.22;
-        let body = (std::f32::consts::TAU * 620.0 * t).sin() * (-t * 55.0).exp() * 0.15;
-        out.push((noise + thump + crack + body).clamp(-1.0, 1.0) * 0.88);
-    }
-    wav_bytes(&out, SR)
+        let thump = sine(180.0, t) * decay(t, 28.0) * 0.35;
+        let crack = sine(2200.0, t) * decay(t, 140.0) * 0.22;
+        let body = sine(620.0, t) * decay(t, 55.0) * 0.15;
+        (noise + thump + crack + body).clamp(-1.0, 1.0) * 0.88
+    })
 }
 
 fn gen_bat_heavy() -> Vec<u8> {
-    let dur = 0.095f32;
-    let n = (SR as f32 * dur) as usize;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = i as f32 / SR as f32;
-        let env = (-t * 42.0).exp();
+    render(0.095f32, |t, i| {
+        let env = decay(t, 42.0);
         let noise = hash_noise(i, 0x9E37) * 0.32 * env;
-        let thump = (std::f32::consts::TAU * 110.0 * t).sin() * (-t * 18.0).exp() * 0.52;
-        let crack = (std::f32::consts::TAU * 1650.0 * t).sin() * (-t * 95.0).exp() * 0.28;
-        let click = (std::f32::consts::TAU * 3400.0 * t).sin() * (-t * 180.0).exp() * 0.12;
-        let ring = (std::f32::consts::TAU * 720.0 * t).sin() * (-t * 35.0).exp() * 0.14;
-        out.push((noise + thump + crack + click + ring).clamp(-1.0, 1.0) * 0.92);
-    }
-    wav_bytes(&out, SR)
+        let thump = sine(110.0, t) * decay(t, 18.0) * 0.52;
+        let crack = sine(1650.0, t) * decay(t, 95.0) * 0.28;
+        let click = sine(3400.0, t) * decay(t, 180.0) * 0.12;
+        let ring = sine(720.0, t) * decay(t, 35.0) * 0.14;
+        (noise + thump + crack + click + ring).clamp(-1.0, 1.0) * 0.92
+    })
 }
 
 fn gen_bat_edge() -> Vec<u8> {
-    let dur = 0.055f32;
-    let n = (SR as f32 * dur) as usize;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = i as f32 / SR as f32;
-        let env = (-t * 75.0).exp();
-        let tick = (std::f32::consts::TAU * 2800.0 * t).sin() * env * 0.45;
-        let thud = (std::f32::consts::TAU * 260.0 * t).sin() * (-t * 45.0).exp() * 0.18;
+    render(0.055f32, |t, i| {
+        let env = decay(t, 75.0);
+        let tick = sine(2800.0, t) * env * 0.45;
+        let thud = sine(260.0, t) * decay(t, 45.0) * 0.18;
         let grit = hash_noise(i, 0x777) * 0.18 * env;
-        out.push((tick + thud + grit).clamp(-1.0, 1.0) * 0.85);
-    }
-    wav_bytes(&out, SR)
+        (tick + thud + grit).clamp(-1.0, 1.0) * 0.85
+    })
 }
 
 fn gen_wicket() -> Vec<u8> {
@@ -298,142 +317,145 @@ fn gen_wicket() -> Vec<u8> {
     let n = (SR as f32 * dur) as usize;
     let mut out = vec![0.0f32; n];
     // three woody knocks with different resonant frequencies
-    let knocks = [(0.00f32, 540.0, 0.62), (0.11, 780.0, 0.58), (0.24, 460.0, 0.50)];
+    let knocks = [
+        (0.00f32, 540.0, 0.62),
+        (0.11, 780.0, 0.58),
+        (0.24, 460.0, 0.50),
+    ];
     for &(off, freq, amp) in &knocks {
-        for i in 0..n {
+        for (i, sample) in out.iter_mut().enumerate() {
             let t = i as f32 / SR as f32 - off;
             if !(0.0..0.22).contains(&t) {
                 continue;
             }
-            let env = (-t * 22.0).exp();
-            let tone = (std::f32::consts::TAU * freq * t).sin() * env * amp;
-            let harm = (std::f32::consts::TAU * freq * 1.52 * t).sin() * env * amp * 0.22;
-            let click = if t < 0.005 { (1.0 - t / 0.005) * 0.45 } else { 0.0 };
-            out[i] = (out[i] + tone + harm + click).clamp(-1.0, 1.0);
+            let env = decay(t, 22.0);
+            let tone = sine(freq, t) * env * amp;
+            let harm = sine(freq * 1.52, t) * env * amp * 0.22;
+            let click = if t < 0.005 {
+                (1.0 - t / 0.005) * 0.45
+            } else {
+                0.0
+            };
+            *sample = (*sample + tone + harm + click).clamp(-1.0, 1.0);
         }
     }
     // add subtle rattle tail
-    for i in 0..n {
+    for (i, sample) in out.iter_mut().enumerate() {
         let t = i as f32 / SR as f32;
         if t > 0.38 && t < 0.72 {
             let r = hash_noise(i, 0xABCD) * 0.06 * (-(t - 0.38) * 8.0).exp();
-            out[i] = (out[i] + r).clamp(-1.0, 1.0);
+            *sample = (*sample + r).clamp(-1.0, 1.0);
         }
     }
-    for s in &mut out { *s *= 0.88; }
+    for s in &mut out {
+        *s *= 0.88;
+    }
     wav_bytes(&out, SR)
 }
 
 fn gen_catch() -> Vec<u8> {
-    let dur = 0.42f32;
-    let n = (SR as f32 * dur) as usize;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = i as f32 / SR as f32;
-        let env = (-t * 18.0).exp();
-        let thud = (std::f32::consts::TAU * 95.0 * t).sin() * env * 0.45;
-        let slap = hash_noise(i, 0xC0FFEE) * 0.12 * (-t * 55.0).exp();
-        let leather = (std::f32::consts::TAU * 420.0 * t).sin() * (-t * 30.0).exp() * 0.18;
-        out.push((thud + slap + leather).clamp(-1.0, 1.0) * 0.90);
-    }
-    wav_bytes(&out, SR)
+    render(0.42f32, |t, i| {
+        let env = decay(t, 18.0);
+        let thud = sine(95.0, t) * env * 0.45;
+        let slap = hash_noise(i, 0xC0FFEE) * 0.12 * decay(t, 55.0);
+        let leather = sine(420.0, t) * decay(t, 30.0) * 0.18;
+        (thud + slap + leather).clamp(-1.0, 1.0) * 0.90
+    })
 }
 
 fn gen_bounce() -> Vec<u8> {
-    let dur = 0.18f32;
-    let n = (SR as f32 * dur) as usize;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = i as f32 / SR as f32;
-        let env = (-t * 26.0).exp();
-        let thump = (std::f32::consts::TAU * 90.0 * t).sin() * env * 0.55;
-        let grit = hash_noise(i, 0xBEEF) * 0.10 * (-t * 70.0).exp();
-        let wood = (std::f32::consts::TAU * 180.0 * t).sin() * (-t * 40.0).exp() * 0.18;
-        out.push((thump + grit + wood).clamp(-1.0, 1.0) * 0.82);
-    }
-    wav_bytes(&out, SR)
+    render(0.18f32, |t, i| {
+        let env = decay(t, 26.0);
+        let thump = sine(90.0, t) * env * 0.55;
+        let grit = hash_noise(i, 0xBEEF) * 0.10 * decay(t, 70.0);
+        let wood = sine(180.0, t) * decay(t, 40.0) * 0.18;
+        (thump + grit + wood).clamp(-1.0, 1.0) * 0.82
+    })
 }
 
 fn gen_cheer_four() -> Vec<u8> {
     let dur = 0.95f32;
-    let n = (SR as f32 * dur) as usize;
     let mut buf = [0.0f32; 6];
     let mut bi = 0;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = i as f32 / SR as f32;
-        let env = if t < 0.10 { t / 0.10 } else if t > dur - 0.25 { ((dur - t)/0.25).max(0.0) } else { 1.0 };
+    render(dur, |t, i| {
+        let env = if t < 0.10 {
+            t / 0.10
+        } else if t > dur - 0.25 {
+            ((dur - t) / 0.25).max(0.0)
+        } else {
+            1.0
+        };
         let white = hash_noise(i, 0x4444);
-        buf[bi] = white; bi = (bi+1)%6;
-        let avg = buf.iter().sum::<f32>()/6.0; // gentle low-pass
+        buf[bi] = white;
+        bi = (bi + 1) % 6;
+        let avg = buf.iter().sum::<f32>() / 6.0; // gentle low-pass
         // slightly bright
-        let swell = 0.90 + 0.10*(t*4.0).sin().abs();
-        let wobble = (t*2.6).sin()*0.06 + 1.0;
-        out.push(avg * env * swell * wobble * 0.62);
-    }
-    wav_bytes(&out, SR)
+        let swell = 0.90 + 0.10 * (t * 4.0).sin().abs();
+        let wobble = (t * 2.6).sin() * 0.06 + 1.0;
+        avg * env * swell * wobble * 0.62
+    })
 }
 
 fn gen_cheer_six() -> Vec<u8> {
     let dur = 2.10f32;
-    let n = (SR as f32 * dur) as usize;
     let mut buf = [0.0f32; 8];
     let mut bi = 0;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = i as f32 / SR as f32;
-        let env = if t < 0.14 { t/0.14 } else if t > dur - 0.35 { ((dur - t)/0.35).max(0.0) } else { 1.0 };
+    render(dur, |t, i| {
+        let env = if t < 0.14 {
+            t / 0.14
+        } else if t > dur - 0.35 {
+            ((dur - t) / 0.35).max(0.0)
+        } else {
+            1.0
+        };
         // rising swell
-        let rise = (t*0.9).min(1.0)*0.3 + 0.70 + 0.12*(t*2.0).sin().abs();
+        let rise = (t * 0.9).min(1.0) * 0.3 + 0.70 + 0.12 * (t * 2.0).sin().abs();
         let white = hash_noise(i, 0x5555);
-        buf[bi]=white; bi=(bi+1)%8;
-        let avg = buf.iter().sum::<f32>()/8.0;
-        let wobble = (t*1.8).sin()*0.09 + 1.0;
+        buf[bi] = white;
+        bi = (bi + 1) % 8;
+        let avg = buf.iter().sum::<f32>() / 8.0;
+        let wobble = (t * 1.8).sin() * 0.09 + 1.0;
         // add subtle horn-like overtone sweep 180->260 Hz
-        let horn_freq = 180.0 + t*38.0;
-        let horn = (std::f32::consts::TAU * horn_freq * t).sin() * env * rise * 0.08 * (t*1.2).min(1.0);
-        out.push((avg * env * rise * wobble * 0.58 + horn).clamp(-1.0,1.0));
-    }
-    wav_bytes(&out, SR)
+        let horn_freq = 180.0 + t * 38.0;
+        let horn = sine(horn_freq, t) * env * rise * 0.08 * (t * 1.2).min(1.0);
+        (avg * env * rise * wobble * 0.58 + horn).clamp(-1.0, 1.0)
+    })
 }
 
 fn gen_ambient() -> Vec<u8> {
     let dur = 8.0f32;
-    let n = (SR as f32 * dur) as usize;
-    let mut out = Vec::with_capacity(n);
     let mut b = 0.0f32;
-    for i in 0..n {
+    render(dur, |t, i| {
         let white = hash_noise(i, 0x9999);
         b += white * 0.015;
         b = (b * 0.987).clamp(-1.0, 1.0);
-        let t = i as f32 / SR as f32;
-        let fade = (t/0.5).min(1.0) * ((dur - t)/0.5).min(1.0);
+        let fade = (t / 0.5).min(1.0) * ((dur - t) / 0.5).min(1.0);
         // add occasional distant shout (every ~2.5s)
-        let shout_phase = (t*0.4).sin() * 0.5 + 0.5;
-        let shout = if shout_phase > 0.92 { hash_noise(i, 0x1111)*0.08*fade } else { 0.0 };
-        out.push((b*0.13 + shout) * fade);
-    }
-    wav_bytes(&out, SR)
+        let shout_phase = (t * 0.4).sin() * 0.5 + 0.5;
+        let shout = if shout_phase > 0.92 {
+            hash_noise(i, 0x1111) * 0.08 * fade
+        } else {
+            0.0
+        };
+        (b * 0.13 + shout) * fade
+    })
 }
 
 fn gen_ui_fallback() -> Vec<u8> {
     let dur = 0.08f32;
-    let n = (SR as f32 * dur) as usize;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = i as f32 / SR as f32;
-        let env = if t < 0.012 { t/0.012 } else { ((dur - t)/0.02).clamp(0.0,1.0) };
-        let tone = (std::f32::consts::TAU * 780.0 * t).sin() * env * 0.40;
-        out.push(tone);
-    }
-    wav_bytes(&out, SR)
+    render(dur, |t, _| {
+        let env = if t < 0.012 {
+            t / 0.012
+        } else {
+            ((dur - t) / 0.02).clamp(0.0, 1.0)
+        };
+        sine(780.0, t) * env * 0.40
+    })
 }
 
 // Procedural menu music: 32s loop, 96 BPM, C-G-Am-F
 fn gen_menu_music() -> Vec<u8> {
     let dur = 32.0f32;
-    let n = (SR as f32 * dur) as usize;
-    let mut out = Vec::with_capacity(n);
     // Chord roots (Hz): C3, G3, A3, F3 and their major/minor triads
     let chords: [[f32; 3]; 4] = [
         [130.81, 164.81, 196.00], // C (C-E-G)
@@ -442,54 +464,51 @@ fn gen_menu_music() -> Vec<u8> {
         [87.31, 110.00, 130.81],  // F (F-A-C) shifted
     ];
     let chord_dur = 8.0f32; // each chord 8s => 32s total (very slow pavilion feel)
-    for i in 0..n {
-        let t = i as f32 / SR as f32;
+    render(dur, |t, i| {
         let chord_idx = ((t / chord_dur) as usize) % chords.len();
         let chord = chords[chord_idx];
         let ct = t % chord_dur;
-        let chord_env = (ct/0.6).min(1.0) * ((chord_dur - ct)/0.6).min(1.0) * 0.85 + 0.15;
+        let chord_env = (ct / 0.6).min(1.0) * ((chord_dur - ct) / 0.6).min(1.0) * 0.85 + 0.15;
         // pad: sum of chord tones as soft sines + gentle triangle via harmonic
         let mut pad = 0.0f32;
         for &f in &chord {
-            pad += (std::f32::consts::TAU * f * t).sin() * 0.18;
-            pad += (std::f32::consts::TAU * f * 2.0 * t).sin() * 0.07; // octave harmonic
-            pad += (std::f32::consts::TAU * f * 0.5 * t).sin() * 0.10; // bass octave
+            pad += sine(f, t) * 0.18;
+            pad += sine(f * 2.0, t) * 0.07; // octave harmonic
+            pad += sine(f * 0.5, t) * 0.10; // bass octave
         }
         pad *= chord_env * 0.55;
         // subtle bass sine on root
-        let bass = (std::f32::consts::TAU * chords[chord_idx][0]*0.5 * t).sin() * 0.22 * chord_env;
+        let bass = sine(chords[chord_idx][0] * 0.5, t) * 0.22 * chord_env;
         // soft kick every 0.625s (96 BPM)
-        let beat = 60.0/96.0;
+        let beat = 60.0 / 96.0;
         let beat_phase = t % beat;
-        let kick_env = (-beat_phase * 28.0).exp();
-        let kick = (std::f32::consts::TAU * 55.0 * beat_phase).sin() * kick_env * 0.18 * if beat_phase < 0.08 {1.0} else {0.0};
-        let hi = if beat_phase < 0.02 { hash_noise(i, 0x2222)*0.06*(-beat_phase*120.0).exp() } else {0.0};
+        let kick_env = decay(beat_phase, 28.0);
+        let kick =
+            sine(55.0, beat_phase) * kick_env * 0.18 * if beat_phase < 0.08 { 1.0 } else { 0.0 };
+        let hi = if beat_phase < 0.02 {
+            hash_noise(i, 0x2222) * 0.06 * decay(beat_phase, 120.0)
+        } else {
+            0.0
+        };
         // gentle moving filter: tremolo 0.3 Hz
-        let trem = 0.88 + 0.12 * (t* 0.6 * std::f32::consts::TAU).sin();
-        let sample = (pad*0.9 + bass*0.5 + kick + hi) * trem * 0.28;
+        let trem = 0.88 + 0.12 * (t * 0.6 * std::f32::consts::TAU).sin();
+        let sample = (pad * 0.9 + bass * 0.5 + kick + hi) * trem * 0.28;
         // master fade for loopability
-        let fade = (t/0.8).min(1.0) * ((dur - t)/0.8).min(1.0);
-        out.push((sample * fade).clamp(-1.0, 1.0));
-    }
-    wav_bytes(&out, SR)
+        let fade = (t / 0.8).min(1.0) * ((dur - t) / 0.8).min(1.0);
+        (sample * fade).clamp(-1.0, 1.0)
+    })
 }
 
 fn gen_match_music() -> Vec<u8> {
     // Shorter, tenser drone for in-match tension (12s loop) — low volume bed
     let dur = 12.0f32;
-    let n = (SR as f32 * dur) as usize;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = i as f32 / SR as f32;
-        let drone = (std::f32::consts::TAU * 55.0 * t).sin() * 0.18
-                  + (std::f32::consts::TAU * 110.0 * t).sin() * 0.08
-                  + (std::f32::consts::TAU * 82.41 * t).sin() * 0.07;
-        let swell = 0.80 + 0.20 * (t*0.35).sin();
+    render(dur, |t, i| {
+        let drone = sine(55.0, t) * 0.18 + sine(110.0, t) * 0.08 + sine(82.41, t) * 0.07;
+        let swell = 0.80 + 0.20 * (t * 0.35).sin();
         let noise = hash_noise(i, 0x3333) * 0.015;
-        let fade = (t/0.6).min(1.0) * ((dur - t)/0.6).min(1.0);
-        out.push(((drone*swell + noise)*0.18 * fade).clamp(-1.0,1.0));
-    }
-    wav_bytes(&out, SR)
+        let fade = (t / 0.6).min(1.0) * ((dur - t) / 0.6).min(1.0);
+        ((drone * swell + noise) * 0.18 * fade).clamp(-1.0, 1.0)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -533,12 +552,7 @@ impl Plugin for AudioPlugin {
                     ambient_control,
                     music_control,
                     apply_volumes,
-                    (
-                        commentary_on_result,
-                        commentary_on_phase,
-                        commentary_update,
-                    )
-                        .chain(),
+                    (commentary_on_result, commentary_on_phase, commentary_update).chain(),
                 ),
             );
     }
@@ -551,19 +565,43 @@ fn setup_audio(
     mut global_vol: ResMut<GlobalVolume>,
 ) {
     // Procedural SFX
-    let h_bat_light = assets.add(AudioSource { bytes: gen_bat_light().into() });
-    let h_bat_heavy = assets.add(AudioSource { bytes: gen_bat_heavy().into() });
-    let h_bat_edge = assets.add(AudioSource { bytes: gen_bat_edge().into() });
-    let h_wicket = assets.add(AudioSource { bytes: gen_wicket().into() });
-    let h_catch = assets.add(AudioSource { bytes: gen_catch().into() });
-    let h_bounce = assets.add(AudioSource { bytes: gen_bounce().into() });
-    let h_four = assets.add(AudioSource { bytes: gen_cheer_four().into() });
-    let h_six = assets.add(AudioSource { bytes: gen_cheer_six().into() });
-    let h_ambient = assets.add(AudioSource { bytes: gen_ambient().into() });
-    let h_fallback = assets.add(AudioSource { bytes: gen_ui_fallback().into() });
+    let h_bat_light = assets.add(AudioSource {
+        bytes: gen_bat_light().into(),
+    });
+    let h_bat_heavy = assets.add(AudioSource {
+        bytes: gen_bat_heavy().into(),
+    });
+    let h_bat_edge = assets.add(AudioSource {
+        bytes: gen_bat_edge().into(),
+    });
+    let h_wicket = assets.add(AudioSource {
+        bytes: gen_wicket().into(),
+    });
+    let h_catch = assets.add(AudioSource {
+        bytes: gen_catch().into(),
+    });
+    let h_bounce = assets.add(AudioSource {
+        bytes: gen_bounce().into(),
+    });
+    let h_four = assets.add(AudioSource {
+        bytes: gen_cheer_four().into(),
+    });
+    let h_six = assets.add(AudioSource {
+        bytes: gen_cheer_six().into(),
+    });
+    let h_ambient = assets.add(AudioSource {
+        bytes: gen_ambient().into(),
+    });
+    let h_fallback = assets.add(AudioSource {
+        bytes: gen_ui_fallback().into(),
+    });
 
-    let h_menu = assets.add(AudioSource { bytes: gen_menu_music().into() });
-    let h_match = assets.add(AudioSource { bytes: gen_match_music().into() });
+    let h_menu = assets.add(AudioSource {
+        bytes: gen_menu_music().into(),
+    });
+    let h_match = assets.add(AudioSource {
+        bytes: gen_match_music().into(),
+    });
 
     commands.insert_resource(SfxHandles {
         bat_light: h_bat_light,
@@ -658,13 +696,13 @@ fn setup_commentary(
         ("beaten", 3),
         // Analyst fact lines — each category is ONE exact fact; a variant may
         // only exist if it states the same fact.
-        ("context_fifty", 1),          // striker reaches fifty
-        ("context_century", 1),        // batter reaches hundred
-        ("context_team_hundred", 1),   // team total crosses hundred
-        ("context_rrr", 1),            // required rate climbing above 11
-        ("context_dots", 1),           // three consecutive dot balls
-        ("context_clutch_wicket", 1),  // wicket while chase is tense
-        ("context_bowler", 2),         // excellent spell at over end
+        ("context_fifty", 1),         // striker reaches fifty
+        ("context_century", 1),       // batter reaches hundred
+        ("context_team_hundred", 1),  // team total crosses hundred
+        ("context_rrr", 1),           // required rate climbing above 11
+        ("context_dots", 1),          // three consecutive dot balls
+        ("context_clutch_wicket", 1), // wicket while chase is tense
+        ("context_bowler", 2),        // excellent spell at over end
     ];
     for role in ["male", "female"] {
         for (cat, count) in cats {
@@ -739,6 +777,77 @@ fn set_queued(playing: &mut CommentaryPlaying, category: &str, delay: f32) {
 }
 
 // ---------------------------------------------------------------------------
+// Commentary resource grouping
+// ---------------------------------------------------------------------------
+
+/// Borrow bundle for commentary helper functions.
+struct CommentaryCtx<'a> {
+    handles: &'a CommentaryHandles,
+    durations: &'a CommentaryDurations,
+    history: &'a mut CommentaryHistory,
+    playing: &'a mut CommentaryPlaying,
+    scheduler: &'a mut CommentaryScheduler,
+    settings: &'a AudioSettings,
+}
+
+#[derive(SystemParam)]
+struct CommentaryParam<'w> {
+    handles: Option<Res<'w, CommentaryHandles>>,
+    durations: Option<Res<'w, CommentaryDurations>>,
+    history: ResMut<'w, CommentaryHistory>,
+    playing: ResMut<'w, CommentaryPlaying>,
+    scheduler: ResMut<'w, CommentaryScheduler>,
+    settings: Res<'w, AudioSettings>,
+}
+
+impl<'w> CommentaryParam<'w> {
+    fn ctx_mut(&mut self) -> Option<CommentaryCtx<'_>> {
+        let handles = self.handles.as_deref()?;
+        let durations = self.durations.as_deref()?;
+        Some(CommentaryCtx {
+            handles,
+            durations,
+            history: &mut self.history,
+            playing: &mut self.playing,
+            scheduler: &mut self.scheduler,
+            settings: &self.settings,
+        })
+    }
+}
+
+/// Map result banner text (uppercased) to a commentary category.
+/// Order and precedence are significant; `None` means silence (wide or unknown).
+fn result_commentary_category(upper: &str) -> Option<&'static str> {
+    const RULES: &[(&[&str], Option<&'static str>)] = &[
+        (&["SIX", "MAXIMUM"], Some("six")),
+        (&["FOUR"], Some("four")),
+        (&["BOWLED"], Some("bowled")),
+        (&["TAKEN BEHIND"], Some("caught_behind")),
+        (&["CAUGHT", "TAKEN"], Some("caught")),
+        (&["RUN OUT"], Some("run_out")),
+        (&["WIDE"], None), // wides stay uncalled most of the time (restraint)
+        (&["BEATEN", "PAST THE EDGE"], Some("beaten")),
+        (&["COME BACK FOR THREE"], Some("three")),
+        (
+            &[
+                "BACK FOR THE SECOND",
+                "COME BACK FOR 2",
+                "COME BACK FOR TWO",
+            ],
+            Some("two"),
+        ),
+        (&["QUICK SINGLE", "SINGLE TAKEN"], Some("single")),
+        (&["SHOULDERED ARMS", "DOT BALL", "FIELDED"], Some("dot")),
+    ];
+    for (patterns, category) in RULES {
+        if patterns.iter().any(|p| upper.contains(p)) {
+            return *category;
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Commentary lifecycle & scheduling (pure helpers — unit-tested)
 // ---------------------------------------------------------------------------
 
@@ -809,10 +918,7 @@ fn schedule_commentary(
     variant: Option<usize>,
     priority: CommentaryPriority,
 ) {
-    let accept = scheduler_should_accept(
-        scheduler.pending.as_ref().map(|p| p.priority),
-        priority,
-    );
+    let accept = scheduler_should_accept(scheduler.pending.as_ref().map(|p| p.priority), priority);
     if accept {
         scheduler.pending = Some(ScheduledCommentary {
             category: category.to_string(),
@@ -822,92 +928,62 @@ fn schedule_commentary(
     }
 }
 
-fn dispatch_pending_commentary(
-    commands: &mut Commands,
-    scheduler: &mut CommentaryScheduler,
-    handles: &CommentaryHandles,
-    durations: &CommentaryDurations,
-    history: &mut CommentaryHistory,
-    playing: &mut CommentaryPlaying,
-    settings: &AudioSettings,
-) -> f32 {
-    if playing.remaining > 0.25 {
+fn dispatch_pending_commentary(commands: &mut Commands, ctx: &mut CommentaryCtx<'_>) -> f32 {
+    if ctx.playing.remaining > 0.25 {
         return 0.0;
     }
-    let Some(call) = scheduler.pending.take() else {
+    let Some(call) = ctx.scheduler.pending.take() else {
         return 0.0;
     };
-    play_commentary(
-        commands,
-        handles,
-        durations,
-        history,
-        playing,
-        settings,
-        &call.category,
-        call.variant,
-    )
+    play_commentary(commands, ctx, &call.category, call.variant)
 }
 
 /// Request a lead commentary call: plays immediately when the slot is free,
 /// otherwise queues by priority (result lines cannot be displaced).
 fn request_commentary(
     commands: &mut Commands,
-    scheduler: &mut CommentaryScheduler,
-    handles: &CommentaryHandles,
-    durations: &CommentaryDurations,
-    history: &mut CommentaryHistory,
-    playing: &mut CommentaryPlaying,
-    settings: &AudioSettings,
+    ctx: &mut CommentaryCtx<'_>,
     category: &str,
     variant: Option<usize>,
     priority: CommentaryPriority,
 ) -> f32 {
-    if playing.remaining > 0.25 {
-        schedule_commentary(scheduler, category, variant, priority);
+    if ctx.playing.remaining > 0.25 {
+        schedule_commentary(ctx.scheduler, category, variant, priority);
         return 0.0;
     }
     // Slot is free — drop any lower-priority pending call and play now.
-    if let Some(pending) = &scheduler.pending {
-        if priority <= pending.priority {
-            scheduler.pending = None;
-        }
+    if let Some(pending) = &ctx.scheduler.pending
+        && priority <= pending.priority
+    {
+        ctx.scheduler.pending = None;
     }
-    play_commentary(
-        commands,
-        handles,
-        durations,
-        history,
-        playing,
-        settings,
-        category,
-        variant,
-    )
+    play_commentary(commands, ctx, category, variant)
 }
 
 /// Play a commentary clip. `variant = None` picks a random variant (all
 /// variants of a category state the same fact); `Some(n)` plays an exact
 /// clip, required when variants encode different facts.
-#[allow(clippy::too_many_arguments)]
 fn play_commentary(
     commands: &mut Commands,
-    handles: &CommentaryHandles,
-    durations: &CommentaryDurations,
-    history: &mut CommentaryHistory,
-    playing: &mut CommentaryPlaying,
-    settings: &AudioSettings,
+    ctx: &mut CommentaryCtx<'_>,
     category: &str,
     variant: Option<usize>,
 ) -> f32 {
-    if settings.commentary == CommentaryVoice::Off {
+    if ctx.settings.commentary == CommentaryVoice::Off {
         return 0.0;
     }
-    if playing.remaining > 0.25 {
+    if ctx.playing.remaining > 0.25 {
         return 0.0; // never overlap
     }
-    let role = role_for_category(settings.commentary, category);
-    let map = if role == "male" { &handles.male } else { &handles.female };
-    let Some(list) = map.get(category) else { return 0.0 };
+    let role = role_for_category(ctx.settings.commentary, category);
+    let map = if role == "male" {
+        &ctx.handles.male
+    } else {
+        &ctx.handles.female
+    };
+    let Some(list) = map.get(category) else {
+        return 0.0;
+    };
     if list.is_empty() {
         return 0.0;
     }
@@ -915,19 +991,24 @@ fn play_commentary(
     let idx = match variant {
         Some(n) => n.min(list.len() - 1),
         None => {
-            let last_idx = history.last_indices.get(category).copied().unwrap_or(usize::MAX);
+            let last_idx = ctx
+                .history
+                .last_indices
+                .get(category)
+                .copied()
+                .unwrap_or(usize::MAX);
             let mut i = (rand::random::<u32>() as usize) % list.len();
             if list.len() > 1 && i == last_idx {
                 i = (i + 1) % list.len();
             }
-            history.last_indices.insert(category.to_string(), i);
+            ctx.history.last_indices.insert(category.to_string(), i);
             i
         }
     };
-    history.last_category = category.to_string();
+    ctx.history.last_category = category.to_string();
 
     let handle = list[idx].clone();
-    let vol = (settings.master * settings.commentary_volume * 1.05).clamp(0.0, 1.0);
+    let vol = (ctx.settings.master * ctx.settings.commentary_volume * 1.05).clamp(0.0, 1.0);
     commands.spawn((
         AudioPlayer(handle),
         PlaybackSettings {
@@ -939,13 +1020,8 @@ fn play_commentary(
     ));
     // Real duration from generated manifest; fall back to a safe estimate.
     let file_key = format!("{role}/{category}_{:02}.ogg", idx + 1);
-    let dur = durations
-        .0
-        .get(&file_key)
-        .copied()
-        .unwrap_or(2.5)
-        + 0.15; // small tail before next clip may start
-    playing.remaining = dur;
+    let dur = ctx.durations.0.get(&file_key).copied().unwrap_or(2.5) + 0.15; // small tail before next clip may start
+    ctx.playing.remaining = dur;
     dur
 }
 
@@ -962,88 +1038,70 @@ fn commentary_on_match_enter(
     result_edge.in_result_pause = false;
 }
 
-fn commentary_update(
-    mut commands: Commands,
-    time: Res<Time>,
-    handles: Option<Res<CommentaryHandles>>,
-    durations: Option<Res<CommentaryDurations>>,
-    mut history: ResMut<CommentaryHistory>,
-    mut playing: ResMut<CommentaryPlaying>,
-    mut scheduler: ResMut<CommentaryScheduler>,
-    settings: Res<AudioSettings>,
-) {
-    if history.routine_cooldown > 0.0 {
-        history.routine_cooldown -= time.delta_secs();
+fn commentary_update(mut commands: Commands, time: Res<Time>, mut commentary: CommentaryParam) {
+    if commentary.history.routine_cooldown > 0.0 {
+        commentary.history.routine_cooldown -= time.delta_secs();
     }
-    let was_active = playing.remaining > 0.0;
-    if playing.remaining > 0.0 {
-        playing.remaining -= time.delta_secs();
-        if playing.remaining < 0.0 {
-            playing.remaining = 0.0;
+    let was_active = commentary.playing.remaining > 0.0;
+    if commentary.playing.remaining > 0.0 {
+        commentary.playing.remaining -= time.delta_secs();
+        if commentary.playing.remaining < 0.0 {
+            commentary.playing.remaining = 0.0;
         }
     }
     // Dispatch any priority-queued lead call once the slot opens.
-    if let (Some(h), Some(d)) = (handles.as_deref(), durations.as_deref()) {
-        dispatch_pending_commentary(
-            &mut commands,
-            &mut scheduler,
-            h,
-            d,
-            &mut history,
-            &mut playing,
-            &settings,
-        );
+    if let Some(mut ctx) = commentary.ctx_mut() {
+        dispatch_pending_commentary(&mut commands, &mut ctx);
     }
     // Fire queued analyst follow-up once the lead call has finished.
-    if let Some((cat, delay)) = playing.queued.clone() {
+    let queued = commentary.playing.queued.clone();
+    if let Some((cat, delay)) = queued {
         if delay <= 0.0 {
-            playing.queued = None;
-            if let (Some(h), Some(d)) = (handles.as_deref(), durations.as_deref()) {
-                play_commentary(
-                    &mut commands, h, d, &mut history, &mut playing, &settings, &cat, None,
-                );
+            commentary.playing.queued = None;
+            if let Some(mut ctx) = commentary.ctx_mut() {
+                play_commentary(&mut commands, &mut ctx, &cat, None);
             }
         } else {
-            playing.queued = Some((cat, delay - time.delta_secs()));
+            commentary.playing.queued = Some((cat, delay - time.delta_secs()));
         }
     }
     // Smooth side-chain ducking: fast attack (~0.25 s), slow release (~2 s).
-    let target_duck = if playing.remaining > 0.0 { 0.30 } else { 1.0 };
-    let rate = if target_duck < playing.duck_level {
+    let target_duck = if commentary.playing.remaining > 0.0 {
+        0.30
+    } else {
+        1.0
+    };
+    let rate = if target_duck < commentary.playing.duck_level {
         (1.0 - target_duck).max(0.001) / 0.25 // attack per second
     } else {
         (1.0 - target_duck).max(0.001) / 2.0 // release per second
     };
     let step = rate * time.delta_secs();
-    if playing.duck_level > target_duck {
-        playing.duck_level = (playing.duck_level - step).max(target_duck);
+    if commentary.playing.duck_level > target_duck {
+        commentary.playing.duck_level = (commentary.playing.duck_level - step).max(target_duck);
     } else {
-        playing.duck_level = (playing.duck_level + step).min(target_duck);
+        commentary.playing.duck_level = (commentary.playing.duck_level + step).min(target_duck);
     }
     let _ = was_active;
 }
 
-#[allow(clippy::too_many_arguments)]
 fn commentary_on_result(
     mut commands: Commands,
     phase: Res<crate::game::Phase>,
     am: Option<Res<crate::game::ActiveMatch>>,
     _wd: Option<Res<crate::game::WorldData>>,
-    handles: Option<Res<CommentaryHandles>>,
-    durations: Option<Res<CommentaryDurations>>,
-    mut history: ResMut<CommentaryHistory>,
-    mut playing: ResMut<CommentaryPlaying>,
-    mut scheduler: ResMut<CommentaryScheduler>,
+    mut commentary: CommentaryParam,
     mut result_edge: ResMut<CommentaryResultPauseEdge>,
-    settings: Res<AudioSettings>,
 ) {
-    let (Some(handles), Some(durations)) = (handles, durations) else { return };
+    if commentary.handles.is_none() || commentary.durations.is_none() {
+        return;
+    }
     let in_result_pause = matches!(&phase.0, crate::game::PhaseEnum::ResultPause { .. });
     if !in_result_pause {
         if result_edge.in_result_pause {
             result_edge.in_result_pause = false;
-            history.consecutive_dots = 0;
-            history.over_start_valid = false;
+            commentary.history.consecutive_dots = 0;
+            commentary.history.over_start_valid = false;
         }
         return;
     }
@@ -1054,130 +1112,107 @@ fn commentary_on_result(
     let crate::game::PhaseEnum::ResultPause { text, .. } = &phase.0 else {
         return;
     };
-    history.lifecycle.deliveries_completed += 1;
+    commentary.history.lifecycle.deliveries_completed += 1;
     let upper = text.to_uppercase();
 
     // ---- Capture facts before updating trackers (threshold crossings) ----
-    let prev_striker = history.striker_runs;
-    let prev_team = history.team_runs;
+    let prev_striker = commentary.history.striker_runs;
+    let prev_team = commentary.history.team_runs;
     let striker_runs_now = am
         .as_deref()
         .map(|m| m.state.innings.card_of(m.state.innings.striker).runs);
     let team_runs_now = am.as_deref().map(|m| m.state.innings.runs);
 
     // ---- Map result text to an action-call category ----
-    let category = if upper.contains("SIX") || upper.contains("MAXIMUM") {
-        history.consecutive_dots = 0;
-        "six"
-    } else if upper.contains("FOUR") {
-        history.consecutive_dots = 0;
-        "four"
-    } else if upper.contains("BOWLED") {
-        "bowled"
-    } else if upper.contains("TAKEN BEHIND") {
-        "caught_behind"
-    } else if upper.contains("CAUGHT") || upper.contains("TAKEN") {
-        "caught"
-    } else if upper.contains("RUN OUT") {
-        "run_out"
-    } else if upper.contains("WIDE") {
-        return; // wides stay uncalled most of the time (restraint)
-    } else if upper.contains("BEATEN") || upper.contains("PAST THE EDGE") {
-        "beaten"
-    } else if upper.contains("COME BACK FOR THREE") {
-        history.consecutive_dots = 0;
-        "three"
-    } else if upper.contains("BACK FOR THE SECOND")
-        || upper.contains("COME BACK FOR 2")
-        || upper.contains("COME BACK FOR TWO")
-    {
-        history.consecutive_dots = 0;
-        "two"
-    } else if upper.contains("QUICK SINGLE") || upper.contains("SINGLE TAKEN") {
-        history.consecutive_dots = 0;
-        "single"
-    } else if upper.contains("SHOULDERED ARMS")
-        || upper.contains("DOT BALL")
-        || upper.contains("FIELDED")
-    {
-        history.consecutive_dots += 1;
-        "dot"
-    } else {
-        return; // unknown result: silence beats guessing
+    let category = match result_commentary_category(&upper) {
+        Some(c) => c,
+        None => return, // wide, unknown result: silence beats guessing
     };
+    match category {
+        "six" | "four" | "three" | "two" | "single" => commentary.history.consecutive_dots = 0,
+        "dot" => commentary.history.consecutive_dots += 1,
+        _ => {}
+    }
 
     // ---- Restraint: routine events may go uncalled (commentary gaps) ----
     let gates_pass = !is_routine(category)
-        || (history.routine_cooldown <= 0.0
+        || (commentary.history.routine_cooldown <= 0.0
             && rand::random::<f32>() <= routine_call_chance(category));
 
     let mut lead_dur = 0.0;
     if gates_pass {
+        let mut ctx = commentary
+            .ctx_mut()
+            .expect("handles and durations checked above");
         lead_dur = request_commentary(
             &mut commands,
-            &mut scheduler,
-            &handles,
-            &durations,
-            &mut history,
-            &mut playing,
-            &settings,
+            &mut ctx,
             category,
             None,
             CommentaryPriority::Result,
         );
         if is_routine(category) {
-            history.routine_cooldown = 7.0;
+            commentary.history.routine_cooldown = 7.0;
         }
     }
 
     // ---- Sync tracked facts ----
     if let Some(r) = striker_runs_now {
-        history.striker_runs = r;
+        commentary.history.striker_runs = r;
     }
     if let Some(r) = team_runs_now {
-        history.team_runs = r;
+        commentary.history.team_runs = r;
     }
 
     // ---- Analyst follow-ups: only exact, verified facts ----
     // Priority: century > fifty > team hundred.
     if let Some(runs) = striker_runs_now {
         if prev_striker < 100 && runs >= 100 {
-            set_queued(&mut playing, "context_century", lead_dur + 0.45);
+            set_queued(&mut commentary.playing, "context_century", lead_dur + 0.45);
         } else if prev_striker < 50 && runs >= 50 {
-            set_queued(&mut playing, "context_fifty", lead_dur + 0.45);
+            set_queued(&mut commentary.playing, "context_fifty", lead_dur + 0.45);
         }
     }
-    if playing.queued.is_none() {
-        if let Some(runs) = team_runs_now {
-            if prev_team < 100 && runs >= 100 {
-                set_queued(&mut playing, "context_team_hundred", lead_dur + 0.45);
-            }
-        }
+    if commentary.playing.queued.is_none()
+        && let Some(runs) = team_runs_now
+        && prev_team < 100
+        && runs >= 100
+    {
+        set_queued(
+            &mut commentary.playing,
+            "context_team_hundred",
+            lead_dur + 0.45,
+        );
     }
     // Three consecutive dots.
-    if history.consecutive_dots >= 3 {
-        set_queued(&mut playing, "context_dots", lead_dur + 0.4);
-        history.consecutive_dots = 0;
+    if commentary.history.consecutive_dots >= 3 {
+        set_queued(&mut commentary.playing, "context_dots", lead_dur + 0.4);
+        commentary.history.consecutive_dots = 0;
     }
     // Required rate climbing above 11 while chasing.
-    if let Some(m) = am.as_deref() {
-        if let Some(tg) = m.state.innings.target {
-            let need = tg.saturating_sub(m.state.innings.runs) as f32;
-            let overs_left =
-                ((m.state.overs * 6).saturating_sub(m.state.innings.legal_balls) as f32 / 6.0)
-                    .max(0.34);
-            let rrr = need / overs_left;
-            if let Some(prev) = history.rrr_last {
-                if rrr > prev && rrr > 11.0 {
-                    set_queued(&mut playing, "context_rrr", lead_dur + 0.5);
-                }
-            }
-            history.rrr_last = Some(rrr);
-            // Wicket at a crucial moment: chasing and need is getting real.
-            let is_wicket = matches!(category, "bowled" | "caught" | "caught_behind" | "run_out");
-            if is_wicket && need <= 45.0 {
-                set_queued(&mut playing, "context_clutch_wicket", lead_dur + 0.55);
-            }
+    if let Some(m) = am.as_deref()
+        && let Some(tg) = m.state.innings.target
+    {
+        let need = tg.saturating_sub(m.state.innings.runs) as f32;
+        let overs_left = ((m.state.overs * 6).saturating_sub(m.state.innings.legal_balls) as f32
+            / 6.0)
+            .max(0.34);
+        let rrr = need / overs_left;
+        if let Some(prev) = commentary.history.rrr_last
+            && rrr > prev
+            && rrr > 11.0
+        {
+            set_queued(&mut commentary.playing, "context_rrr", lead_dur + 0.5);
+        }
+        commentary.history.rrr_last = Some(rrr);
+        // Wicket at a crucial moment: chasing and need is getting real.
+        let is_wicket = matches!(category, "bowled" | "caught" | "caught_behind" | "run_out");
+        if is_wicket && need <= 45.0 {
+            set_queued(
+                &mut commentary.playing,
+                "context_clutch_wicket",
+                lead_dur + 0.55,
+            );
         }
     }
 }
@@ -1187,15 +1222,12 @@ fn commentary_on_phase(
     phase: Res<crate::game::Phase>,
     am: Option<Res<crate::game::ActiveMatch>>,
     _wd: Option<Res<crate::game::WorldData>>,
-    handles: Option<Res<CommentaryHandles>>,
-    durations: Option<Res<CommentaryDurations>>,
-    mut history: ResMut<CommentaryHistory>,
-    mut playing: ResMut<CommentaryPlaying>,
-    mut scheduler: ResMut<CommentaryScheduler>,
-    settings: Res<AudioSettings>,
+    mut commentary: CommentaryParam,
     mut last_phase: Local<String>,
 ) {
-    let (Some(handles), Some(durations)) = (handles, durations) else { return };
+    let Some(mut ctx) = commentary.ctx_mut() else {
+        return;
+    };
     let phase_str = format!("{:?}", std::mem::discriminant(&phase.0));
     if phase_str == *last_phase {
         return;
@@ -1206,9 +1238,13 @@ fn commentary_on_phase(
         crate::game::PhaseEnum::OverBreak { .. } => {
             // Pick over-summary variant from real facts:
             // 0 = "End of the over.", 1 = "A quiet over." (<=3), 2 = "An expensive over." (>=10)
-            let runs_in_over = if history.over_start_valid {
-                am.as_deref()
-                    .map(|m| m.state.innings.runs.saturating_sub(history.over_start_runs))
+            let runs_in_over = if ctx.history.over_start_valid {
+                am.as_deref().map(|m| {
+                    m.state
+                        .innings
+                        .runs
+                        .saturating_sub(ctx.history.over_start_runs)
+                })
             } else {
                 None
             };
@@ -1219,12 +1255,7 @@ fn commentary_on_phase(
             };
             request_commentary(
                 &mut commands,
-                &mut scheduler,
-                &handles,
-                &durations,
-                &mut history,
-                &mut playing,
-                &settings,
+                &mut ctx,
                 "over_complete",
                 Some(variant),
                 CommentaryPriority::Phase,
@@ -1236,38 +1267,37 @@ fn commentary_on_phase(
                     let b = m.state.innings.current_bowler?;
                     let card = m.state.innings.bowler_card_of(b);
                     let overs = card.balls as f32 / 6.0;
-                    Some(card.wickets >= 2 && overs >= 2.0 && card.runs as f32 / overs.max(1.0) < 7.0)
+                    Some(
+                        card.wickets >= 2
+                            && overs >= 2.0
+                            && card.runs as f32 / overs.max(1.0) < 7.0,
+                    )
                 })
                 .unwrap_or(false);
             if spell_good {
-                playing.queued = Some(("context_bowler".into(), playing.remaining + 0.4));
+                ctx.playing.queued = Some(("context_bowler".into(), ctx.playing.remaining + 0.4));
             }
             // Reset over bookkeeping.
             if let Some(m) = am.as_deref() {
-                history.over_start_runs = m.state.innings.runs;
-                history.over_start_valid = true;
+                ctx.history.over_start_runs = m.state.innings.runs;
+                ctx.history.over_start_valid = true;
             }
         }
         crate::game::PhaseEnum::InningsBreak => {
             let inns = am.as_deref().map(|m| m.state.innings_num).unwrap_or(0);
-            if history.lifecycle.innings_break_played_for != inns {
-                history.lifecycle.innings_break_played_for = inns;
+            if ctx.history.lifecycle.innings_break_played_for != inns {
+                ctx.history.lifecycle.innings_break_played_for = inns;
                 request_commentary(
                     &mut commands,
-                    &mut scheduler,
-                    &handles,
-                    &durations,
-                    &mut history,
-                    &mut playing,
-                    &settings,
+                    &mut ctx,
                     "innings_break",
                     None,
                     CommentaryPriority::Phase,
                 );
             }
-            history.over_start_valid = false;
-            history.rrr_last = None;
-            history.striker_runs = 0;
+            ctx.history.over_start_valid = false;
+            ctx.history.rrr_last = None;
+            ctx.history.striker_runs = 0;
         }
         crate::game::PhaseEnum::MatchOver => {
             let tied = am
@@ -1277,12 +1307,7 @@ fn commentary_on_phase(
             let cat = if tied { "match_tie" } else { "match_win" };
             request_commentary(
                 &mut commands,
-                &mut scheduler,
-                &handles,
-                &durations,
-                &mut history,
-                &mut playing,
-                &settings,
+                &mut ctx,
                 cat,
                 None,
                 CommentaryPriority::Phase,
@@ -1291,37 +1316,29 @@ fn commentary_on_phase(
         crate::game::PhaseEnum::ReadyToBall { t } if *t < 0.2 => {
             if let Some(m) = am.as_deref() {
                 if should_play_welcome(
-                    &history.lifecycle,
+                    &ctx.history.lifecycle,
                     m.state.innings_num,
                     m.state.innings.legal_balls,
                     m.state.innings.runs,
                 ) {
-                    history.lifecycle.welcome_played = true;
+                    ctx.history.lifecycle.welcome_played = true;
                     request_commentary(
                         &mut commands,
-                        &mut scheduler,
-                        &handles,
-                        &durations,
-                        &mut history,
-                        &mut playing,
-                        &settings,
+                        &mut ctx,
                         "welcome",
                         None,
                         CommentaryPriority::Welcome,
                     );
                 }
-                history.over_start_runs = m.state.innings.runs;
-                history.over_start_valid = true;
+                ctx.history.over_start_runs = m.state.innings.runs;
+                ctx.history.over_start_valid = true;
             }
         }
         _ => {}
     }
 }
 
-fn apply_volumes(
-    settings: Res<AudioSettings>,
-    mut global: ResMut<GlobalVolume>,
-) {
+fn apply_volumes(settings: Res<AudioSettings>, mut global: ResMut<GlobalVolume>) {
     if settings.is_changed() {
         global.volume = Volume::Linear(settings.master.clamp(0.0, 1.0));
     }
@@ -1332,7 +1349,11 @@ fn ambient_control(
     settings: Res<AudioSettings>,
     mut q: Query<&mut PlaybackSettings, With<AmbientTag>>,
 ) {
-    let target = if *state.get() == crate::state::AppState::Menu { 0.08 } else { 0.18 } * settings.sfx;
+    let target = if *state.get() == crate::state::AppState::Menu {
+        0.08
+    } else {
+        0.18
+    } * settings.sfx;
     for mut s in &mut q {
         s.volume = Volume::Linear(target);
     }
@@ -1360,12 +1381,7 @@ fn music_control(
     }
 }
 
-fn play_once(
-    commands: &mut Commands,
-    handle: Handle<AudioSource>,
-    vol: f32,
-    pitch: f32,
-) {
+fn play_once(commands: &mut Commands, handle: Handle<AudioSource>, vol: f32, pitch: f32) {
     commands.spawn((
         AudioPlayer(handle),
         PlaybackSettings {
@@ -1396,17 +1412,21 @@ fn bat_crack_on_hit(
         } else {
             bs.vel.length() > 28.0
         };
-        let is_edge = if let Some(off) = attempt.offset { off.abs() >= 0.19 } else { false };
+        let is_edge = if let Some(off) = attempt.offset {
+            off.abs() >= 0.19
+        } else {
+            false
+        };
         let (handle, pitch, vol) = if is_edge {
             (h.bat_edge.clone(), 1.0, settings.sfx * 0.85)
         } else if tier_heavy {
-            let p = 0.94 + (bs.vel.length()/45.0).clamp(0.0, 0.18);
+            let p = 0.94 + (bs.vel.length() / 45.0).clamp(0.0, 0.18);
             (h.bat_heavy.clone(), p, settings.sfx)
         } else {
-            let p = 0.98 + (bs.vel.length()/50.0).clamp(0.0, 0.14);
+            let p = 0.98 + (bs.vel.length() / 50.0).clamp(0.0, 0.14);
             (h.bat_light.clone(), p, settings.sfx * 0.92)
         };
-        play_once(&mut commands, handle, vol*0.95, pitch);
+        play_once(&mut commands, handle, vol * 0.95, pitch);
     }
     *was_struck = now_struck;
 }
@@ -1419,12 +1439,14 @@ fn bounce_sfx(
     settings: Res<AudioSettings>,
 ) {
     let Some(h) = handles else { return };
-    let Ok((bs, flags)) = ball_q.single_mut() else { return };
+    let Ok((bs, flags)) = ball_q.single_mut() else {
+        return;
+    };
     if flags.just_bounced && !bs.struck && !bs.dead {
         // softer bounce, slight pitch variation by speed
         let v = bs.vel.length() / 25.0;
-        let pitch = (0.92 + v*0.12).clamp(0.85, 1.15);
-        play_once(&mut commands, h.bounce.clone(), settings.sfx*0.45, pitch);
+        let pitch = (0.92 + v * 0.12).clamp(0.85, 1.15);
+        play_once(&mut commands, h.bounce.clone(), settings.sfx * 0.45, pitch);
     }
 }
 
@@ -1438,30 +1460,49 @@ fn sfx_on_result(
 ) {
     let Some(h) = handles else { return };
     let crate::game::PhaseEnum::ResultPause { text, .. } = &phase.0 else {
-        if !last_text.is_empty() { *last_text = String::new(); }
+        if !last_text.is_empty() {
+            *last_text = String::new();
+        }
         return;
     };
-    if text == &*last_text { return; }
+    if text == &*last_text {
+        return;
+    }
     *last_text = text.clone();
     let upper = text.to_uppercase();
 
     if upper.contains("BOWLED") || upper.contains("RUN OUT") {
         play_once(&mut commands, h.wicket.clone(), settings.sfx, 1.0);
         // add a short cheer tail 0.25s later via second cheer
-        play_once(&mut commands, h.cheer_four.clone(), settings.sfx*0.55, 1.05);
+        play_once(
+            &mut commands,
+            h.cheer_four.clone(),
+            settings.sfx * 0.55,
+            1.05,
+        );
     } else if upper.contains("CAUGHT") || upper.contains("TAKEN") {
-        play_once(&mut commands, h.catch.clone(), settings.sfx*0.85, 1.0);
-        play_once(&mut commands, h.wicket.clone(), settings.sfx*0.35, 1.1);
-        play_once(&mut commands, h.cheer_four.clone(), settings.sfx*0.6, 1.0);
+        play_once(&mut commands, h.catch.clone(), settings.sfx * 0.85, 1.0);
+        play_once(&mut commands, h.wicket.clone(), settings.sfx * 0.35, 1.1);
+        play_once(&mut commands, h.cheer_four.clone(), settings.sfx * 0.6, 1.0);
     } else if upper.contains("SIX") || upper.contains("MAXIMUM") {
         play_once(&mut commands, h.cheer_six.clone(), settings.sfx, 1.0);
     } else if upper.contains("FOUR") {
         play_once(&mut commands, h.cheer_four.clone(), settings.sfx, 1.02);
     } else if upper.contains("WIDE") {
-        play_once(&mut commands, h.ui_fallback.clone(), settings.sfx*0.45, 1.25);
+        play_once(
+            &mut commands,
+            h.ui_fallback.clone(),
+            settings.sfx * 0.45,
+            1.25,
+        );
     } else if upper.contains("BEATEN") || upper.contains("EDGE") {
         // edge already had bat_edge; add subtle gasp via short cheer
-        play_once(&mut commands, h.cheer_four.clone(), settings.sfx*0.25, 1.15);
+        play_once(
+            &mut commands,
+            h.cheer_four.clone(),
+            settings.sfx * 0.25,
+            1.15,
+        );
     }
 }
 
@@ -1482,21 +1523,38 @@ fn ui_feedback(
     let (h_confirm, h_back, h_nav) = if let Some(ui) = handles.as_deref() {
         (ui.confirm.clone(), ui.back.clone(), ui.nav.clone())
     } else if let Some(fb) = fallback.as_deref() {
-        (fb.ui_fallback.clone(), fb.ui_fallback.clone(), fb.ui_fallback.clone())
-    } else { return; };
+        (
+            fb.ui_fallback.clone(),
+            fb.ui_fallback.clone(),
+            fb.ui_fallback.clone(),
+        )
+    } else {
+        return;
+    };
 
     if input.pressed(crate::input::Action::Confirm) {
-        play_once(&mut commands, h_confirm, sfx*0.70, 1.0);
+        play_once(&mut commands, h_confirm, sfx * 0.70, 1.0);
     } else if input.pressed(crate::input::Action::Cancel) {
-        play_once(&mut commands, h_back, sfx*0.65, 1.0);
-    } else if input.pressed(crate::input::Action::Next) || input.pressed(crate::input::Action::Prev) {
+        play_once(&mut commands, h_back, sfx * 0.65, 1.0);
+    } else if input.pressed(crate::input::Action::Next) || input.pressed(crate::input::Action::Prev)
+    {
         // slight pitch variation to avoid monotony
-        let pitch = if input.pressed(crate::input::Action::Next) { 1.0 } else { 0.96 };
-        play_once(&mut commands, h_nav, sfx*0.45, pitch);
-    } else if input.pressed(crate::input::Action::Left) || input.pressed(crate::input::Action::Right) {
+        let pitch = if input.pressed(crate::input::Action::Next) {
+            1.0
+        } else {
+            0.96
+        };
+        play_once(&mut commands, h_nav, sfx * 0.45, pitch);
+    } else if input.pressed(crate::input::Action::Left)
+        || input.pressed(crate::input::Action::Right)
+    {
         // slider adjust tick
-        let pitch = if input.pressed(crate::input::Action::Right) { 1.08 } else { 0.92 };
-        play_once(&mut commands, h_nav, sfx*0.35, pitch);
+        let pitch = if input.pressed(crate::input::Action::Right) {
+            1.08
+        } else {
+            0.92
+        };
+        play_once(&mut commands, h_nav, sfx * 0.35, pitch);
     }
 }
 
@@ -1629,9 +1687,18 @@ mod tests {
 
     #[test]
     fn priority_for_category_mapping() {
-        assert_eq!(priority_for_category("welcome"), CommentaryPriority::Welcome);
-        assert_eq!(priority_for_category("over_complete"), CommentaryPriority::Phase);
+        assert_eq!(
+            priority_for_category("welcome"),
+            CommentaryPriority::Welcome
+        );
+        assert_eq!(
+            priority_for_category("over_complete"),
+            CommentaryPriority::Phase
+        );
         assert_eq!(priority_for_category("four"), CommentaryPriority::Result);
-        assert_eq!(priority_for_category("context_fifty"), CommentaryPriority::Result);
+        assert_eq!(
+            priority_for_category("context_fifty"),
+            CommentaryPriority::Result
+        );
     }
 }

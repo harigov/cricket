@@ -3,8 +3,10 @@
 
 use bevy::prelude::*;
 
-use crate::game::ball::CricketBall;
 use crate::core::geometry;
+use crate::game::ball::CricketBall;
+use crate::render::ring_geometry::floodlight_radius;
+use crate::render::stadium::BowlLayout;
 
 #[derive(Resource, Default)]
 pub struct CameraRig {
@@ -71,10 +73,7 @@ pub struct PresentationState {
     pub impact_on: bool,
 }
 
-pub fn camera_toggle_system(
-    input: Res<crate::input::PlayerInput>,
-    mut rig: ResMut<CameraRig>,
-) {
+pub fn camera_toggle_system(input: Res<crate::input::PlayerInput>, mut rig: ResMut<CameraRig>) {
     if input.pressed(crate::input::Action::CycleCam) {
         rig.mode = rig.mode.toggle_next();
     }
@@ -104,7 +103,11 @@ pub fn mode_view(
         CamMode::Broadcast => broadcast_establishing_view(boundary_r),
         CamMode::FollowBall => {
             let b = ball.unwrap_or(Vec3::new(20.0, 3.0, 10.0));
-            (b + Vec3::new(-8.0, 3.2, 6.5), b + Vec3::new(1.5, 0.0, 0.0), 34.0)
+            (
+                b + Vec3::new(-8.0, 3.2, 6.5),
+                b + Vec3::new(1.5, 0.0, 0.0),
+                34.0,
+            )
         }
         CamMode::ImpactCut => (
             Vec3::new(stump_x + 5.5, 2.8, 7.0),
@@ -114,17 +117,24 @@ pub fn mode_view(
         CamMode::BoundaryCam => {
             let b = ball.unwrap_or(Vec3::new(stump_x, 1.0, 0.0));
             let flat = Vec2::new(b.x, b.z);
-            let dir = if flat.length_squared() > 0.01 { flat.normalize() } else { Vec2::X };
+            let dir = if flat.length_squared() > 0.01 {
+                flat.normalize()
+            } else {
+                Vec2::X
+            };
             // Sit just outside the rope along the ball's line of travel.
             let pos_flat = dir * (boundary_r + 6.0);
             (Vec3::new(pos_flat.x, 2.3, pos_flat.y), b, 28.0)
         }
         CamMode::ReplaySide => {
             // Side-on medium lens following the recorded flight.
-            let focus = replay_pos
-                .unwrap_or(Vec3::new(geometry::BATSMAN_POS.x, 1.0, 0.0));
+            let focus = replay_pos.unwrap_or(Vec3::new(geometry::BATSMAN_POS.x, 1.0, 0.0));
             (
-                Vec3::new(focus.x * 0.55 + 1.0, 2.4, if focus.z >= 0.0 { 14.0 } else { -14.0 }),
+                Vec3::new(
+                    focus.x * 0.55 + 1.0,
+                    2.4,
+                    if focus.z >= 0.0 { 14.0 } else { -14.0 },
+                ),
                 focus,
                 24.0,
             )
@@ -134,9 +144,9 @@ pub fn mode_view(
 
 /// Wide elevated establishing shot: full oval bowl, sky, crowd tiers and towers.
 pub fn broadcast_establishing_view(boundary_r: f32) -> (Vec3, Vec3, f32) {
-    // Match BowlLayout::from_boundary proportions in stadium.rs.
-    let bowl_outer = boundary_r + 3.2 + 1.9 * 5.0;
-    let tower_r = bowl_outer + 7.5;
+    // Bowl and tower radii shared with stadium spawn (BowlLayout, floodlight_radius).
+    let bowl_outer = BowlLayout::from_boundary(boundary_r).outer_radius();
+    let tower_r = floodlight_radius(bowl_outer);
     let span = tower_r * 2.0;
 
     // High aerial crane behind the bowler's end: full oval, all four towers, sky headroom.
@@ -148,7 +158,6 @@ pub fn broadcast_establishing_view(boundary_r: f32) -> (Vec3, Vec3, f32) {
     (pos, look, 65.0)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn update_camera(
     time: Res<Time>,
     ball_q: Query<&Transform, (With<CricketBall>, Without<Camera3d>)>,
@@ -170,7 +179,7 @@ pub fn update_camera(
         .and_then(|w| am.as_ref().map(|a| w.stadiums[a.stadium].boundary_radius()))
         .unwrap_or(geometry::DEFAULT_BOUNDARY_RADIUS);
 
-    let (mut target_pos, mut target_look, mut target_fov) =
+    let (target_pos, target_look, target_fov) =
         mode_view(rig.mode, ball_pos, boundary_r, replay_pos);
 
     if !rig.init {
@@ -258,9 +267,20 @@ mod tests {
         let br = 65.0;
         let (pos, look, fov) = broadcast_establishing_view(br);
         assert!(pos.y > 80.0, "establishing cam should be high: y={}", pos.y);
-        assert!(look.y < 8.0, "look target should sit near field center: y={}", look.y);
-        assert!(look.y.abs() > 2.0, "look target should not be at ground level");
-        assert!(look.z.abs() < 5.0, "look target should be near pitch center: z={}", look.z);
+        assert!(
+            look.y < 8.0,
+            "look target should sit near field center: y={}",
+            look.y
+        );
+        assert!(
+            look.y.abs() > 2.0,
+            "look target should not be at ground level"
+        );
+        assert!(
+            look.z.abs() < 5.0,
+            "look target should be near pitch center: z={}",
+            look.z
+        );
         assert!(fov >= 62.0, "wide lens for full-stadium framing: fov={fov}");
         let flat = Vec2::new(pos.x, pos.z);
         assert!(

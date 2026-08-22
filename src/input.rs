@@ -27,9 +27,7 @@ pub struct KeyBindings {
 
 impl Default for KeyBindings {
     fn default() -> Self {
-        Self {
-            map: default_map(),
-        }
+        Self { map: default_map() }
     }
 }
 
@@ -62,10 +60,10 @@ fn config_path() -> std::path::PathBuf {
 impl KeyBindings {
     pub fn load() -> Self {
         let path = config_path();
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(v) = serde_json::from_slice::<Self>(&bytes) {
-                return v;
-            }
+        if let Ok(bytes) = std::fs::read(&path)
+            && let Ok(v) = serde_json::from_slice::<Self>(&bytes)
+        {
+            return v;
         }
         Self::default()
     }

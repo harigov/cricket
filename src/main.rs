@@ -17,7 +17,9 @@ use game::match_flow::{self, MatchScene};
 use game::*;
 use render::camera_rig::CameraRig;
 use render::sky::{create_sky_texture, sky_texture_for_time};
-use render::{DayEnvironmentLight, FloodlightFixture, FloodlightMaterials, NightEnvironmentLight, SkyTextures};
+use render::{
+    DayEnvironmentLight, FloodlightFixture, FloodlightMaterials, NightEnvironmentLight, SkyTextures,
+};
 use state::{AppState, RebuildScene};
 
 /// Gameplay systems only run while the match resources actually exist
@@ -26,39 +28,37 @@ fn in_live_match() -> impl bevy::ecs::schedule::SystemCondition<()> + Clone {
     in_state(AppState::InMatch).and(resource_exists::<ActiveMatch>)
 }
 
-fn main() {
-    App::new()
-        .add_plugins(
-            DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "Willow Cricket".into(),
-                    resolution: WindowResolution::new(1920, 1080),
-                    ..default()
-                }),
-                ..default()
-            }),
-        )
-        .register_type::<Transform>()
-        .register_type::<GlobalTransform>()
-        .register_type::<Name>()
-        .register_type::<Visibility>()
-        .register_type::<InheritedVisibility>()
-        .register_type::<ViewVisibility>()
-        .init_state::<AppState>()
-        .add_message::<RebuildScene>()
-        .insert_resource(WorldData::new())
-        .insert_resource(CameraRig::default())
-        .insert_resource(StadiumTime::Day)
-        .add_plugins((
-            input::InputPlugin,
-            game::GameplayPlugin,
-            game::audio::AudioPlugin,
-            render::RenderPlugin,
-            ui::UiPlugin,
-        ))
-        .add_systems(Startup, setup_basics)
-        .add_systems(Update, (update_stadium_time, toggle_day_night))
-        .add_systems(OnEnter(AppState::InMatch), enter_match)
+fn register_core_plugins(app: &mut App) {
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "Willow Cricket".into(),
+            resolution: WindowResolution::new(1920, 1080),
+            ..default()
+        }),
+        ..default()
+    }))
+    .register_type::<Transform>()
+    .register_type::<GlobalTransform>()
+    .register_type::<Name>()
+    .register_type::<Visibility>()
+    .register_type::<InheritedVisibility>()
+    .register_type::<ViewVisibility>()
+    .init_state::<AppState>()
+    .add_message::<RebuildScene>()
+    .insert_resource(WorldData::new())
+    .insert_resource(CameraRig::default())
+    .insert_resource(StadiumTime::Day)
+    .add_plugins((
+        input::InputPlugin,
+        game::GameplayPlugin,
+        game::audio::AudioPlugin,
+        render::RenderPlugin,
+        ui::UiPlugin,
+    ));
+}
+
+fn register_match_systems(app: &mut App) {
+    app.add_systems(OnEnter(AppState::InMatch), enter_match)
         .add_systems(OnExit(AppState::InMatch), exit_match)
         .add_systems(
             Update,
@@ -94,10 +94,7 @@ fn main() {
             )
                 .run_if(in_live_match()),
         )
-        .add_systems(
-            Update,
-            game::fielding::chase_system.run_if(in_live_match()),
-        )
+        .add_systems(Update, game::fielding::chase_system.run_if(in_live_match()))
         .add_systems(
             Update,
             (
@@ -114,8 +111,16 @@ fn main() {
         .add_systems(
             Update,
             ui::menus::handle_match_exit.run_if(in_state(AppState::InMatch)),
-        )
-        .add_systems(Update, debug_screenshot)
+        );
+}
+
+fn main() {
+    let mut app = App::new();
+    register_core_plugins(&mut app);
+    app.add_systems(Startup, setup_basics)
+        .add_systems(Update, (update_stadium_time, toggle_day_night));
+    register_match_systems(&mut app);
+    app.add_systems(Update, debug_screenshot)
         .add_systems(PreUpdate, autotest_drive.after(input::poll_input))
         .run();
 }
@@ -146,6 +151,114 @@ fn debug_screenshot(
 // screenshots along the way.
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutotestMode {
+    Quick,
+    Tournament,
+    Settings,
+    Night,
+    Stadium,
+    StadiumNight,
+}
+
+struct AutotestScript {
+    presses: [(f32, input::Action); 7],
+    milestones: &'static [f32],
+    end_time: f32,
+    switches_to_night: bool,
+    swings: bool,
+}
+
+const QUICK_MATCH_PRESSES: [(f32, input::Action); 7] = [
+    (2.0, input::Action::Confirm), // Quick Match -> team select
+    (3.5, input::Action::Confirm), // pick your team
+    (5.0, input::Action::Confirm), // pick opponent
+    (6.5, input::Action::Confirm), // overs
+    (8.0, input::Action::Confirm), // stadium (random)
+    (9.5, input::Action::Confirm), // bat first -> match starts
+    (99.0, input::Action::Confirm),
+];
+
+impl AutotestMode {
+    fn from_env() -> Option<Self> {
+        match std::env::var("CRICKET_AUTOTEST")
+            .unwrap_or_default()
+            .as_str()
+        {
+            "1" => Some(Self::Quick),
+            "tournament" => Some(Self::Tournament),
+            "settings" => Some(Self::Settings),
+            "night" => Some(Self::Night),
+            "stadium" => Some(Self::Stadium),
+            "stadium-night" => Some(Self::StadiumNight),
+            _ => None,
+        }
+    }
+
+    fn script(self) -> AutotestScript {
+        match self {
+            Self::Tournament => AutotestScript {
+                presses: [
+                    (2.0, input::Action::Next),    // highlight Tournament
+                    (3.5, input::Action::Confirm), // enter Tournament
+                    (5.0, input::Action::Confirm), // pick your team -> bracket
+                    (8.5, input::Action::Confirm), // play semifinal
+                    (12.0, input::Action::Confirm),
+                    (14.0, input::Action::Confirm),
+                    (16.0, input::Action::Confirm),
+                ],
+                milestones: &[1.5, 5.0, 7.0, 14.0],
+                end_time: 20.0,
+                switches_to_night: false,
+                swings: true,
+            },
+            Self::Settings => AutotestScript {
+                presses: [
+                    (2.0, input::Action::Next),    // highlight Tournament
+                    (2.6, input::Action::Next),    // highlight Settings
+                    (3.5, input::Action::Confirm), // enter Settings
+                    (6.0, input::Action::Next),    // move to SFX row
+                    (6.5, input::Action::Right),   // bump volume
+                    (7.5, input::Action::Cancel),  // back to main
+                    (99.0, input::Action::Confirm),
+                ],
+                milestones: &[1.5, 5.0, 6.8, 8.5],
+                end_time: 10.0,
+                switches_to_night: false,
+                swings: true,
+            },
+            Self::Night => AutotestScript {
+                presses: QUICK_MATCH_PRESSES,
+                milestones: &[1.5, 16.0, 30.0, 45.0],
+                end_time: 50.0,
+                switches_to_night: true,
+                swings: true,
+            },
+            Self::Stadium => AutotestScript {
+                presses: QUICK_MATCH_PRESSES,
+                milestones: &[16.0],
+                end_time: 20.0,
+                switches_to_night: false,
+                swings: false,
+            },
+            Self::StadiumNight => AutotestScript {
+                presses: QUICK_MATCH_PRESSES,
+                milestones: &[16.0],
+                end_time: 20.0,
+                switches_to_night: true,
+                swings: false,
+            },
+            Self::Quick => AutotestScript {
+                presses: QUICK_MATCH_PRESSES,
+                milestones: &[1.5, 16.0, 30.0, 45.0],
+                end_time: 50.0,
+                switches_to_night: false,
+                swings: true,
+            },
+        }
+    }
+}
+
 fn autotest_drive(
     time: Res<Time<bevy::time::Real>>,
     mut input: ResMut<input::PlayerInput>,
@@ -158,53 +271,14 @@ fn autotest_drive(
     mut last_swing_t: Local<f32>,
     mut night_applied: Local<bool>,
 ) {
-    let mode = std::env::var("CRICKET_AUTOTEST").unwrap_or_default();
-    if mode != "1"
-        && mode != "tournament"
-        && mode != "settings"
-        && mode != "night"
-        && mode != "stadium"
-        && mode != "stadium-night"
-    {
+    let Some(mode) = AutotestMode::from_env() else {
         return;
-    }
+    };
+    let script = mode.script();
     *t += time.delta_secs();
     let now = *t;
 
-    // Scripted menu presses per mode
-    let presses: [(f32, input::Action); 7] = if mode == "tournament" {
-        [
-            (2.0, input::Action::Next),    // highlight Tournament
-            (3.5, input::Action::Confirm), // enter Tournament
-            (5.0, input::Action::Confirm), // pick your team -> bracket
-            (8.5, input::Action::Confirm), // play semifinal
-            (12.0, input::Action::Confirm),
-            (14.0, input::Action::Confirm),
-            (16.0, input::Action::Confirm),
-        ]
-    } else if mode == "settings" {
-        [
-            (2.0, input::Action::Next),    // highlight Tournament
-            (2.6, input::Action::Next),    // highlight Settings
-            (3.5, input::Action::Confirm), // enter Settings
-            (6.0, input::Action::Next),    // move to SFX row
-            (6.5, input::Action::Right),   // bump volume
-            (7.5, input::Action::Cancel),  // back to main
-            (99.0, input::Action::Confirm),
-        ]
-    } else {
-        // "1", "night", "stadium", and "stadium-night" share the quick-match path.
-        [
-            (2.0, input::Action::Confirm), // Quick Match -> team select
-            (3.5, input::Action::Confirm), // pick your team
-            (5.0, input::Action::Confirm), // pick opponent
-            (6.5, input::Action::Confirm), // overs
-            (8.0, input::Action::Confirm), // stadium (random)
-            (9.5, input::Action::Confirm), // bat first -> match starts
-            (99.0, input::Action::Confirm),
-        ]
-    };
-    for (i, (when, action)) in presses.iter().enumerate() {
+    for (i, (when, action)) in script.presses.iter().enumerate() {
         let step = i as u32 + 1;
         if now >= *when && *last_press < step {
             input.just_pressed.push(*action);
@@ -214,58 +288,39 @@ fn autotest_drive(
     }
 
     // Night / stadium-night: switch to floodlit mode once the match scene is live.
-    if (mode == "night" || mode == "stadium-night") && now > 11.5 && !*night_applied {
+    if script.switches_to_night && now > 11.5 && !*night_applied {
         *stadium_time = StadiumTime::Night;
         *night_applied = true;
         info!("AUTOTEST: switched to night stadium lighting");
     }
 
     // In-match: swing periodically once play is under way (not stadium captures).
-    if mode != "stadium" && mode != "stadium-night" && now > 14.0 && now - *last_swing_t >= 3.0 {
+    if script.swings && now > 14.0 && now - *last_swing_t >= 3.0 {
         *last_swing_t = now;
         input.just_pressed.push(input::Action::Confirm);
         info!("AUTOTEST: shot swing @ {:.1}s", now);
     }
 
     // Milestones: screenshots + clean exit.
-    let milestones: &[f32] = if mode == "tournament" {
-        &[1.5, 5.0, 7.0, 14.0]
-    } else if mode == "settings" {
-        &[1.5, 5.0, 6.8, 8.5]
-    } else if mode == "night" {
-        &[1.5, 16.0, 30.0, 45.0]
-    } else if mode == "stadium" || mode == "stadium-night" {
-        &[16.0]
-    } else {
-        &[1.5, 16.0, 30.0, 45.0]
-    };
-    for (i, when) in milestones.iter().enumerate() {
+    for (i, when) in script.milestones.iter().enumerate() {
         let step = 100 + i as u32;
         if now >= *when && *last_milestone < step {
             save_shot(&mut commands, format!("/tmp/opencode/auto-{i}.png"));
             *last_milestone = step;
         }
     }
-    let end = if mode == "tournament" {
-        20.0
-    } else if mode == "settings" {
-        10.0
-    } else if mode == "stadium" || mode == "stadium-night" {
-        20.0
-    } else if mode == "night" {
-        50.0
-    } else {
-        50.0
-    };
-    if now >= end && *last_milestone < 200 {
+    if now >= script.end_time && *last_milestone < 200 {
         *last_milestone = 200;
         exit.write(AppExit::Success);
     }
 }
 
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum StadiumTime { Day, Night }
-impl Default for StadiumTime { fn default() -> Self { StadiumTime::Day } }
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum StadiumTime {
+    #[default]
+    Day,
+    Night,
+}
 
 #[derive(Component)]
 struct SkySphere;
@@ -281,17 +336,45 @@ const DAY_FOG_END: f32 = 450.0;
 const NIGHT_FOG_START: f32 = 110.0;
 const NIGHT_FOG_END: f32 = 350.0;
 
+struct LightingPreset {
+    ev100: f32,
+    fog_color: Color,
+    fog_start: f32,
+    fog_end: f32,
+    ambient_color: Color,
+    ambient_brightness: f32,
+    clear_color: Color,
+}
+
+fn lighting_preset(time: StadiumTime) -> LightingPreset {
+    match time {
+        StadiumTime::Day => LightingPreset {
+            ev100: DAY_EV100,
+            fog_color: Color::srgba(0.55, 0.70, 0.88, 1.0),
+            fog_start: DAY_FOG_START,
+            fog_end: DAY_FOG_END,
+            ambient_color: Color::srgb(0.72, 0.78, 0.92),
+            ambient_brightness: 520.0,
+            clear_color: Color::srgb(0.50, 0.68, 0.90),
+        },
+        StadiumTime::Night => LightingPreset {
+            ev100: NIGHT_EV100,
+            fog_color: Color::srgba(0.04, 0.06, 0.12, 1.0),
+            fog_start: NIGHT_FOG_START,
+            fog_end: NIGHT_FOG_END,
+            ambient_color: Color::srgb(0.36, 0.40, 0.54),
+            ambient_brightness: 410.0,
+            clear_color: Color::srgb(0.02, 0.03, 0.08),
+        },
+    }
+}
+
 fn distance_fog_falloff(time: StadiumTime) -> bevy::pbr::FogFalloff {
     use bevy::pbr::FogFalloff;
-    match time {
-        StadiumTime::Day => FogFalloff::Linear {
-            start: DAY_FOG_START,
-            end: DAY_FOG_END,
-        },
-        StadiumTime::Night => FogFalloff::Linear {
-            start: NIGHT_FOG_START,
-            end: NIGHT_FOG_END,
-        },
+    let preset = lighting_preset(time);
+    FogFalloff::Linear {
+        start: preset.fog_start,
+        end: preset.fog_end,
     }
 }
 
@@ -337,8 +420,7 @@ fn setup_basics(
             color: Color::srgb(1.0, 0.94, 0.82),
             ..default()
         },
-        Transform::from_translation(Vec3::new(-52.0, 82.0, 22.0))
-            .looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(Vec3::new(-52.0, 82.0, 22.0)).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     // Cool skylight fill — readable shadows without flat wash.
     commands.spawn((
@@ -349,8 +431,7 @@ fn setup_basics(
             color: Color::srgb(0.58, 0.68, 0.92),
             ..default()
         },
-        Transform::from_translation(Vec3::new(42.0, 48.0, -28.0))
-            .looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(Vec3::new(42.0, 48.0, -28.0)).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     // Night moon key (flood spots are built with the stadium).
     commands.spawn((
@@ -361,40 +442,34 @@ fn setup_basics(
             color: Color::srgb(0.62, 0.70, 0.92),
             ..default()
         },
-        Transform::from_translation(Vec3::new(30.0, 55.0, -18.0))
-            .looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(Vec3::new(30.0, 55.0, -18.0)).looking_at(Vec3::ZERO, Vec3::Y),
         Visibility::Hidden,
     ));
 
     // Main 3D camera (UI renders onto the primary window camera).
+    let preset = lighting_preset(*stadium_time);
     commands.spawn((
         Camera {
-            clear_color: bevy::camera::ClearColorConfig::Custom(
-                Color::srgb(0.50, 0.68, 0.90),
-            ),
+            clear_color: bevy::camera::ClearColorConfig::Custom(preset.clear_color),
             ..default()
         },
         Camera3d::default(),
         Msaa::Sample4,
-        Transform::from_xyz(36.0, 13.8, 2.2)
-            .looking_at(Vec3::new(-0.6, 0.78, 0.0), Vec3::Y),
+        Transform::from_xyz(36.0, 13.8, 2.2).looking_at(Vec3::new(-0.6, 0.78, 0.0), Vec3::Y),
         IsDefaultUiCamera,
         bevy::core_pipeline::tonemapping::Tonemapping::TonyMcMapface,
         bevy::camera::Exposure {
-            ev100: match *stadium_time {
-                StadiumTime::Day => DAY_EV100,
-                StadiumTime::Night => NIGHT_EV100,
-            },
+            ev100: preset.ev100,
         },
         DistanceFog {
-            color: Color::srgba(0.58, 0.72, 0.88, 1.0),
+            color: preset.fog_color,
             falloff: distance_fog_falloff(*stadium_time),
             ..default()
         },
     ));
     commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.72, 0.78, 0.92),
-        brightness: 520.0,
+        color: preset.ambient_color,
+        brightness: preset.ambient_brightness,
         affects_lightmapped_meshes: true,
     });
     commands.insert_resource(bevy::light::DirectionalLightShadowMap { size: 4096 });
@@ -406,8 +481,14 @@ fn setup_basics(
 fn update_stadium_time(
     time: Res<StadiumTime>,
     sky_textures: Res<SkyTextures>,
-    mut day_lights: Query<&mut Visibility, (With<DayEnvironmentLight>, Without<NightEnvironmentLight>)>,
-    mut night_lights: Query<&mut Visibility, (With<NightEnvironmentLight>, Without<DayEnvironmentLight>)>,
+    mut day_lights: Query<
+        &mut Visibility,
+        (With<DayEnvironmentLight>, Without<NightEnvironmentLight>),
+    >,
+    mut night_lights: Query<
+        &mut Visibility,
+        (With<NightEnvironmentLight>, Without<DayEnvironmentLight>),
+    >,
     mut sky_q: Query<
         &mut MeshMaterial3d<StandardMaterial>,
         (With<SkySphere>, Without<FloodlightFixture>),
@@ -427,8 +508,9 @@ fn update_stadium_time(
         return;
     }
     let is_night = *time == StadiumTime::Night;
+    let preset = lighting_preset(*time);
     if let Ok(mut exp) = exposure_q.single_mut() {
-        exp.ev100 = if is_night { NIGHT_EV100 } else { DAY_EV100 };
+        exp.ev100 = preset.ev100;
     }
     for mut v in &mut day_lights {
         *v = if is_night {
@@ -445,39 +527,22 @@ fn update_stadium_time(
         };
     }
     if let Ok(mut fog) = fog_q.single_mut() {
-        fog.color = if is_night {
-            Color::srgba(0.04, 0.06, 0.12, 1.0)
-        } else {
-            Color::srgba(0.55, 0.70, 0.88, 1.0)
-        };
+        fog.color = preset.fog_color;
         fog.falloff = distance_fog_falloff(*time);
     }
-    *ambient = if is_night {
-        GlobalAmbientLight {
-            color: Color::srgb(0.36, 0.40, 0.54),
-            brightness: 410.0,
-            affects_lightmapped_meshes: true,
-        }
-    } else {
-        GlobalAmbientLight {
-            color: Color::srgb(0.72, 0.78, 0.92),
-            brightness: 520.0,
-            affects_lightmapped_meshes: true,
-        }
+    *ambient = GlobalAmbientLight {
+        color: preset.ambient_color,
+        brightness: preset.ambient_brightness,
+        affects_lightmapped_meshes: true,
     };
     if let Ok(mut cam) = cam_q.single_mut() {
-        cam.clear_color = bevy::camera::ClearColorConfig::Custom(if is_night {
-            Color::srgb(0.02, 0.03, 0.08)
-        } else {
-            Color::srgb(0.50, 0.68, 0.90)
-        });
+        cam.clear_color = bevy::camera::ClearColorConfig::Custom(preset.clear_color);
     }
-    if let Ok(handle) = sky_q.single_mut() {
-        if let Some(mat) = materials.get_mut(&handle.0) {
-            mat.base_color_texture = Some(
-                sky_texture_for_time(is_night, &sky_textures.day, &sky_textures.night).clone(),
-            );
-        }
+    if let Ok(handle) = sky_q.single_mut()
+        && let Some(mat) = materials.get_mut(&handle.0)
+    {
+        mat.base_color_texture =
+            Some(sky_texture_for_time(is_night, &sky_textures.day, &sky_textures.night).clone());
     }
     if let Some(mats) = fixture_mats {
         let target = if is_night {
@@ -491,12 +556,12 @@ fn update_stadium_time(
     }
 }
 
-fn toggle_day_night(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut time: ResMut<StadiumTime>,
-) {
+fn toggle_day_night(keys: Res<ButtonInput<KeyCode>>, mut time: ResMut<StadiumTime>) {
     if keys.just_pressed(KeyCode::KeyN) {
-        *time = match *time { StadiumTime::Day => StadiumTime::Night, StadiumTime::Night => StadiumTime::Day };
+        *time = match *time {
+            StadiumTime::Day => StadiumTime::Night,
+            StadiumTime::Night => StadiumTime::Day,
+        };
         info!("Stadium time: {:?}", *time);
     }
 }
@@ -513,8 +578,15 @@ fn enter_match(
 ) {
     info!("Entering match");
     let am = build_active_match(&setup, &wd);
-    let scene =
-        match_flow::spawn_match_scene(&mut commands, &asset_server, &mut meshes, &mut materials, &mut images, &wd, &am);
+    let scene = match_flow::spawn_match_scene(
+        &mut commands,
+        &asset_server,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &wd,
+        &am,
+    );
     commands.insert_resource(am);
     commands.insert_resource(scene);
     commands.insert_resource(CurrentDelivery(None));
@@ -522,10 +594,7 @@ fn enter_match(
 }
 
 /// Tear down the live scene when leaving the match.
-fn exit_match(
-    mut commands: Commands,
-    scene: Option<Res<MatchScene>>,
-) {
+fn exit_match(mut commands: Commands, scene: Option<Res<MatchScene>>) {
     if let Some(s) = scene.as_deref() {
         match_flow::despawn_match_scene(&mut commands, s);
     }
@@ -536,7 +605,6 @@ fn exit_match(
 }
 
 /// Innings changes rebuild the fielding/batting sides.
-#[allow(clippy::too_many_arguments)]
 fn handle_rebuild_scene(
     mut ev: MessageReader<RebuildScene>,
     mut commands: Commands,
@@ -557,7 +625,14 @@ fn handle_rebuild_scene(
     }
     if let Some(am) = am.as_deref() {
         let new_scene = match_flow::spawn_match_scene(
-            &mut commands, &asset_server, &mut meshes, &mut materials, &mut images, &wd, am);
+            &mut commands,
+            &asset_server,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+            &wd,
+            am,
+        );
         commands.insert_resource(new_scene);
         commands.insert_resource(Phase(PhaseEnum::ReadyToBall { t: 0.0 }));
     }

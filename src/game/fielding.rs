@@ -3,7 +3,7 @@
 use crate::core::geometry::{self, FieldPos};
 use crate::core::teams::Team;
 use crate::game::ball::CricketBall;
-use crate::render::player::{face_target, Anim, AnimState};
+use crate::render::player::{Anim, AnimState, face_target};
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -43,7 +43,6 @@ pub fn positions_by_slot(
 
 /// Spawn the fielding side (keeper + 9 outfielders). The bowler figure is
 /// managed separately by the match flow.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_field_side(
     commands: &mut Commands,
     asset_server: &AssetServer,
@@ -74,7 +73,11 @@ pub fn spawn_field_side(
             },
         );
         commands.entity(e).insert((
-            Fielder { slot, is_keeper, label: fp.name },
+            Fielder {
+                slot,
+                is_keeper,
+                label: fp.name,
+            },
             Brain::AtPost,
         ));
         out.push(e);
@@ -113,7 +116,11 @@ pub fn chase_system(
         } else if let AnimState::Run { t } = &mut anim.state {
             *t += dt;
         }
-        let speed = if f.is_keeper { KEEPER_SPEED } else { FIELDER_SPEED };
+        let speed = if f.is_keeper {
+            KEEPER_SPEED
+        } else {
+            FIELDER_SPEED
+        };
         // Predict where the ball will be when we get there (simple lead)
         let to_ball = Vec2::new(ball.pos.x - tf.translation.x, ball.pos.z - tf.translation.z);
         let dist = to_ball.length();
@@ -145,10 +152,7 @@ mod tests {
 
     #[test]
     fn positions_by_slot_maps_fielder_index() {
-        let positions = positions_by_slot(
-            [(2, Vec2::new(10.0, 5.0)), (0, Vec2::new(1.0, 2.0))],
-            4,
-        );
+        let positions = positions_by_slot([(2, Vec2::new(10.0, 5.0)), (0, Vec2::new(1.0, 2.0))], 4);
         assert_eq!(positions[0], Vec2::new(1.0, 2.0));
         assert_eq!(positions[2], Vec2::new(10.0, 5.0));
         assert_eq!(positions[1], Vec2::ZERO);

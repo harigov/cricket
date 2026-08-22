@@ -35,9 +35,7 @@ pub fn sky_value_noise(u: f32, v: f32, scale: f32, seed: u32) -> f32 {
     let sfx = smooth(fx);
     let sfy = smooth(fy);
 
-    let sample = |xi: i32, yi: i32| -> f32 {
-        sky_hash(xi as u32, yi as u32, seed)
-    };
+    let sample = |xi: i32, yi: i32| -> f32 { sky_hash(xi as u32, yi as u32, seed) };
 
     let a = sample(ix, iy);
     let b = sample(ix + 1, iy);

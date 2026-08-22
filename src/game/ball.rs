@@ -45,7 +45,13 @@ impl Default for BallState {
 
 impl BallState {
     pub fn new_release(pos: Vec3, vel: Vec3) -> Self {
-        BallState { pos, vel, dead: false, bounced: false, struck: false }
+        BallState {
+            pos,
+            vel,
+            dead: false,
+            bounced: false,
+            struck: false,
+        }
     }
 }
 
@@ -162,13 +168,12 @@ pub fn physics_step_with_pitch(
         flags.bounce_pos = state.pos;
     }
 
-    flags.crossed_bat_plane = pre_x < BAT_PLANE_X && state.pos.x >= BAT_PLANE_X
-        && state.vel.x > 1.0;
+    flags.crossed_bat_plane =
+        pre_x < BAT_PLANE_X && state.pos.x >= BAT_PLANE_X && state.vel.x > 1.0;
 }
 
 /// X position where we test bat contact (just in front of the striker).
-pub const BAT_PLANE_X: f32 =
-    crate::core::geometry::PITCH_HALF_LEN - 1.1;
+pub const BAT_PLANE_X: f32 = crate::core::geometry::PITCH_HALF_LEN - 1.1;
 
 /// Predict time until the ball reaches the bat plane (simple linear est.).
 pub fn time_to_bat_plane(state: &BallState) -> Option<f32> {

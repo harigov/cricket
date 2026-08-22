@@ -92,11 +92,23 @@ impl Innings {
     ) -> Self {
         let cards = order
             .iter()
-            .map(|&p| BatterCard { player: p, runs: 0, balls: 0, fours: 0, sixes: 0, out: None })
+            .map(|&p| BatterCard {
+                player: p,
+                runs: 0,
+                balls: 0,
+                fours: 0,
+                sixes: 0,
+                out: None,
+            })
             .collect();
         let bowlers = bowling_players
             .iter()
-            .map(|&p| BowlerCard { player: p, balls: 0, runs: 0, wickets: 0 })
+            .map(|&p| BowlerCard {
+                player: p,
+                balls: 0,
+                runs: 0,
+                wickets: 0,
+            })
             .collect();
         let striker = order[0];
         let non_striker = order[1];
@@ -124,7 +136,9 @@ impl Innings {
     }
 
     pub fn run_rate(&self) -> f32 {
-        if self.legal_balls == 0 { 0.0 } else {
+        if self.legal_balls == 0 {
+            0.0
+        } else {
             self.runs as f32 * 6.0 / self.legal_balls as f32
         }
     }
@@ -142,7 +156,10 @@ impl Innings {
     }
 
     fn bowler_card_mut(&mut self, player: usize) -> &mut BowlerCard {
-        self.bowlers.iter_mut().find(|c| c.player == player).unwrap()
+        self.bowlers
+            .iter_mut()
+            .find(|c| c.player == player)
+            .unwrap()
     }
 
     /// Apply a delivery. Returns a summary line for commentary/HUD.
@@ -177,21 +194,25 @@ impl Innings {
                     BallOutcome::Four => {
                         self.runs += 4;
                         let c = self.card_mut(self.striker);
-                        c.runs += 4; c.balls += 1; c.fours += 1;
+                        c.runs += 4;
+                        c.balls += 1;
+                        c.fours += 1;
                         note = "FOUR!".into();
                     }
                     BallOutcome::Six => {
                         self.runs += 6;
                         let c = self.card_mut(self.striker);
-                        c.runs += 6; c.balls += 1; c.sixes += 1;
+                        c.runs += 6;
+                        c.balls += 1;
+                        c.sixes += 1;
                         note = "SIX!".into();
                     }
                     BallOutcome::Runs(r) => {
                         self.runs += *r as u32;
                         let c = self.card_mut(self.striker);
-                        c.runs += *r as u32; c.balls += 1;
-                        note = format!("{r} run{}",
-                            if *r == 1 { "" } else { "s" });
+                        c.runs += *r as u32;
+                        c.balls += 1;
+                        note = format!("{r} run{}", if *r == 1 { "" } else { "s" });
                     }
                     _ => unreachable!(),
                 }
@@ -201,7 +222,9 @@ impl Innings {
                     BallOutcome::WicketAndRuns(_, r) => *r % 2 == 1,
                     _ => false,
                 };
-                if ran { self.swap_strike(); }
+                if ran {
+                    self.swap_strike();
+                }
                 // End of over rotates strike too.
                 if self.balls_this_over == 6 {
                     self.balls_this_over = 0;
@@ -225,12 +248,18 @@ impl Innings {
             c.balls += 1;
             c.out = Some(*d);
         }
-        if let Some(b) = self.current_bowler {
-            if matches!(d, Dismissal::Bowled | Dismissal::Lbw
-                        | Dismissal::Caught { .. } | Dismissal::CaughtBehind { .. }
-                        | Dismissal::Stumped | Dismissal::HitWicket) {
-                self.bowler_card_mut(b).wickets += 1;
-            }
+        if let Some(b) = self.current_bowler
+            && matches!(
+                d,
+                Dismissal::Bowled
+                    | Dismissal::Lbw
+                    | Dismissal::Caught { .. }
+                    | Dismissal::CaughtBehind { .. }
+                    | Dismissal::Stumped
+                    | Dismissal::HitWicket
+            )
+        {
+            self.bowler_card_mut(b).wickets += 1;
         }
         *note = "OUT!".into();
         // Bring in the next batter.
@@ -246,7 +275,7 @@ impl Innings {
     }
 
     pub fn over_complete(&self) -> bool {
-        self.legal_balls > 0 && self.legal_balls % 6 == 0 && self.balls_this_over == 0
+        self.legal_balls > 0 && self.legal_balls.is_multiple_of(6) && self.balls_this_over == 0
     }
 
     /// True when the batting side can no longer continue (wickets down or
@@ -265,7 +294,10 @@ impl Innings {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Result {
     /// Winner index (0/1), margin description.
-    Win { winner: usize, margin: String },
+    Win {
+        winner: usize,
+        margin: String,
+    },
     Tie,
 }
 
@@ -283,8 +315,12 @@ pub struct MatchState {
 }
 
 impl MatchState {
-    pub fn new(overs: u32, teams: [usize; 2], first_order: Vec<usize>,
-               bowling_players: &[usize]) -> Self {
+    pub fn new(
+        overs: u32,
+        teams: [usize; 2],
+        first_order: Vec<usize>,
+        bowling_players: &[usize],
+    ) -> Self {
         MatchState {
             overs,
             wickets_limit: 10,
@@ -304,7 +340,7 @@ impl MatchState {
         }
         let inns_over = self.innings.all_out(self.wickets_limit)
             || self.innings.overs_done(self.overs)
-            || self.innings.target.map_or(false, |t| self.innings.runs >= t);
+            || self.innings.target.is_some_and(|t| self.innings.runs >= t);
         if !inns_over {
             return None;
         }
@@ -336,14 +372,12 @@ impl MatchState {
     }
 
     /// Prepare the second innings. `chasing_order` is the new batting order.
-    pub fn start_chase(&mut self, chasing_order: Vec<usize>,
-                       bowling_players: &[usize]) {
+    pub fn start_chase(&mut self, chasing_order: Vec<usize>, bowling_players: &[usize]) {
         let target = self.first_innings_total.unwrap() + 1;
         // Swap so teams[0] is now the chasing side.
         self.teams = [self.teams[1], self.teams[0]];
         self.innings_num = 2;
-        self.innings = Innings::new(
-            self.teams[0], chasing_order, Some(target), bowling_players);
+        self.innings = Innings::new(self.teams[0], chasing_order, Some(target), bowling_players);
     }
 }
 
@@ -357,7 +391,9 @@ pub enum Progression {
 mod tests {
     use super::*;
 
-    fn order() -> Vec<usize> { (0..11).collect() }
+    fn order() -> Vec<usize> {
+        (0..11).collect()
+    }
 
     #[test]
     fn scoring_and_rotation() {
@@ -385,7 +421,9 @@ mod tests {
     fn over_end_swaps_strike() {
         let mut i = Innings::new(0, order(), None, &[11]);
         i.current_bowler = Some(11);
-        for _ in 0..5 { i.apply_ball(&BallOutcome::Runs(0)); }
+        for _ in 0..5 {
+            i.apply_ball(&BallOutcome::Runs(0));
+        }
         assert_eq!(i.striker, 0);
         i.apply_ball(&BallOutcome::Runs(0));
         assert!(i.over_complete());
@@ -430,17 +468,23 @@ mod tests {
     #[test]
     fn chase_win_detection() {
         let mut m = MatchState::new(20, [0, 1], order(), &[11]);
-        let mut i = &mut m.innings;
-        for _ in 0..120 { i.apply_ball(&BallOutcome::Runs(1)); }
+        let i = &mut m.innings;
+        for _ in 0..120 {
+            i.apply_ball(&BallOutcome::Runs(1));
+        }
         assert_eq!(m.innings.runs, 120);
         assert!(m.innings.overs_done(20));
         assert!(m.check_progression().is_some()); // innings break
         m.start_chase(order(), &[0]);
         assert_eq!(m.innings.batting_team, 1);
         assert_eq!(m.innings.target, Some(121));
-        for _ in 0..110 { m.innings.apply_ball(&BallOutcome::Runs(1)); }
+        for _ in 0..110 {
+            m.innings.apply_ball(&BallOutcome::Runs(1));
+        }
         assert!(m.check_progression().is_none()); // 110 < 121
-        for _ in 0..11 { m.innings.apply_ball(&BallOutcome::Six); } // way past
+        for _ in 0..11 {
+            m.innings.apply_ball(&BallOutcome::Six);
+        } // way past
         match m.check_progression() {
             Some(Progression::MatchOver) => {}
             other => panic!("expected match over, got {:?}", other),
@@ -507,7 +551,8 @@ mod tests {
         m.start_chase(order(), &[0]);
         m.wickets_limit = 6;
         for _ in 0..3 {
-            m.innings.apply_ball(&BallOutcome::Wicket(Dismissal::Bowled));
+            m.innings
+                .apply_ball(&BallOutcome::Wicket(Dismissal::Bowled));
         }
         for _ in 0..31 {
             m.innings.apply_ball(&BallOutcome::Runs(1));

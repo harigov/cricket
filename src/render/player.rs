@@ -7,9 +7,9 @@
 //! Also owns kit realism: helmets/caps, batting pads, gloves, a two-piece
 //! bat and soft blob contact shadows under every figure.
 
+use bevy::animation::AnimationPlayer;
 use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNodeIndex};
 use bevy::animation::transition::AnimationTransitions;
-use bevy::animation::AnimationPlayer;
 use bevy::gltf::GltfAssetLabel;
 use std::time::Duration;
 
@@ -18,45 +18,85 @@ use bevy::prelude::*;
 use crate::core::teams::{KitStyle, Team};
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Figure { pub kind: FigureKind }
+pub struct Figure {
+    pub kind: FigureKind,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FigureKind { Batter, NonStriker, Bowler, Keeper, Fielder(usize), Umpire }
+pub enum FigureKind {
+    Batter,
+    NonStriker,
+    Bowler,
+    Keeper,
+    Fielder(usize),
+    Umpire,
+}
 impl FigureKind {
     /// Batters and keepers wear helmets; everyone else gets a cap.
     pub fn wears_helmet(self) -> bool {
-        matches!(self, FigureKind::Batter | FigureKind::NonStriker | FigureKind::Keeper)
+        matches!(
+            self,
+            FigureKind::Batter | FigureKind::NonStriker | FigureKind::Keeper
+        )
     }
 }
 
 #[derive(Component, Default)]
-pub struct Anim { pub state: AnimState }
-
-#[derive(Clone, Copy, Debug)]
-pub enum AnimState {
-    Idle,
-    Run { t: f32 },
-    BowlAction { p: f32 },
-    /// Ease from delivery follow-through back to standing idle.
-    BowlSettle { t: f32 },
-    BatSwing { p: f32 },
-    Throw { p: f32 },
+pub struct Anim {
+    pub state: AnimState,
 }
-impl Default for AnimState { fn default() -> Self { AnimState::Idle } }
+
+#[derive(Clone, Copy, Debug, Default)]
+pub enum AnimState {
+    #[default]
+    Idle,
+    Run {
+        t: f32,
+    },
+    BowlAction {
+        p: f32,
+    },
+    /// Ease from delivery follow-through back to standing idle.
+    BowlSettle {
+        t: f32,
+    },
+    BatSwing {
+        p: f32,
+    },
+    Throw {
+        p: f32,
+    },
+}
 
 #[derive(Component, Debug)]
-pub struct Bone { pub figure: Entity, pub kind: BoneKind }
+pub struct Bone {
+    pub figure: Entity,
+    pub kind: BoneKind,
+}
 
 /// Imported glTF local rotation captured when the bone is first tagged.
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct BoneBindPose(pub Quat);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoneKind {
-    Hips, Spine, Spine1, Spine2, Neck, Head,
-    LeftArm, LeftForeArm, LeftHand,
-    RightArm, RightForeArm, RightHand,
-    LeftUpLeg, LeftLeg, LeftFoot,
-    RightUpLeg, RightLeg, RightFoot,
+    Hips,
+    Spine,
+    Spine1,
+    Spine2,
+    Neck,
+    Head,
+    LeftArm,
+    LeftForeArm,
+    LeftHand,
+    RightArm,
+    RightForeArm,
+    RightHand,
+    LeftUpLeg,
+    LeftLeg,
+    LeftFoot,
+    RightUpLeg,
+    RightLeg,
+    RightFoot,
 }
 fn bone_kind_for_name(name: &str) -> Option<BoneKind> {
     match name {
@@ -88,7 +128,12 @@ pub struct PlayerOf(pub Entity);
 
 /// Which locomotion clip is currently playing on a player entity.
 #[derive(Component, Default, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ClipState { #[default] None, Idle, Run }
+pub enum ClipState {
+    #[default]
+    None,
+    Idle,
+    Run,
+}
 
 /// Animation graph + node indices for the bundled mocap clips.
 #[derive(Resource, Clone)]
@@ -115,10 +160,15 @@ pub fn build_locomotion_clips(app: &mut App) {
         .world_mut()
         .resource_mut::<Assets<AnimationGraph>>()
         .add(graph);
-    app.insert_resource(LocomotionClips { graph, idle: nodes[0], run: nodes[1] });
+    app.insert_resource(LocomotionClips {
+        graph,
+        idle: nodes[0],
+        run: nodes[1],
+    });
 }
 
-#[derive(Component)] pub struct Bat;
+#[derive(Component)]
+pub struct Bat;
 
 /// Team colours carried by the figure root while its glTF scene streams in.
 #[derive(Component, Clone)]
@@ -147,8 +197,17 @@ pub const MODEL_FORWARD_XZ: Vec2 = Vec2::new(-1.0, 0.0);
 pub struct KitStyled;
 
 // Legacy – kept so old queries don't break, but no longer spawned.
-#[derive(Component)] pub struct Part { pub kind: PartKind }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum PartKind { LegL, LegR, ArmL, ArmR }
+#[derive(Component)]
+pub struct Part {
+    pub kind: PartKind,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartKind {
+    LegL,
+    LegR,
+    ArmL,
+    ArmR,
+}
 
 pub fn spawn_figure(
     commands: &mut Commands,
@@ -172,20 +231,22 @@ pub fn spawn_figure(
         cull_mode: None,
         ..Default::default()
     });
-    let fig = commands.spawn((
-        Figure { kind },
-        Anim::default(),
-        TeamKit {
-            primary_color: team.primary_color,
-            secondary_color: team.secondary_color,
-            kit_style: team.kit_style,
-            crest: crest_mat.clone(),
-        },
-        Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
-        Visibility::default(),
-        InheritedVisibility::default(),
-        ViewVisibility::default(),
-    )).id();
+    let fig = commands
+        .spawn((
+            Figure { kind },
+            Anim::default(),
+            TeamKit {
+                primary_color: team.primary_color,
+                secondary_color: team.secondary_color,
+                kit_style: team.kit_style,
+                crest: crest_mat.clone(),
+            },
+            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
+            Visibility::default(),
+            InheritedVisibility::default(),
+            ViewVisibility::default(),
+        ))
+        .id();
     // Soft blob contact shadow – grounds every figure visually.
     let blob_mesh = meshes.add(Circle::new(0.62));
     let blob_mat = materials.add(StandardMaterial {
@@ -249,16 +310,15 @@ fn kit_pattern_image(style: KitStyle, primary: Color, secondary: Color) -> Image
                     (p.red, p.green, p.blue)
                 }
             };
-            data.extend_from_slice(&[
-                (r * 255.0) as u8,
-                (g * 255.0) as u8,
-                (b * 255.0) as u8,
-                255,
-            ]);
+            data.extend_from_slice(&[(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]);
         }
     }
     Image::new(
-        Extent3d { width: S, height: S, depth_or_array_layers: 1 },
+        Extent3d {
+            width: S,
+            height: S,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8UnormSrgb,
@@ -283,7 +343,11 @@ fn blob_shadow_image() -> Image {
         }
     }
     Image::new(
-        Extent3d { width: S, height: S, depth_or_array_layers: 1 },
+        Extent3d {
+            width: S,
+            height: S,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8UnormSrgb,
@@ -298,10 +362,7 @@ pub fn apply_team_kit_materials(
     mut commands: Commands,
     kits: Query<&TeamKit>,
     parents: Query<&ChildOf>,
-    meshes: Query<
-        (Entity, &Name, &MeshMaterial3d<StandardMaterial>),
-        Without<KitStyled>,
-    >,
+    meshes: Query<(Entity, &Name, &MeshMaterial3d<StandardMaterial>), Without<KitStyled>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
@@ -323,8 +384,14 @@ pub fn apply_team_kit_materials(
         if !is_joints && !is_surface {
             continue;
         }
-        let Some(mut mat) = materials.get(&mat_handle.0).cloned() else { continue };
-        let team_col = if is_joints { kit.secondary_color } else { kit.primary_color };
+        let Some(mut mat) = materials.get(&mat_handle.0).cloned() else {
+            continue;
+        };
+        let team_col = if is_joints {
+            kit.secondary_color
+        } else {
+            kit.primary_color
+        };
         let base_srgba = team_col.to_srgba();
         let orig = mat.base_color.to_srgba();
         if is_surface {
@@ -349,10 +416,9 @@ pub fn apply_team_kit_materials(
         mat.metallic = 0.0;
         mat.reflectance = if is_joints { 0.08 } else { 0.06 };
         let cloned = materials.add(mat);
-        commands.entity(entity).insert((
-            MeshMaterial3d(cloned),
-            KitStyled,
-        ));
+        commands
+            .entity(entity)
+            .insert((MeshMaterial3d(cloned), KitStyled));
     }
 }
 
@@ -370,34 +436,46 @@ pub fn tag_skeleton_bones(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let figure_set: std::collections::HashSet<Entity> = figures.iter().map(|(e,_)| e).collect();
+    let figure_set: std::collections::HashSet<Entity> = figures.iter().map(|(e, _)| e).collect();
     let figure_kind: std::collections::HashMap<Entity, FigureKind> =
-        figures.iter().map(|(e,f)| (e, f.kind)).collect();
+        figures.iter().map(|(e, f)| (e, f.kind)).collect();
     // Kit colours per figure (for helmet/cap shells).
     let figure_kit: std::collections::HashMap<Entity, (Color, Color)> = figures
         .iter()
         .filter_map(|(e, _)| {
             // TeamKit lives on the same entity as Figure.
-            kits.get(e).ok().map(|k| (e, (k.primary_color, k.secondary_color)))
+            kits.get(e)
+                .ok()
+                .map(|k| (e, (k.primary_color, k.secondary_color)))
         })
         .collect();
 
     for (ent, name, transform, child_of) in &candidates {
-        let Some(kind) = bone_kind_for_name(name.as_str()) else { continue };
+        let Some(kind) = bone_kind_for_name(name.as_str()) else {
+            continue;
+        };
         let mut cur = child_of.map(|c| c.parent());
         let mut fig_ent = None;
         let mut steps = 0;
         while let Some(p) = cur {
-            if figure_set.contains(&p) { fig_ent = Some(p); break; }
-            if let Ok(child) = parents.get(p) { cur = Some(child.parent()); } else { break; }
+            if figure_set.contains(&p) {
+                fig_ent = Some(p);
+                break;
+            }
+            if let Ok(child) = parents.get(p) {
+                cur = Some(child.parent());
+            } else {
+                break;
+            }
             steps += 1;
-            if steps > 16 { break; }
+            if steps > 16 {
+                break;
+            }
         }
         let Some(fig) = fig_ent else { continue };
-        commands.entity(ent).insert((
-            Bone { figure: fig, kind },
-            BoneBindPose(transform.rotation),
-        ));
+        commands
+            .entity(ent)
+            .insert((Bone { figure: fig, kind }, BoneBindPose(transform.rotation)));
 
         let fk = figure_kind.get(&fig).copied();
         let kit_col = figure_kit.get(&fig).copied();
@@ -406,32 +484,31 @@ pub fn tag_skeleton_bones(
 
         match (kind, fk) {
             (BoneKind::RightHand, Some(FigureKind::Batter | FigureKind::NonStriker)) => {
-                attach_bat(ent, &mut commands, &mut *meshes, &mut *materials);
-                attach_glove(ent, &mut commands, &mut *meshes, &mut *materials, false);
+                attach_bat(ent, &mut commands, &mut meshes, &mut materials);
+                attach_glove(ent, &mut commands, &mut meshes, &mut materials, false);
             }
             (BoneKind::LeftHand, Some(FigureKind::Batter | FigureKind::NonStriker)) => {
-                attach_glove(ent, &mut commands, &mut *meshes, &mut *materials, true);
+                attach_glove(ent, &mut commands, &mut meshes, &mut materials, true);
             }
             (BoneKind::Head, Some(fk)) => {
-                if fk.wears_helmet() && let Some((primary, _)) = kit_col {
-                    attach_helmet(ent, &mut commands, &mut *meshes, &mut *materials, primary);
-                } else if !fk.wears_helmet() && let Some((primary, _)) = kit_col {
-                    attach_cap(ent, &mut commands, &mut *meshes, &mut *materials, primary);
+                if fk.wears_helmet()
+                    && let Some((primary, _)) = kit_col
+                {
+                    attach_helmet(ent, &mut commands, &mut meshes, &mut materials, primary);
+                } else if !fk.wears_helmet()
+                    && let Some((primary, _)) = kit_col
+                {
+                    attach_cap(ent, &mut commands, &mut meshes, &mut materials, primary);
                 }
             }
             (BoneKind::LeftLeg | BoneKind::RightLeg, Some(_)) if is_batter || is_keeper => {
-                attach_pad(ent, &mut commands, &mut *meshes, &mut *materials, is_keeper);
+                attach_pad(ent, &mut commands, &mut meshes, &mut materials, is_keeper);
             }
             (BoneKind::Spine2, Some(_)) => {
                 if crest_done.get(fig).is_err()
                     && let Ok(kit) = kits.get(fig)
                 {
-                    attach_chest_crest(
-                        ent,
-                        &mut commands,
-                        &mut *meshes,
-                        kit.crest.clone(),
-                    );
+                    attach_chest_crest(ent, &mut commands, &mut meshes, kit.crest.clone());
                     commands.entity(fig).insert(CrestAttached);
                 }
             }
@@ -440,29 +517,76 @@ pub fn tag_skeleton_bones(
     }
 }
 
+fn matte(
+    materials: &mut Assets<StandardMaterial>,
+    base_color: Color,
+    perceptual_roughness: f32,
+) -> Handle<StandardMaterial> {
+    materials.add(StandardMaterial {
+        base_color,
+        perceptual_roughness,
+        ..Default::default()
+    })
+}
+
+fn matte_reflectance(
+    materials: &mut Assets<StandardMaterial>,
+    base_color: Color,
+    perceptual_roughness: f32,
+    reflectance: f32,
+) -> Handle<StandardMaterial> {
+    materials.add(StandardMaterial {
+        base_color,
+        perceptual_roughness,
+        reflectance,
+        ..Default::default()
+    })
+}
+
+fn matte_shell(
+    materials: &mut Assets<StandardMaterial>,
+    base_color: Color,
+    perceptual_roughness: f32,
+    reflectance: f32,
+) -> Handle<StandardMaterial> {
+    materials.add(StandardMaterial {
+        base_color,
+        perceptual_roughness,
+        reflectance,
+        metallic: 0.0,
+        ..Default::default()
+    })
+}
+
+fn spawn_mesh_child(
+    parent: Entity,
+    commands: &mut Commands,
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+    transform: Transform,
+) {
+    commands.entity(parent).with_children(|p| {
+        p.spawn((Mesh3d(mesh), MeshMaterial3d(material), transform));
+    });
+}
+
 fn attach_chest_crest(
     spine: Entity,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     crest: Handle<StandardMaterial>,
 ) {
-    commands.entity(spine).with_children(|p| {
-        p.spawn((
-            Mesh3d(meshes.add(Rectangle::new(0.19, 0.19))),
-            MeshMaterial3d(crest),
-            Transform::from_xyz(0.0, 0.11, 0.12)
-                .with_rotation(Quat::from_rotation_x(-0.08)),
-        ));
-    });
+    spawn_mesh_child(
+        spine,
+        commands,
+        meshes.add(Rectangle::new(0.19, 0.19)),
+        crest,
+        Transform::from_xyz(0.0, 0.11, 0.12).with_rotation(Quat::from_rotation_x(-0.08)),
+    );
 }
 
 fn willow_mat(materials: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial> {
-    materials.add(StandardMaterial {
-        base_color: Color::srgb_u8(0xE6, 0xD2, 0xA0),
-        perceptual_roughness: 0.72,
-        reflectance: 0.14,
-        ..Default::default()
-    })
+    matte_reflectance(materials, Color::srgb_u8(0xE6, 0xD2, 0xA0), 0.72, 0.14)
 }
 
 fn attach_bat(
@@ -474,11 +598,7 @@ fn attach_bat(
     let blade = meshes.add(Cuboid::new(0.11, 0.60, 0.046));
     let handle = meshes.add(Capsule3d::new(0.017, 0.26));
     let wood = willow_mat(materials);
-    let grip_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb_u8(0x24, 0x28, 0x30),
-        perceptual_roughness: 0.9,
-        ..Default::default()
-    });
+    let grip_mat = matte(materials, Color::srgb_u8(0x24, 0x28, 0x30), 0.9);
     // Whole bat hangs down-forward from the hands, tilted into a stance.
     let swing = Quat::from_rotation_x(-0.5) * Quat::from_rotation_z(0.15);
     commands.entity(hand).with_children(|p| {
@@ -486,14 +606,12 @@ fn attach_bat(
             Bat,
             Mesh3d(blade),
             MeshMaterial3d(wood.clone()),
-            Transform::from_xyz(0.0, -0.44, 0.10)
-                .with_rotation(swing),
+            Transform::from_xyz(0.0, -0.44, 0.10).with_rotation(swing),
         ));
         p.spawn((
             Mesh3d(handle),
             MeshMaterial3d(grip_mat),
-            Transform::from_xyz(0.0, -0.20, 0.05)
-                .with_rotation(swing),
+            Transform::from_xyz(0.0, -0.20, 0.05).with_rotation(swing),
         ));
     });
 }
@@ -506,20 +624,15 @@ fn attach_glove(
     left: bool,
 ) {
     let glove = meshes.add(Sphere::new(0.062).mesh().ico(2).unwrap());
-    let mat = materials.add(StandardMaterial {
-        base_color: Color::srgb_u8(0xE8, 0xE2, 0xD2),
-        perceptual_roughness: 0.85,
-        ..Default::default()
-    });
+    let mat = matte(materials, Color::srgb_u8(0xE8, 0xE2, 0xD2), 0.85);
     let x = if left { -0.03 } else { 0.03 };
-    commands.entity(hand).with_children(|p| {
-        p.spawn((
-            Mesh3d(glove),
-            MeshMaterial3d(mat),
-            Transform::from_xyz(x, -0.01, 0.045)
-                .with_scale(Vec3::new(1.0, 1.25, 0.85)),
-        ));
-    });
+    spawn_mesh_child(
+        hand,
+        commands,
+        glove,
+        mat,
+        Transform::from_xyz(x, -0.01, 0.045).with_scale(Vec3::new(1.0, 1.25, 0.85)),
+    );
 }
 
 fn attach_helmet(
@@ -533,26 +646,13 @@ fn attach_helmet(
     let shell_col = Color::srgb(s.red * 0.55, s.green * 0.55, s.blue * 0.55);
     let shell = meshes.add(Sphere::new(0.128).mesh().ico(3).unwrap());
     let peak = meshes.add(Cuboid::new(0.17, 0.028, 0.14));
-    let shell_mat = materials.add(StandardMaterial {
-        base_color: shell_col,
-        perceptual_roughness: 0.78,
-        reflectance: 0.12,
-        metallic: 0.0,
-        ..Default::default()
-    });
-    let peak_mat = materials.add(StandardMaterial {
-        base_color: shell_col,
-        perceptual_roughness: 0.82,
-        reflectance: 0.10,
-        metallic: 0.0,
-        ..Default::default()
-    });
+    let shell_mat = matte_shell(materials, shell_col, 0.78, 0.12);
+    let peak_mat = matte_shell(materials, shell_col, 0.82, 0.10);
     commands.entity(head).with_children(|p| {
         p.spawn((
             Mesh3d(shell),
             MeshMaterial3d(shell_mat),
-            Transform::from_xyz(0.0, 0.075, 0.005)
-                .with_scale(Vec3::new(1.0, 1.08, 1.14)),
+            Transform::from_xyz(0.0, 0.075, 0.005).with_scale(Vec3::new(1.0, 1.08, 1.14)),
         ));
         p.spawn((
             Mesh3d(peak),
@@ -571,17 +671,12 @@ fn attach_cap(
 ) {
     let dome = meshes.add(Sphere::new(0.118).mesh().ico(2).unwrap());
     let brim = meshes.add(Cylinder::new(0.105, 0.012));
-    let dome_mat = materials.add(StandardMaterial {
-        base_color: primary,
-        perceptual_roughness: 0.85,
-        ..Default::default()
-    });
+    let dome_mat = matte(materials, primary, 0.85);
     commands.entity(head).with_children(|p| {
         p.spawn((
             Mesh3d(dome),
             MeshMaterial3d(dome_mat.clone()),
-            Transform::from_xyz(0.0, 0.09, 0.0)
-                .with_scale(Vec3::new(1.0, 0.72, 1.0)),
+            Transform::from_xyz(0.0, 0.09, 0.0).with_scale(Vec3::new(1.0, 0.72, 1.0)),
         ));
         p.spawn((
             Mesh3d(brim),
@@ -603,18 +698,14 @@ fn attach_pad(
     let w = if keeper { 0.10 } else { 0.082 };
     let h = if keeper { 0.26 } else { 0.21 };
     let pad = meshes.add(Cuboid::new(w * 2.0, h * 2.0, 0.056));
-    let mat = materials.add(StandardMaterial {
-        base_color: Color::srgb_u8(0xF1, 0xEE, 0xE4),
-        perceptual_roughness: 0.88,
-        ..Default::default()
-    });
-    commands.entity(leg).with_children(|p| {
-        p.spawn((
-            Mesh3d(pad),
-            MeshMaterial3d(mat),
-            Transform::from_xyz(0.0, -h - 0.02, 0.055),
-        ));
-    });
+    let mat = matte(materials, Color::srgb_u8(0xF1, 0xEE, 0xE4), 0.88);
+    spawn_mesh_child(
+        leg,
+        commands,
+        pad,
+        mat,
+        Transform::from_xyz(0.0, -h - 0.02, 0.055),
+    );
 }
 
 /// Hook each auto-spawned `AnimationPlayer` to its owning figure and give it
@@ -632,10 +723,19 @@ pub fn attach_animation_players(
         let mut fig = None;
         let mut steps = 0;
         while let Some(p) = cur {
-            if figures.contains(p) { fig = Some(p); break; }
-            if let Ok(child) = parents.get(p) { cur = Some(child.parent()); } else { break; }
+            if figures.contains(p) {
+                fig = Some(p);
+                break;
+            }
+            if let Ok(child) = parents.get(p) {
+                cur = Some(child.parent());
+            } else {
+                break;
+            }
             steps += 1;
-            if steps > 16 { break; }
+            if steps > 16 {
+                break;
+            }
         }
         let Some(fig) = fig else { continue };
         commands.entity(player_ent).insert((
@@ -705,6 +805,7 @@ pub fn animate_figures(
     clips: Option<Res<LocomotionClips>>,
     mut figures: Query<(Entity, &Figure, &mut Anim)>,
     mut players: Query<(
+        Entity,
         &PlayerOf,
         &mut AnimationPlayer,
         &mut AnimationTransitions,
@@ -715,6 +816,14 @@ pub fn animate_figures(
     let t_global = time.elapsed_secs();
     let blend = (BLEND_RATE * time.delta_secs()).clamp(0.0, 1.0);
 
+    // First match wins, mirroring the previous per-figure linear `find` — a
+    // figure's glTF scene may contain more than one AnimationPlayer.
+    let mut player_by_figure: std::collections::HashMap<Entity, Entity> =
+        std::collections::HashMap::new();
+    for (player_ent, po, ..) in players.iter() {
+        player_by_figure.entry(po.0).or_insert(player_ent);
+    }
+
     for (fig_ent, fig, mut anim) in &mut figures {
         // Which clip (if any) should drive this figure right now?
         let desired = clips
@@ -722,11 +831,11 @@ pub fn animate_figures(
             .and_then(|c| locomotion_clip_for_anim(anim.state, fig.kind, c));
 
         // Find this figure's player and switch clips when needed.
-        let player_state = players
-            .iter_mut()
-            .find(|(po, _, _, _)| po.0 == fig_ent)
-            .map(|(_, mut player, mut transitions, mut cs)| {
-                match desired {
+        let player_state = player_by_figure
+            .get(&fig_ent)
+            .and_then(|&player_ent| players.get_mut(player_ent).ok())
+            .map(
+                |(_, _, mut player, mut transitions, mut cs)| match desired {
                     Some((idx, want)) => {
                         if *cs != want {
                             transitions
@@ -743,8 +852,8 @@ pub fn animate_figures(
                         }
                         false
                     }
-                }
-            })
+                },
+            )
             .unwrap_or(false);
         if player_state {
             continue; // clip drives the skeleton this frame
@@ -797,14 +906,86 @@ struct PoseTargets {
     rf: Quat,
 }
 
-fn rx(a: f32) -> Quat { Quat::from_rotation_x(a) }
-fn ry(a: f32) -> Quat { Quat::from_rotation_y(a) }
-fn rz(a: f32) -> Quat { Quat::from_rotation_z(a) }
+impl PoseTargets {
+    fn delta_for(&self, kind: BoneKind) -> Quat {
+        match kind {
+            BoneKind::Hips => self.hips,
+            BoneKind::Spine => self.spine,
+            BoneKind::Spine1 => self.spine1,
+            BoneKind::Spine2 => self.spine2,
+            BoneKind::Neck => self.neck,
+            BoneKind::Head => Quat::IDENTITY,
+            BoneKind::LeftArm => self.la,
+            BoneKind::RightArm => self.ra,
+            BoneKind::LeftForeArm => self.lfa,
+            BoneKind::RightForeArm => self.rfa,
+            BoneKind::LeftUpLeg => self.lup,
+            BoneKind::RightUpLeg => self.rup,
+            BoneKind::LeftLeg => self.ll,
+            BoneKind::RightLeg => self.rl,
+            BoneKind::LeftFoot => self.lf,
+            BoneKind::RightFoot => self.rf,
+            BoneKind::LeftHand | BoneKind::RightHand => Quat::IDENTITY,
+        }
+    }
+
+    fn set_delta(&mut self, kind: BoneKind, delta: Quat) {
+        match kind {
+            BoneKind::Hips => self.hips = delta,
+            BoneKind::Spine => self.spine = delta,
+            BoneKind::Spine1 => self.spine1 = delta,
+            BoneKind::Spine2 => self.spine2 = delta,
+            BoneKind::Neck => self.neck = delta,
+            BoneKind::LeftArm => self.la = delta,
+            BoneKind::RightArm => self.ra = delta,
+            BoneKind::LeftForeArm => self.lfa = delta,
+            BoneKind::RightForeArm => self.rfa = delta,
+            BoneKind::LeftUpLeg => self.lup = delta,
+            BoneKind::RightUpLeg => self.rup = delta,
+            BoneKind::LeftLeg => self.ll = delta,
+            BoneKind::RightLeg => self.rl = delta,
+            BoneKind::LeftFoot => self.lf = delta,
+            BoneKind::RightFoot => self.rf = delta,
+            BoneKind::Head | BoneKind::LeftHand | BoneKind::RightHand => {}
+        }
+    }
+}
+
+/// Bones blended during bowl follow-through settle.
+const BOWL_SETTLE_BONES: &[BoneKind] = &[
+    BoneKind::Hips,
+    BoneKind::Spine,
+    BoneKind::Spine1,
+    BoneKind::Spine2,
+    BoneKind::Neck,
+    BoneKind::LeftArm,
+    BoneKind::RightArm,
+    BoneKind::LeftForeArm,
+    BoneKind::RightForeArm,
+    BoneKind::LeftUpLeg,
+    BoneKind::RightUpLeg,
+    BoneKind::LeftLeg,
+    BoneKind::RightLeg,
+    BoneKind::LeftFoot,
+    BoneKind::RightFoot,
+];
+
+fn rx(a: f32) -> Quat {
+    Quat::from_rotation_x(a)
+}
+fn ry(a: f32) -> Quat {
+    Quat::from_rotation_y(a)
+}
+fn rz(a: f32) -> Quat {
+    Quat::from_rotation_z(a)
+}
 
 /// Keyframed value over normalised time with smoothstep easing between keys.
 fn kf(points: &[(f32, f32)], p: f32) -> f32 {
     let p = p.clamp(0.0, 1.0);
-    if p <= points[0].0 { return points[0].1; }
+    if p <= points[0].0 {
+        return points[0].1;
+    }
     for w in points.windows(2) {
         let (p0, v0) = w[0];
         let (p1, v1) = w[1];
@@ -867,16 +1048,29 @@ fn run_pose(t: f32, pose: &mut PoseTargets) {
 fn bowl_action(p: f32, pose: &mut PoseTargets) {
     let pc = p.clamp(0.0, 1.0);
     let arm = kf(
-        &[(0.0, 0.5), (0.30, 2.45), (0.45, 2.85), (0.62, -0.95), (0.80, -1.25), (1.0, -1.05)],
+        &[
+            (0.0, 0.5),
+            (0.30, 2.45),
+            (0.45, 2.85),
+            (0.62, -0.95),
+            (0.80, -1.25),
+            (1.0, -1.05),
+        ],
         pc,
     );
     let hips_y = kf(&[(0.0, 0.0), (0.40, -0.18), (0.60, 0.22), (1.0, 0.10)], pc);
     let lean = kf(&[(0.0, 0.0), (0.35, -0.20), (0.62, 0.24), (1.0, 0.14)], pc);
     let front_leg = kf(&[(0.0, 0.0), (0.45, 0.65), (0.62, -0.30), (1.0, -0.12)], pc);
-    let back_leg = kf(&[(0.0, 0.0), (0.50, -0.85), (0.70, -0.55), (1.0, -0.22)], pc);
+    let back_leg = kf(
+        &[(0.0, 0.0), (0.50, -0.85), (0.70, -0.55), (1.0, -0.22)],
+        pc,
+    );
     let counter = kf(&[(0.0, 0.0), (0.35, -1.15), (0.62, -0.25), (1.0, 0.05)], pc);
     pose.ra = rx(arm);
-    pose.rfa = rx(kf(&[(0.0, -0.35), (0.45, -0.15), (0.62, 0.12), (1.0, -0.05)], pc));
+    pose.rfa = rx(kf(
+        &[(0.0, -0.35), (0.45, -0.15), (0.62, 0.12), (1.0, -0.05)],
+        pc,
+    ));
     pose.la = rx(counter) * rz(-0.38);
     pose.hips = ry(hips_y);
     pose.spine = rx(lean);
@@ -894,29 +1088,37 @@ fn bowl_settle(p: f32, pose: &mut PoseTargets) {
     idle_sway(0.0, &mut idle);
     let t = p.clamp(0.0, 1.0);
     let t = t * t * (3.0 - 2.0 * t);
-    pose.hips = end.hips.slerp(idle.hips, t);
-    pose.spine = end.spine.slerp(idle.spine, t);
-    pose.spine1 = end.spine1.slerp(idle.spine1, t);
-    pose.spine2 = end.spine2.slerp(idle.spine2, t);
-    pose.neck = end.neck.slerp(idle.neck, t);
-    pose.la = end.la.slerp(idle.la, t);
-    pose.ra = end.ra.slerp(idle.ra, t);
-    pose.lfa = end.lfa.slerp(idle.lfa, t);
-    pose.rfa = end.rfa.slerp(idle.rfa, t);
-    pose.lup = end.lup.slerp(idle.lup, t);
-    pose.rup = end.rup.slerp(idle.rup, t);
-    pose.ll = end.ll.slerp(idle.ll, t);
-    pose.rl = end.rl.slerp(idle.rl, t);
-    pose.lf = end.lf.slerp(idle.lf, t);
-    pose.rf = end.rf.slerp(idle.rf, t);
+    for &kind in BOWL_SETTLE_BONES {
+        let blended = end.delta_for(kind).slerp(idle.delta_for(kind), t);
+        pose.set_delta(kind, blended);
+    }
 }
 
 /// Bat swing: backlift → decisive downswing through the line → full
 /// follow-through with hip rotation.
 fn bat_swing(p: f32, pose: &mut PoseTargets) {
     let pc = (p.clamp(0.0, 1.0)).min(1.0);
-    let az = kf(&[(0.0, 0.35), (0.20, 0.92), (0.38, 0.80), (0.56, -1.45), (0.76, -2.12), (1.0, -2.28)], pc);
-    let spine_y = kf(&[(0.0, 0.0), (0.26, -0.24), (0.50, -0.04), (0.68, 0.30), (1.0, 0.38)], pc);
+    let az = kf(
+        &[
+            (0.0, 0.35),
+            (0.20, 0.92),
+            (0.38, 0.80),
+            (0.56, -1.45),
+            (0.76, -2.12),
+            (1.0, -2.28),
+        ],
+        pc,
+    );
+    let spine_y = kf(
+        &[
+            (0.0, 0.0),
+            (0.26, -0.24),
+            (0.50, -0.04),
+            (0.68, 0.30),
+            (1.0, 0.38),
+        ],
+        pc,
+    );
     let hips_y = kf(&[(0.0, 0.0), (0.30, -0.14), (0.62, 0.26), (1.0, 0.34)], pc);
     let bend = kf(&[(0.0, 0.85), (0.35, 0.70), (0.56, 0.95), (1.0, 0.55)], pc);
     pose.ra = rz(az * 0.78) * rx(0.26);
@@ -933,7 +1135,16 @@ fn bat_swing(p: f32, pose: &mut PoseTargets) {
 /// Quick underarm-ish return throw with wrist snap.
 fn throw_pose(p: f32, pose: &mut PoseTargets) {
     let pc = p.clamp(0.0, 1.0);
-    let arm = kf(&[(0.0, -0.5), (0.30, -2.25), (0.52, 0.45), (0.78, 0.95), (1.0, 0.65)], pc);
+    let arm = kf(
+        &[
+            (0.0, -0.5),
+            (0.30, -2.25),
+            (0.52, 0.45),
+            (0.78, 0.95),
+            (1.0, 0.65),
+        ],
+        pc,
+    );
     let fore = kf(&[(0.0, -0.7), (0.30, -1.15), (0.52, 0.25), (1.0, 0.10)], pc);
     let twist = kf(&[(0.0, 0.0), (0.35, -0.30), (0.60, 0.35), (1.0, 0.28)], pc);
     pose.ra = rx(arm);
@@ -950,26 +1161,10 @@ fn apply_pose(
     bones: &mut Query<(&Bone, &BoneBindPose, &mut Transform)>,
 ) {
     for (bone, bind, mut tf) in &mut *bones {
-        if bone.figure != fig_ent { continue; }
-        let delta = match bone.kind {
-            BoneKind::Hips => pose.hips,
-            BoneKind::Spine => pose.spine,
-            BoneKind::Spine1 => pose.spine1,
-            BoneKind::Spine2 => pose.spine2,
-            BoneKind::Neck => pose.neck,
-            BoneKind::Head => Quat::IDENTITY,
-            BoneKind::LeftArm => pose.la,
-            BoneKind::RightArm => pose.ra,
-            BoneKind::LeftForeArm => pose.lfa,
-            BoneKind::RightForeArm => pose.rfa,
-            BoneKind::LeftUpLeg => pose.lup,
-            BoneKind::RightUpLeg => pose.rup,
-            BoneKind::LeftLeg => pose.ll,
-            BoneKind::RightLeg => pose.rl,
-            BoneKind::LeftFoot => pose.lf,
-            BoneKind::RightFoot => pose.rf,
-            BoneKind::LeftHand | BoneKind::RightHand => Quat::IDENTITY,
-        };
+        if bone.figure != fig_ent {
+            continue;
+        }
+        let delta = pose.delta_for(bone.kind);
         let target = compose_pose_rotation(bind.0, delta);
         tf.rotation = tf.rotation.slerp(target, blend);
     }
@@ -980,7 +1175,8 @@ pub fn animate_skeleton(
     _time: Res<Time>,
     _figures: Query<(Entity, &Figure, &Anim)>,
     _bones: Query<(&Bone, &mut Transform)>,
-) {}
+) {
+}
 
 #[cfg(test)]
 mod tests {
@@ -996,11 +1192,11 @@ mod tests {
 
     #[test]
     fn face_target_bowler_faces_striker() {
-        let yaw = face_target(
-            Vec2::new(-18.0, 0.35),
-            Vec2::new(9.0, -0.15),
+        let yaw = face_target(Vec2::new(-18.0, 0.35), Vec2::new(9.0, -0.15));
+        assert!(
+            yaw.abs() > 2.9,
+            "bowler should face down the pitch, got {yaw}"
         );
-        assert!(yaw.abs() > 2.9, "bowler should face down the pitch, got {yaw}");
     }
 
     #[test]
@@ -1017,7 +1213,10 @@ mod tests {
     fn compose_pose_identity_delta_restores_bind() {
         let bind = Quat::from_rotation_y(1.2) * Quat::from_rotation_x(0.31);
         let target = compose_pose_rotation(bind, Quat::IDENTITY);
-        assert!(target.dot(bind).abs() > 0.999, "expected bind, got {target:?}");
+        assert!(
+            target.dot(bind).abs() > 0.999,
+            "expected bind, got {target:?}"
+        );
     }
 
     #[test]
@@ -1045,12 +1244,16 @@ mod tests {
                 "{kind:?} should use idle locomotion clip",
             );
             assert!(
-                locomotion_clip_for_anim(AnimState::Idle, kind, &LocomotionClips {
-                    graph: Handle::default(),
-                    idle: AnimationNodeIndex::new(0),
-                    run: AnimationNodeIndex::new(1),
-                })
-                    .is_some(),
+                locomotion_clip_for_anim(
+                    AnimState::Idle,
+                    kind,
+                    &LocomotionClips {
+                        graph: Handle::default(),
+                        idle: AnimationNodeIndex::new(0),
+                        run: AnimationNodeIndex::new(1),
+                    }
+                )
+                .is_some(),
                 "{kind:?} should resolve to idle clip",
             );
         }
@@ -1101,11 +1304,7 @@ mod tests {
 
         let spawn_surface = |world: &mut World, fig: Entity, mat: Handle<StandardMaterial>| {
             world
-                .spawn((
-                    Name::new("Beta_Surface"),
-                    MeshMaterial3d(mat),
-                    ChildOf(fig),
-                ))
+                .spawn((Name::new("Beta_Surface"), MeshMaterial3d(mat), ChildOf(fig)))
                 .id()
         };
 
@@ -1171,7 +1370,10 @@ mod tests {
             .base_color_texture
             .clone()
             .expect("surface kit should have pattern texture");
-        assert_ne!(india_tex, aus_tex, "distinct kits must get distinct pattern textures");
+        assert_ne!(
+            india_tex, aus_tex,
+            "distinct kits must get distinct pattern textures"
+        );
 
         assert!(world.entity(india_mesh).contains::<KitStyled>());
         assert!(world.entity(aus_mesh).contains::<KitStyled>());

@@ -1,7 +1,7 @@
 /// Tournament structures: a multi-team knockout cup played across
 /// different stadiums, with quick-sim for AI vs AI matches.
 use super::rules::{MatchState, Result as MatchResult};
-use super::teams::{batting_order, pick_bowlers, team_rating, Team};
+use super::teams::{Team, batting_order, pick_bowlers, team_rating};
 use super::{stadiums::Stadium, teams};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,7 +40,9 @@ pub struct Fixture {
     pub played_by_user: bool,
 }
 
-impl Fixture { /* winner resolution lives on Tournament (needs world map) */ }
+impl Fixture {
+    /* winner resolution lives on Tournament (needs world map) */
+}
 
 #[derive(Clone, Debug)]
 pub struct Tournament {
@@ -114,14 +116,14 @@ impl Tournament {
 
     /// The fixture the user should play next, if any remain.
     pub fn next_user_fixture(&self) -> Option<(usize, Fixture)> {
-        if self.user_team.is_none() {
-            return None;
-        }
-        self.fixtures.iter().position(|f| {
-            f.result.is_none()
-                && (Some(f.home) == self.user_team
-                    || Some(f.away) == self.user_team)
-        }).map(|i| (i, self.fixtures[i].clone()))
+        self.user_team?;
+        self.fixtures
+            .iter()
+            .position(|f| {
+                f.result.is_none()
+                    && (Some(f.home) == self.user_team || Some(f.away) == self.user_team)
+            })
+            .map(|i| (i, self.fixtures[i].clone()))
     }
 
     /// Next fixture needing a result at all (for sim-to-next-user-match).
@@ -135,8 +137,7 @@ impl Tournament {
     }
 
     /// Record a finished match and propagate winners into later rounds.
-    pub fn record_result(&mut self, idx: usize, state: &MatchState,
-                         played_by_user: bool) {
+    pub fn record_result(&mut self, idx: usize, state: &MatchState, played_by_user: bool) {
         let f = &mut self.fixtures[idx];
         f.result = state.result.clone();
         f.played_by_user = played_by_user;
@@ -147,15 +148,22 @@ impl Tournament {
         let (s1, s2) = {
             let this = &*self;
             (
-                this.fixtures.iter().find(|f| f.stage == Stage::Semifinal1)
+                this.fixtures
+                    .iter()
+                    .find(|f| f.stage == Stage::Semifinal1)
                     .and_then(|f| this.fixture_winner(f)),
-                this.fixtures.iter().find(|f| f.stage == Stage::Semifinal2)
+                this.fixtures
+                    .iter()
+                    .find(|f| f.stage == Stage::Semifinal2)
                     .and_then(|f| this.fixture_winner(f)),
             )
         };
         if let (Some(a), Some(b)) = (s1, s2) {
-            let fin = self.fixtures.iter_mut()
-                .find(|f| f.stage == Stage::Final).unwrap();
+            let fin = self
+                .fixtures
+                .iter_mut()
+                .find(|f| f.stage == Stage::Final)
+                .unwrap();
             fin.home = a;
             fin.away = b;
             // Pick a stadium different from semis when possible.
@@ -173,8 +181,13 @@ impl Tournament {
 
     /// Fast statistical simulation of an innings for AI-vs-AI matches.
     /// Returns total runs for the batting team.
-    pub fn quick_sim_innings(&self, bat_team: &Team, bowl_team: &Team,
-                             seed: u64, overs: u32) -> (u32, u32) {
+    pub fn quick_sim_innings(
+        &self,
+        bat_team: &Team,
+        bowl_team: &Team,
+        seed: u64,
+        overs: u32,
+    ) -> (u32, u32) {
         use teams::hash_f32;
         let order = batting_order(bat_team);
         let bowlers = pick_bowlers(bowl_team, 5);
@@ -202,17 +215,22 @@ impl Tournament {
             } else {
                 let r2 = hash_f32(seed ^ ((balls as u64).wrapping_mul(7919)));
                 let aggressive = bat_skill.clamp(0.4, 0.95);
-                let runs_this_ball = if r2 < 0.08 * aggressive { 6 }
-                    else if r2 < 0.22 * aggressive { 4 }
-                    else if r2 < 0.55 { 1 + (r2 * 10.0) as u32 % 2 }
-                    else { 0 };
+                let runs_this_ball = if r2 < 0.08 * aggressive {
+                    6
+                } else if r2 < 0.22 * aggressive {
+                    4
+                } else if r2 < 0.55 {
+                    1 + (r2 * 10.0) as u32 % 2
+                } else {
+                    0
+                };
                 runs += runs_this_ball;
                 if runs_this_ball % 2 == 1 {
                     std::mem::swap(&mut striker, &mut non_striker);
                 }
             }
             balls += 1;
-            if balls % 6 == 0 {
+            if balls.is_multiple_of(6) {
                 std::mem::swap(&mut striker, &mut non_striker);
             }
         }
@@ -228,9 +246,15 @@ impl Tournament {
         let (r1, _w1) = self.quick_sim_innings(&t1, &t2, seed, overs);
         let (r2, _w2) = self.quick_sim_innings(&t2, &t1, seed ^ 0xBEEF, overs);
         let result = if r1 > r2 {
-            MatchResult::Win { winner: f.home, margin: format!("won by {} runs", r1 - r2) }
+            MatchResult::Win {
+                winner: f.home,
+                margin: format!("won by {} runs", r1 - r2),
+            }
         } else if r2 > r1 {
-            MatchResult::Win { winner: f.away, margin: format!("won by {} wickets", 10) }
+            MatchResult::Win {
+                winner: f.away,
+                margin: format!("won by {} wickets", 10),
+            }
         } else {
             MatchResult::Tie
         };
@@ -250,7 +274,10 @@ mod tests {
             .iter()
             .take(4)
             .enumerate()
-            .map(|(i, t)| Entrant { world_idx: i, team: t.clone() })
+            .map(|(i, t)| Entrant {
+                world_idx: i,
+                team: t.clone(),
+            })
             .collect();
         Tournament::knockout(entrants, builtin_stadiums(), Some(2))
     }

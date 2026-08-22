@@ -29,7 +29,11 @@ pub fn outfield_grass_uv_scale(span_m: f32) -> f32 {
 /// Subtle luminance lift/dip for professional alternating mow stripes.
 #[inline]
 pub fn mow_stripe_multiplier(band_index: u32) -> f32 {
-    if band_index % 2 == 0 { 1.04 } else { 0.96 }
+    if band_index.is_multiple_of(2) {
+        1.04
+    } else {
+        0.96
+    }
 }
 
 /// Near-neutral tint preserving stadium personality relative to [`REFERENCE_OUTFIELD_COLOR`].
@@ -79,7 +83,11 @@ pub fn strip_uv_transform(field_span_m: f32, strip_width_m: f32, strip_x_min_m: 
     let scale_u = outfield_grass_uv_scale(strip_width_m);
     let scale_v = outfield_grass_uv_scale(field_span_m);
     let origin_u = (strip_x_min_m + field_span_m / 2.0) / OUTFIELD_GRASS_TILE_METERS;
-    Affine2::from_scale_angle_translation(Vec2::new(scale_u, scale_v), 0.0, Vec2::new(origin_u, 0.0))
+    Affine2::from_scale_angle_translation(
+        Vec2::new(scale_u, scale_v),
+        0.0,
+        Vec2::new(origin_u, 0.0),
+    )
 }
 
 /// Mip level count for a 2D texture (includes the base level).
@@ -115,11 +123,7 @@ fn linear_to_srgb_byte(c: f32) -> u8 {
 }
 
 /// Box-filter one mip level from an sRGB RGBA8 source (linear-light averaging).
-pub fn box_downsample_rgba8_srgb(
-    src: &[u8],
-    src_w: u32,
-    src_h: u32,
-) -> (Vec<u8>, u32, u32) {
+pub fn box_downsample_rgba8_srgb(src: &[u8], src_w: u32, src_h: u32) -> (Vec<u8>, u32, u32) {
     let dst_w = next_mip_dimension(src_w);
     let dst_h = next_mip_dimension(src_h);
     let mut dst = vec![0u8; (dst_w * dst_h * 4) as usize];
@@ -297,7 +301,10 @@ mod tests {
 
     #[test]
     fn mip_level_count_for_authored_grass_size() {
-        assert_eq!(mip_level_count(AUTHORED_GRASS_ALBEDO_SIZE, AUTHORED_GRASS_ALBEDO_SIZE), 11);
+        assert_eq!(
+            mip_level_count(AUTHORED_GRASS_ALBEDO_SIZE, AUTHORED_GRASS_ALBEDO_SIZE),
+            11
+        );
         assert_eq!(mip_level_count(1024, 1024), 11);
         assert_eq!(mip_level_count(1, 1), 1);
     }
@@ -326,7 +333,10 @@ mod tests {
             h = next_mip_dimension(h);
             levels += 1;
         }
-        assert_eq!(levels, mip_level_count(AUTHORED_GRASS_ALBEDO_SIZE, AUTHORED_GRASS_ALBEDO_SIZE));
+        assert_eq!(
+            levels,
+            mip_level_count(AUTHORED_GRASS_ALBEDO_SIZE, AUTHORED_GRASS_ALBEDO_SIZE)
+        );
         assert_eq!((w, h), (1, 1));
     }
 

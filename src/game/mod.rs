@@ -5,7 +5,7 @@ pub mod match_flow;
 
 use crate::core::rules::{BallOutcome, MatchState, Progression};
 use crate::core::stadiums::{PitchType, Stadium};
-use crate::core::teams::{batting_order, pick_bowlers, Player, Team};
+use crate::core::teams::{Player, Team, batting_order, pick_bowlers};
 use bevy::prelude::*;
 
 /// All static content (teams, stadiums).
@@ -88,17 +88,29 @@ pub enum PhaseEnum {
     #[default]
     Idle,
     /// Waiting for the next delivery.
-    ReadyToBall { t: f32 },
+    ReadyToBall {
+        t: f32,
+    },
     /// Human bowling: choosing length then line.
-    AimLength { t: f32, lock: Option<f32> },
+    AimLength {
+        t: f32,
+        lock: Option<f32>,
+    },
     /// Bowler running in. `p` 0..1.
-    RunUp { p: f32 },
+    RunUp {
+        p: f32,
+    },
     /// Ball has been released and is travelling.
     BallLive,
     /// Showing the outcome of the last ball.
-    ResultPause { t: f32, text: String },
+    ResultPause {
+        t: f32,
+        text: String,
+    },
     /// Between overs: pick next bowler.
-    OverBreak { t: f32 },
+    OverBreak {
+        t: f32,
+    },
     InningsBreak,
     MatchOver,
 }
@@ -132,8 +144,7 @@ impl DeliveryPlan {
         // 0 = terrible line/length, 1 = unplayable.
         let line_pen = (self.line_z.abs() - 0.25).max(0.0) * 1.5;
         let len_ideal = 7.5_f32;
-        let len_pen =
-            ((self.length_from_stumps - len_ideal).abs() / 9.0).min(1.0);
+        let len_pen = ((self.length_from_stumps - len_ideal).abs() / 9.0).min(1.0);
         (1.0 - line_pen.min(1.0) * 0.7 - len_pen * 0.6).clamp(0.05, 1.0)
     }
 }
@@ -216,7 +227,7 @@ impl RecentBalls {
         if self.entries.is_empty() {
             return "—  —  —  —  —  —".into();
         }
-        let mut slots = vec!["—"; 6];
+        let mut slots = ["—"; 6];
         let start = 6usize.saturating_sub(self.entries.len());
         for (i, sym) in self.entries.iter().enumerate() {
             slots[start + i] = sym.as_str();
@@ -257,8 +268,11 @@ impl Plugin for GameplayPlugin {
 pub fn build_active_match(setup: &MatchSetup, wd: &WorldData) -> ActiveMatch {
     let team_a = &wd.teams[setup.teams[0]];
     let team_b = &wd.teams[setup.teams[1]];
-    let (bat_first, bowl_first) =
-        if setup.user_bats_first { (team_a, team_b) } else { (team_b, team_a) };
+    let (bat_first, bowl_first) = if setup.user_bats_first {
+        (team_a, team_b)
+    } else {
+        (team_b, team_a)
+    };
     let order = batting_order(bat_first);
     let bowlers = pick_bowlers(bowl_first, 5);
     let mut state = MatchState::new(
