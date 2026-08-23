@@ -368,6 +368,33 @@ impl AutotestMode {
     }
 }
 
+/// `CRICKET_AUTOTEST_SCALE` dilates every scripted instant (default 1.0).
+/// Values below 1 are ignored so a typo cannot make the script unrunnable.
+fn autotest_time_scale() -> f32 {
+    std::env::var("CRICKET_AUTOTEST_SCALE")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|s| *s >= 1.0)
+        .unwrap_or(1.0)
+}
+
+/// `CRICKET_AUTOTEST_HOLD` keeps the app alive for extra scripted seconds after
+/// the last milestone. Screenshots are written by the render world a frame or
+/// two later, which a software rasteriser can take tens of seconds to reach.
+fn autotest_hold() -> f32 {
+    std::env::var("CRICKET_AUTOTEST_HOLD")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|h| *h >= 0.0)
+        .unwrap_or(0.0)
+}
+
+/// `CRICKET_SHOT_PREFIX` renames milestone captures so successive runs do not
+/// overwrite each other. Defaults to the historic `/tmp/opencode/auto-`.
+fn shot_prefix() -> String {
+    std::env::var("CRICKET_SHOT_PREFIX").unwrap_or_else(|_| "/tmp/opencode/auto-".to_string())
+}
+
 fn autotest_drive(
     time: Res<Time<bevy::time::Real>>,
     mut input: ResMut<input::PlayerInput>,
@@ -384,8 +411,12 @@ fn autotest_drive(
         return;
     };
     let script = mode.script();
+    // The scripts are timed against a GPU running at display rate. Under a
+    // software rasteriser (Xvfb + lavapipe, used for headless captures) menu
+    // transitions need several times as long, so every instant can be dilated.
+    let scale = autotest_time_scale();
     *t += time.delta_secs();
-    let now = *t;
+    let now = *t / scale;
 
     for (i, (when, action)) in script.presses.iter().enumerate() {
         let step = i as u32 + 1;
@@ -416,11 +447,11 @@ fn autotest_drive(
     for (i, when) in script.milestones.iter().enumerate() {
         let step = 100 + i as u32;
         if now >= *when && *last_milestone < step {
-            save_shot(&mut commands, format!("/tmp/opencode/auto-{i}.png"));
+            save_shot(&mut commands, format!("{}{i}.png", shot_prefix()));
             *last_milestone = step;
         }
     }
-    if now >= script.end_time && *last_milestone < 200 {
+    if now >= script.end_time + autotest_hold() && *last_milestone < 200 {
         *last_milestone = 200;
         exit.write(AppExit::Success);
     }
