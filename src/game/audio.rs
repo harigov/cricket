@@ -69,7 +69,11 @@ pub struct MatchFingerprint {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommentaryLifecycle {
     pub match_fp: Option<MatchFingerprint>,
+    /// Set at every match-session reset; consumed when the welcome line is dispatched.
+    pub match_intro_pending: bool,
     pub welcome_played: bool,
+    /// While true, non-welcome commentary is deferred so the opening line is not talked over.
+    pub intro_open: bool,
     pub deliveries_completed: u32,
     /// Innings number for which `innings_break` has already been called.
     pub innings_break_played_for: u8,
@@ -863,6 +867,8 @@ pub fn reset_commentary_history_for_match_session(
     history.last_indices.clear();
     history.lifecycle = CommentaryLifecycle {
         match_fp: Some(MatchFingerprint { teams, overs }),
+        match_intro_pending: true,
+        intro_open: true,
         ..CommentaryLifecycle::default()
     };
     history.striker_runs = 0;
@@ -891,6 +897,28 @@ pub fn should_play_welcome(
         && legal_balls == 0
         && runs == 0
         && lc.deliveries_completed == 0
+}
+
+/// Consume `match_intro_pending` when match facts are pristine; abandon if play has begun.
+pub fn consume_match_intro_pending(
+    lc: &mut CommentaryLifecycle,
+    innings_num: u8,
+    legal_balls: u32,
+    runs: u32,
+) -> bool {
+    if !lc.match_intro_pending {
+        return false;
+    }
+    if lc.deliveries_completed > 0 {
+        lc.match_intro_pending = false;
+        return false;
+    }
+    if !should_play_welcome(lc, innings_num, legal_balls, runs) {
+        return false;
+    }
+    lc.match_intro_pending = false;
+    lc.welcome_played = true;
+    true
 }
 
 pub fn priority_for_category(category: &str) -> CommentaryPriority {
@@ -947,7 +975,14 @@ fn request_commentary(
     variant: Option<usize>,
     priority: CommentaryPriority,
 ) -> f32 {
+    if ctx.history.lifecycle.intro_open && category != "welcome" {
+        return 0.0;
+    }
     if ctx.playing.remaining > 0.25 {
+        info!(
+            "Commentary requested: {category} (priority {:?}, queued — slot busy)",
+            priority
+        );
         schedule_commentary(ctx.scheduler, category, variant, priority);
         return 0.0;
     }
@@ -957,6 +992,10 @@ fn request_commentary(
     {
         ctx.scheduler.pending = None;
     }
+    info!(
+        "Commentary requested: {category} (priority {:?}, playing now)",
+        priority
+    );
     play_commentary(commands, ctx, category, variant)
 }
 
@@ -970,6 +1009,9 @@ fn play_commentary(
     variant: Option<usize>,
 ) -> f32 {
     if ctx.settings.commentary == CommentaryVoice::Off {
+        return 0.0;
+    }
+    if ctx.history.lifecycle.intro_open && category != "welcome" {
         return 0.0;
     }
     if ctx.playing.remaining > 0.25 {
@@ -1022,7 +1064,34 @@ fn play_commentary(
     let file_key = format!("{role}/{category}_{:02}.ogg", idx + 1);
     let dur = ctx.durations.0.get(&file_key).copied().unwrap_or(2.5) + 0.15; // small tail before next clip may start
     ctx.playing.remaining = dur;
+    info!(
+        "Commentary playing: {category} variant {:02} role {role} ({:.2}s)",
+        idx + 1,
+        dur
+    );
     dur
+}
+
+fn try_dispatch_match_intro(
+    commands: &mut Commands,
+    ctx: &mut CommentaryCtx<'_>,
+    m: &crate::game::ActiveMatch,
+) {
+    if !consume_match_intro_pending(
+        &mut ctx.history.lifecycle,
+        m.state.innings_num,
+        m.state.innings.legal_balls,
+        m.state.innings.runs,
+    ) {
+        return;
+    }
+    request_commentary(
+        commands,
+        ctx,
+        "welcome",
+        None,
+        CommentaryPriority::Welcome,
+    );
 }
 
 fn commentary_on_match_enter(
@@ -1038,7 +1107,13 @@ fn commentary_on_match_enter(
     result_edge.in_result_pause = false;
 }
 
-fn commentary_update(mut commands: Commands, time: Res<Time>, mut commentary: CommentaryParam) {
+fn commentary_update(
+    mut commands: Commands,
+    time: Res<Time>,
+    state: Res<State<crate::state::AppState>>,
+    am: Option<Res<crate::game::ActiveMatch>>,
+    mut commentary: CommentaryParam,
+) {
     if commentary.history.routine_cooldown > 0.0 {
         commentary.history.routine_cooldown -= time.delta_secs();
     }
@@ -1048,6 +1123,17 @@ fn commentary_update(mut commands: Commands, time: Res<Time>, mut commentary: Co
         if commentary.playing.remaining < 0.0 {
             commentary.playing.remaining = 0.0;
         }
+    }
+    if *state.get() == crate::state::AppState::InMatch {
+        if let (Some(mut ctx), Some(m)) = (commentary.ctx_mut(), am.as_deref()) {
+            try_dispatch_match_intro(&mut commands, &mut ctx, m);
+        }
+    }
+    if commentary.history.lifecycle.intro_open
+        && commentary.history.lifecycle.welcome_played
+        && commentary.playing.remaining <= 0.0
+    {
+        commentary.history.lifecycle.intro_open = false;
     }
     // Dispatch any priority-queued lead call once the slot opens.
     if let Some(mut ctx) = commentary.ctx_mut() {
@@ -1094,6 +1180,9 @@ fn commentary_on_result(
     mut result_edge: ResMut<CommentaryResultPauseEdge>,
 ) {
     if commentary.handles.is_none() || commentary.durations.is_none() {
+        return;
+    }
+    if commentary.history.lifecycle.intro_open {
         return;
     }
     let in_result_pause = matches!(&phase.0, crate::game::PhaseEnum::ResultPause { .. });
@@ -1313,23 +1402,8 @@ fn commentary_on_phase(
                 CommentaryPriority::Phase,
             );
         }
-        crate::game::PhaseEnum::ReadyToBall { t } if *t < 0.2 => {
+        crate::game::PhaseEnum::ReadyToBall { .. } => {
             if let Some(m) = am.as_deref() {
-                if should_play_welcome(
-                    &ctx.history.lifecycle,
-                    m.state.innings_num,
-                    m.state.innings.legal_balls,
-                    m.state.innings.runs,
-                ) {
-                    ctx.history.lifecycle.welcome_played = true;
-                    request_commentary(
-                        &mut commands,
-                        &mut ctx,
-                        "welcome",
-                        None,
-                        CommentaryPriority::Welcome,
-                    );
-                }
                 ctx.history.over_start_runs = m.state.innings.runs;
                 ctx.history.over_start_valid = true;
             }
@@ -1570,6 +1644,59 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn match_intro_pending_dispatches_once_at_pristine_start() {
+        let mut lc = fresh_lifecycle();
+        lc.match_intro_pending = true;
+        assert!(consume_match_intro_pending(&mut lc, 1, 0, 0));
+        assert!(!lc.match_intro_pending);
+        assert!(lc.welcome_played);
+        assert!(!consume_match_intro_pending(&mut lc, 1, 0, 0));
+    }
+
+    #[test]
+    fn match_intro_pending_waits_for_pristine_state() {
+        let mut lc = fresh_lifecycle();
+        lc.match_intro_pending = true;
+        assert!(!consume_match_intro_pending(&mut lc, 1, 1, 0));
+        assert!(lc.match_intro_pending);
+        assert!(!lc.welcome_played);
+        assert!(consume_match_intro_pending(&mut lc, 1, 0, 0));
+    }
+
+    #[test]
+    fn match_intro_pending_abandoned_after_first_delivery() {
+        let mut lc = fresh_lifecycle();
+        lc.match_intro_pending = true;
+        lc.deliveries_completed = 1;
+        assert!(!consume_match_intro_pending(&mut lc, 1, 1, 4));
+        assert!(!lc.match_intro_pending);
+        assert!(!lc.welcome_played);
+    }
+
+    #[test]
+    fn lifecycle_sets_match_intro_pending_on_rematch() {
+        let mut history = CommentaryHistory {
+            lifecycle: {
+                let mut lc = fresh_lifecycle();
+                lc.match_intro_pending = false;
+                lc.welcome_played = true;
+                lc.intro_open = false;
+                lc.deliveries_completed = 42;
+                lc
+            },
+            striker_runs: 87,
+            team_runs: 120,
+            consecutive_dots: 2,
+            ..Default::default()
+        };
+        reset_commentary_history_for_match_session(&mut history, [0, 1], 20);
+        assert!(history.lifecycle.match_intro_pending);
+        assert!(history.lifecycle.intro_open);
+        assert!(!history.lifecycle.welcome_played);
+        assert_eq!(history.lifecycle.deliveries_completed, 0);
     }
 
     #[test]
