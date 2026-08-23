@@ -1536,6 +1536,11 @@ fn spawn_landforms(
     let backdrop = ctx.materials.add(StandardMaterial {
         base_color: Color::WHITE,
         unlit: true,
+        // These rings carry their own aerial perspective in the vertex colours,
+        // and they sit past 400 m where the camera's own haze is already deep.
+        // Letting both apply washed the snow line back out into the sky — the
+        // exact thing baking the shading was meant to stop.
+        fog_enabled: false,
         ..default()
     });
     let water = ctx.materials.add(StandardMaterial {

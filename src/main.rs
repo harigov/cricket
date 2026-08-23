@@ -282,10 +282,12 @@ impl AutotestMode {
                 switches_to_night: true,
                 swings: true,
             },
+            // The establishing orbit is short and its exact instant drifts with
+            // frame rate, so this brackets it rather than betting on one moment.
             Self::Stadium => AutotestScript {
                 presses: QUICK_MATCH_PRESSES,
-                milestones: &[32.0],
-                end_time: 36.0,
+                milestones: &[30.0, 32.0, 34.0, 38.0],
+                end_time: 42.0,
                 switches_to_night: false,
                 swings: false,
             },
