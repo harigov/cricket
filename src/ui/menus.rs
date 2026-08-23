@@ -2573,6 +2573,9 @@ fn start_quick_match(
     } else {
         ms.stadium_idx
     };
+    // Smoke tests pick a venue randomly, which makes it impossible to capture a
+    // named ground on purpose. CRICKET_STADIUM pins one by index.
+    let stadium = forced_stadium_index(wd.stadiums.len()).unwrap_or(stadium);
     commands.insert_resource(MatchSetup {
         teams: [ms.team, ms.opp],
         stadium,
@@ -2582,6 +2585,17 @@ fn start_quick_match(
     });
     info!("Starting quick match");
     next_state.set(AppState::InMatch);
+}
+
+/// Venue override for automated captures: `CRICKET_STADIUM=<index>`.
+/// Out-of-range or unparseable values are ignored.
+fn forced_stadium_index(count: usize) -> Option<usize> {
+    std::env::var("CRICKET_STADIUM")
+        .ok()?
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|idx| *idx < count)
 }
 
 fn launch_tournament_match(
