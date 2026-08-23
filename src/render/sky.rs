@@ -4,8 +4,6 @@
 //! plateau is not the air over an alpine valley, and the sky is the largest
 //! single surface on screen, so it carries most of the theme.
 
-use std::sync::{Arc, Mutex, PoisonError};
-
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
@@ -228,40 +226,6 @@ pub fn create_sky_texture(night: bool) -> Image {
     create_themed_sky_texture(DEFAULT_SKY_THEME, night)
 }
 
-/// Cached texels for the theme most recently asked for.
-///
-/// A stadium is rebuilt whenever the match scene is (innings change, replay
-/// setup), and painting two million texels of fractal noise on each rebuild
-/// would land squarely in `build_stadium`'s frame budget. One slot is enough:
-/// a build only ever asks for its own theme.
-static SKY_TEXEL_CACHE: Mutex<Option<CachedSky>> = Mutex::new(None);
-
-struct CachedSky {
-    theme: StadiumEnvironment,
-    night: bool,
-    texels: Arc<Vec<u8>>,
-}
-
-/// Sky texels for `theme`, painting them only if the cache holds another sky.
-fn themed_sky_texels(theme: StadiumEnvironment, night: bool) -> Arc<Vec<u8>> {
-    let mut slot = SKY_TEXEL_CACHE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    if let Some(cached) = slot.as_ref()
-        && cached.theme == theme
-        && cached.night == night
-    {
-        return cached.texels.clone();
-    }
-    let texels = Arc::new(paint_sky_texels(theme, night));
-    *slot = Some(CachedSky {
-        theme,
-        night,
-        texels: texels.clone(),
-    });
-    texels
-}
-
 fn paint_sky_texels(theme: StadiumEnvironment, night: bool) -> Vec<u8> {
     let mut data = Vec::with_capacity((SKY_W * SKY_H * 4) as usize);
     for y in 0..SKY_H {
@@ -282,7 +246,7 @@ fn paint_sky_texels(theme: StadiumEnvironment, night: bool) -> Vec<u8> {
 
 /// Build a sky texture image in a stadium theme's own palette.
 pub fn create_themed_sky_texture(theme: StadiumEnvironment, night: bool) -> Image {
-    let data = themed_sky_texels(theme, night).as_ref().clone();
+    let data = paint_sky_texels(theme, night);
     let mut img = Image::new(
         Extent3d {
             width: SKY_W,

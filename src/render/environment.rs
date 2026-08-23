@@ -24,12 +24,11 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::core::stadiums::StadiumEnvironment;
-use crate::render::DayEnvironmentLight;
 use crate::render::ring_geometry::{
     GroundPalette, ring_position, ring_segment_transform, stadium_ground_disc_mesh_tinted,
     stadium_ground_radius,
 };
-use crate::render::sky::{create_themed_sky_texture, sky_hash, sky_horizon_color};
+use crate::render::sky::{sky_hash, sky_horizon_color};
 use crate::render::stadium::{StadiumBuildCtx, track_spawn};
 
 /// Marker for every entity belonging to the themed surroundings.
@@ -43,7 +42,6 @@ const PROP_INNER_MARGIN: f32 = 45.0;
 /// Props stop short of the apron rim so nothing straddles the horizon fade.
 const PROP_OUTER_MARGIN: f32 = 18.0;
 /// Themed dome radius — just inside the shared 600 m sky sphere it hides by day.
-const THEME_SKY_RADIUS: f32 = 596.0;
 /// Matches the shared sky sphere's offset so the two horizons coincide.
 const SKY_DOME_DROP: f32 = -6.0;
 /// Segment count of the apron disc, mirroring `build_stadium`.
@@ -1222,7 +1220,6 @@ pub(crate) fn spawn_environment(
     let layout = EnvLayout::new(ctx.bowl.outer_radius());
 
     retint_ground(ctx, theme);
-    spawn_theme_sky(p, ctx, theme, spawn_count);
     spawn_landforms(p, ctx, theme, &layout, spawn_count);
 
     for group in theme_prop_groups(theme, &layout) {
@@ -1268,44 +1265,6 @@ fn retint_ground(ctx: &mut StadiumBuildCtx<'_>, theme: StadiumEnvironment) {
         material.perceptual_roughness = roughness;
         material.reflectance = reflectance;
     }
-}
-
-/// Themed sky dome, nested just inside the shared 600 m sphere.
-///
-/// The shared dome is spawned before any stadium exists and its texture is
-/// swapped between day and night by `update_stadium_time`, so rather than
-/// fighting over it this hangs a themed daytime shell inside it and tags it
-/// with the existing [`DayEnvironmentLight`] visibility group: by day the
-/// themed sky occludes the generic one, and at night it hides and reveals the
-/// shared starfield behind it.
-fn spawn_theme_sky(
-    p: &mut ChildSpawnerCommands,
-    ctx: &mut StadiumBuildCtx<'_>,
-    theme: StadiumEnvironment,
-    spawn_count: &mut usize,
-) {
-    let texture = ctx.images.add(create_themed_sky_texture(theme, false));
-    let material = ctx.materials.add(StandardMaterial {
-        base_color_texture: Some(texture),
-        unlit: true,
-        cull_mode: None,
-        double_sided: true,
-        fog_enabled: false,
-        ..default()
-    });
-    let mesh = ctx
-        .meshes
-        .add(Sphere::new(THEME_SKY_RADIUS).mesh().uv(32, 32));
-    p.spawn((
-        EnvironmentProp,
-        DayEnvironmentLight,
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        Transform::from_translation(Vec3::Y * SKY_DOME_DROP),
-        NotShadowCaster,
-        NotShadowReceiver,
-    ));
-    track_spawn(spawn_count);
 }
 
 fn spawn_landforms(

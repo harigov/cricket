@@ -54,7 +54,7 @@ impl PitchType {
 
 /// The world the stadium sits in. Drives the surroundings, sky and ground tint
 /// rendered outside the bowl (see `crate::render::environment`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum StadiumEnvironment {
     /// Dense downtown: towers and skyscrapers crowd the skyline.
     Metropolis,

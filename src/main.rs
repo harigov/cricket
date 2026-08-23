@@ -18,7 +18,8 @@ use game::*;
 use render::camera_rig::CameraRig;
 use render::sky::{create_sky_texture, sky_texture_for_time};
 use render::{
-    DayEnvironmentLight, FloodlightFixture, FloodlightMaterials, NightEnvironmentLight, SkyTextures,
+    DayEnvironmentLight, FloodlightFixture, FloodlightMaterials, NightEnvironmentLight,
+    SkyTextureCache, SkyTextures,
 };
 use state::{AppState, MatchPaused, RebuildScene};
 /// Gameplay systems only run while the match resources actually exist
@@ -131,8 +132,10 @@ fn register_match_systems(app: &mut App) {
 fn main() {
     let mut app = App::new();
     register_core_plugins(&mut app);
-    app.add_systems(Startup, setup_basics)
-        .add_systems(Update, (update_stadium_time, toggle_day_night));
+    app.add_systems(Startup, setup_basics).add_systems(
+        Update,
+        (sync_sky_theme, update_stadium_time, toggle_day_night).chain(),
+    );
     register_match_systems(&mut app);
     app.add_systems(Update, debug_screenshot)
         .add_systems(PreUpdate, autotest_drive.after(input::poll_input))
@@ -543,7 +546,9 @@ fn setup_basics(
     commands.insert_resource(SkyTextures {
         day: day_tex.clone(),
         night: night_tex.clone(),
+        theme: render::sky::DEFAULT_SKY_THEME,
     });
+    commands.init_resource::<SkyTextureCache>();
     let sky_mat = materials.add(StandardMaterial {
         base_color_texture: Some(day_tex),
         unlit: true,
@@ -629,6 +634,39 @@ fn setup_basics(
     let _ = materials.add(Color::WHITE);
 }
 
+/// Repaint the shared sky dome in the current ground's palette.
+///
+/// The dome is spawned at startup, long before a stadium is chosen, so the
+/// theme has to arrive later. `SkyTextures` changing is what tells
+/// `update_stadium_time` to swap the material over.
+fn sync_sky_theme(
+    setup: Option<Res<game::MatchSetup>>,
+    world_data: Option<Res<game::WorldData>>,
+    state: Res<State<AppState>>,
+    mut cache: ResMut<SkyTextureCache>,
+    mut sky_textures: ResMut<SkyTextures>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let wanted = match (state.get(), setup.as_ref(), world_data.as_ref()) {
+        (AppState::InMatch, Some(setup), Some(wd)) => wd
+            .stadiums
+            .get(setup.stadium)
+            .map(|s| s.environment)
+            .unwrap_or(render::sky::DEFAULT_SKY_THEME),
+        // Menus sit under the generic sky.
+        _ => render::sky::DEFAULT_SKY_THEME,
+    };
+    if sky_textures.theme == wanted {
+        return;
+    }
+    let (day, night) = cache.get_or_paint(wanted, &mut images);
+    *sky_textures = SkyTextures {
+        day,
+        night,
+        theme: wanted,
+    };
+}
+
 fn update_stadium_time(
     time: Res<StadiumTime>,
     sky_textures: Res<SkyTextures>,
@@ -655,7 +693,7 @@ fn update_stadium_time(
     >,
     fixture_mats: Option<Res<FloodlightMaterials>>,
 ) {
-    if !time.is_changed() {
+    if !time.is_changed() && !sky_textures.is_changed() {
         return;
     }
     let is_night = *time == StadiumTime::Night;

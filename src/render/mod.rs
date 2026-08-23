@@ -19,11 +19,47 @@ pub struct NightEnvironmentLight;
 #[derive(Component)]
 pub struct FloodlightFixture;
 
-/// Cached procedural sky textures (generated once at startup).
+/// Sky textures currently hanging on the shared dome.
+///
+/// Painting 2 M texels of fractal noise is not something to do per frame, so
+/// the dome keeps one day/night pair and [`SkyTextureCache`] holds every pair
+/// painted so far. `theme` records which stadium's air is on the dome.
 #[derive(Resource)]
 pub struct SkyTextures {
     pub day: Handle<Image>,
     pub night: Handle<Image>,
+    pub theme: crate::core::stadiums::StadiumEnvironment,
+}
+
+/// Day/night sky textures painted so far, keyed by theme.
+///
+/// A tournament revisits grounds, and repainting a sky the player has already
+/// seen would stall the frame that builds the stadium.
+#[derive(Resource, Default)]
+pub struct SkyTextureCache {
+    by_theme: std::collections::HashMap<
+        crate::core::stadiums::StadiumEnvironment,
+        (Handle<Image>, Handle<Image>),
+    >,
+}
+
+impl SkyTextureCache {
+    /// Day and night handles for `theme`, painting them on first request.
+    pub fn get_or_paint(
+        &mut self,
+        theme: crate::core::stadiums::StadiumEnvironment,
+        images: &mut Assets<Image>,
+    ) -> (Handle<Image>, Handle<Image>) {
+        self.by_theme
+            .entry(theme)
+            .or_insert_with(|| {
+                (
+                    images.add(sky::create_themed_sky_texture(theme, false)),
+                    images.add(sky::create_themed_sky_texture(theme, true)),
+                )
+            })
+            .clone()
+    }
 }
 
 /// Day/night emissive materials for floodlight fixtures.
