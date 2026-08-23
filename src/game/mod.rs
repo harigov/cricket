@@ -264,6 +264,15 @@ impl Plugin for GameplayPlugin {
     }
 }
 
+/// Whether the local player's team bats first after the toss.
+pub fn user_bats_first_from_toss(user_team: usize, toss_winner: usize, elects_bat: bool) -> bool {
+    if toss_winner == user_team {
+        elects_bat
+    } else {
+        !elects_bat
+    }
+}
+
 /// Build a fresh ActiveMatch from setup info.
 pub fn build_active_match(setup: &MatchSetup, wd: &WorldData) -> ActiveMatch {
     let team_a = &wd.teams[setup.teams[0]];
@@ -291,5 +300,22 @@ pub fn build_active_match(setup: &MatchSetup, wd: &WorldData) -> ActiveMatch {
         stadium: setup.stadium,
         user_team: Some(setup.teams[0]),
         bowler_player: bowlers[0],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_bats_first_when_user_wins_and_elects_bat() {
+        assert!(user_bats_first_from_toss(2, 2, true));
+        assert!(!user_bats_first_from_toss(2, 2, false));
+    }
+
+    #[test]
+    fn user_bats_first_when_opposition_wins_and_elects_bowl() {
+        assert!(user_bats_first_from_toss(2, 5, false));
+        assert!(!user_bats_first_from_toss(2, 5, true));
     }
 }
