@@ -130,6 +130,7 @@ impl Plugin for RenderPlugin {
         app.add_systems(
             Update,
             (
+                player::disable_figure_frustum_culling,
                 player::tag_skeleton_bones,
                 player::apply_team_kit_materials,
                 player::attach_animation_players,
