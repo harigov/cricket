@@ -172,6 +172,10 @@ enum AutotestMode {
     Night,
     Stadium,
     StadiumNight,
+    /// Team picker: exercises grid navigation (Right / Down) and captures it.
+    Menus,
+    /// Enters a match then opens the pause overlay with Esc.
+    Pause,
 }
 
 struct AutotestScript {
@@ -209,6 +213,8 @@ impl AutotestMode {
             "night" => Some(Self::Night),
             "stadium" => Some(Self::Stadium),
             "stadium-night" => Some(Self::StadiumNight),
+            "menus" => Some(Self::Menus),
+            "pause" => Some(Self::Pause),
             _ => None,
         }
     }
@@ -268,6 +274,42 @@ impl AutotestMode {
                 milestones: &[18.0],
                 end_time: 24.0,
                 switches_to_night: true,
+                swings: false,
+            },
+            // Sits on the team grid and steps across a row then down a row, so
+            // the capture shows whether the highlight tracks the arrow keys.
+            Self::Menus => AutotestScript {
+                presses: [
+                    (2.0, input::Action::Confirm), // Quick Match -> team select
+                    (3.0, input::Action::Right),   // across one column
+                    (3.6, input::Action::Right),
+                    (4.2, input::Action::Next), // down one row
+                    (5.2, input::Action::Confirm), // lock team -> opponent grid
+                    (6.2, input::Action::Right),
+                    (6.8, input::Action::Next),
+                    (99.0, input::Action::Confirm),
+                    (99.5, input::Action::Confirm),
+                ],
+                milestones: &[3.4, 4.8, 5.8, 7.4],
+                end_time: 9.0,
+                switches_to_night: false,
+                swings: false,
+            },
+            Self::Pause => AutotestScript {
+                presses: [
+                    (2.0, input::Action::Confirm),
+                    (3.5, input::Action::Confirm),
+                    (5.0, input::Action::Confirm),
+                    (6.5, input::Action::Confirm),
+                    (8.0, input::Action::Confirm),
+                    (13.0, input::Action::Confirm), // toss: elect to bat
+                    (14.5, input::Action::Confirm), // toss summary -> match
+                    (18.0, input::Action::Cancel),  // Esc: open pause overlay
+                    (21.0, input::Action::Next),    // move down the pause list
+                ],
+                milestones: &[19.0, 22.0],
+                end_time: 24.0,
+                switches_to_night: false,
                 swings: false,
             },
             Self::Quick => AutotestScript {
