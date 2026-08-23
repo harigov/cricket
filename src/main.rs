@@ -181,7 +181,7 @@ enum AutotestMode {
 }
 
 struct AutotestScript {
-    presses: [(f32, input::Action); 9],
+    presses: [(f32, input::Action); 12],
     milestones: &'static [f32],
     end_time: f32,
     switches_to_night: bool,
@@ -191,16 +191,23 @@ struct AutotestScript {
 // The toss adds a flip, a result slide, a bat/bowl choice and a summary
 // between the venue pick and the first ball; the flip and result slides
 // auto-advance, the other two wait for Confirm.
-const QUICK_MATCH_PRESSES: [(f32, input::Action); 9] = [
+const QUICK_MATCH_PRESSES: [(f32, input::Action); 12] = [
     (2.0, input::Action::Confirm),  // Quick Match -> team select
     (3.5, input::Action::Confirm),  // pick your team
     (5.0, input::Action::Confirm),  // pick opponent
     (6.5, input::Action::Confirm),  // overs
     (8.0, input::Action::Confirm),  // stadium (random)
-    (13.0, input::Action::Confirm), // toss: elect to bat
-    (14.5, input::Action::Confirm), // toss summary -> match starts
+    // The toss slides auto-advance on Time<Virtual>, whose delta Bevy clamps
+    // to 0.25 s. An unfocused window updates about once a second, so the 3.5 s
+    // of slides can take ~14 s of wall clock here. Spread the remaining
+    // confirms wide enough to cover that rather than hitting exact instants.
+    (22.0, input::Action::Confirm), // toss: elect to bat
+    (25.0, input::Action::Confirm), // toss summary -> match starts
+    (28.0, input::Action::Confirm), // spare, in case a slide was still up
+    (31.0, input::Action::Confirm), // spare
     (99.0, input::Action::Confirm),
     (99.5, input::Action::Confirm),
+    (200.0, input::Action::Confirm),
 ];
 
 impl AutotestMode {
@@ -235,6 +242,9 @@ impl AutotestMode {
                     (16.0, input::Action::Confirm),
                     (18.0, input::Action::Confirm),
                     (20.0, input::Action::Confirm),
+                    (22.0, input::Action::Confirm),
+                    (24.0, input::Action::Confirm),
+                    (26.0, input::Action::Confirm),
                 ],
                 milestones: &[1.5, 5.0, 7.0, 14.0],
                 end_time: 20.0,
@@ -252,6 +262,9 @@ impl AutotestMode {
                     (99.0, input::Action::Confirm),
                     (99.5, input::Action::Confirm),
                     (100.0, input::Action::Confirm),
+                    (100.5, input::Action::Confirm),
+                    (101.0, input::Action::Confirm),
+                    (101.5, input::Action::Confirm),
                 ],
                 milestones: &[1.5, 5.0, 6.8, 8.5],
                 end_time: 10.0,
@@ -260,22 +273,22 @@ impl AutotestMode {
             },
             Self::Night => AutotestScript {
                 presses: QUICK_MATCH_PRESSES,
-                milestones: &[1.5, 16.5, 30.0, 45.0],
-                end_time: 50.0,
+                milestones: &[1.5, 32.0, 45.0, 58.0],
+                end_time: 62.0,
                 switches_to_night: true,
                 swings: true,
             },
             Self::Stadium => AutotestScript {
                 presses: QUICK_MATCH_PRESSES,
-                milestones: &[18.0],
-                end_time: 24.0,
+                milestones: &[32.0],
+                end_time: 36.0,
                 switches_to_night: false,
                 swings: false,
             },
             Self::StadiumNight => AutotestScript {
                 presses: QUICK_MATCH_PRESSES,
-                milestones: &[18.0],
-                end_time: 24.0,
+                milestones: &[32.0],
+                end_time: 36.0,
                 switches_to_night: true,
                 swings: false,
             },
@@ -292,6 +305,9 @@ impl AutotestMode {
                     (6.8, input::Action::Next),
                     (99.0, input::Action::Confirm),
                     (99.5, input::Action::Confirm),
+                    (100.0, input::Action::Confirm),
+                    (100.5, input::Action::Confirm),
+                    (101.0, input::Action::Confirm),
                 ],
                 milestones: &[3.4, 4.8, 5.8, 7.4],
                 end_time: 9.0,
@@ -311,6 +327,9 @@ impl AutotestMode {
                     (99.0, input::Action::Confirm),
                     (99.5, input::Action::Confirm),
                     (100.0, input::Action::Confirm),
+                    (100.5, input::Action::Confirm),
+                    (101.0, input::Action::Confirm),
+                    (101.5, input::Action::Confirm),
                 ],
                 milestones: &[6.5, 9.5, 11.5, 13.0, 15.5],
                 end_time: 17.0,
@@ -324,20 +343,23 @@ impl AutotestMode {
                     (5.0, input::Action::Confirm),
                     (6.5, input::Action::Confirm),
                     (8.0, input::Action::Confirm),
-                    (13.0, input::Action::Confirm), // toss: elect to bat
-                    (14.5, input::Action::Confirm), // toss summary -> match
-                    (18.0, input::Action::Cancel),  // Esc: open pause overlay
-                    (21.0, input::Action::Next),    // move down the pause list
+                    (22.0, input::Action::Confirm), // toss: elect to bat
+                    (25.0, input::Action::Confirm), // toss summary -> match
+                    (28.0, input::Action::Confirm), // spare
+                    (34.0, input::Action::Cancel),  // Esc: open pause overlay
+                    (38.0, input::Action::Next),    // move down the pause list
+                    (200.0, input::Action::Confirm),
+                    (200.0, input::Action::Confirm),
                 ],
-                milestones: &[19.0, 22.0],
-                end_time: 24.0,
+                milestones: &[36.0, 40.0],
+                end_time: 42.0,
                 switches_to_night: false,
                 swings: false,
             },
             Self::Quick => AutotestScript {
                 presses: QUICK_MATCH_PRESSES,
-                milestones: &[1.5, 16.5, 30.0, 45.0],
-                end_time: 50.0,
+                milestones: &[1.5, 32.0, 45.0, 58.0],
+                end_time: 62.0,
                 switches_to_night: false,
                 swings: true,
             },
@@ -374,7 +396,7 @@ fn autotest_drive(
     }
 
     // Night / stadium-night: switch to floodlit mode once the match scene is live.
-    if script.switches_to_night && now > 16.5 && !*night_applied {
+    if script.switches_to_night && now > 32.5 && !*night_applied {
         *stadium_time = StadiumTime::Night;
         *night_applied = true;
         info!("AUTOTEST: switched to night stadium lighting");
@@ -382,7 +404,7 @@ fn autotest_drive(
 
     // In-match: swing periodically once play is under way (not stadium captures).
     // Starts after the toss slides so these presses cannot skip through them.
-    if script.swings && now > 16.0 && now - *last_swing_t >= 3.0 {
+    if script.swings && now > 30.0 && now - *last_swing_t >= 3.0 {
         *last_swing_t = now;
         input.just_pressed.push(input::Action::Confirm);
         info!("AUTOTEST: shot swing @ {:.1}s", now);
@@ -418,10 +440,18 @@ const DAY_EV100: f32 = 10.2;
 const NIGHT_EV100: f32 = 8.8;
 
 /// Aerial broadcast distances (~150–230 m); fog must not fully occlude the far oval.
-const DAY_FOG_START: f32 = 180.0;
-const DAY_FOG_END: f32 = 450.0;
-const NIGHT_FOG_START: f32 = 110.0;
-const NIGHT_FOG_END: f32 = 350.0;
+/// Scaled with the multi-tier bowl, whose far stands now sit ~330 m from the
+/// establishing camera.
+const DAY_FOG_START: f32 = 300.0;
+const DAY_FOG_END: f32 = 900.0;
+const NIGHT_FOG_START: f32 = 190.0;
+const NIGHT_FOG_END: f32 = 700.0;
+
+/// Sky dome radius. Must stay comfortably larger than the furthest camera
+/// distance from the origin: the establishing shot pulls back with the bowl,
+/// and once the camera passes outside the dome the inside-out sphere fills the
+/// frame and hides the whole ground.
+const SKY_RADIUS: f32 = 600.0;
 
 struct LightingPreset {
     ev100: f32,
@@ -486,11 +516,12 @@ fn setup_basics(
         unlit: true,
         cull_mode: None,
         double_sided: true,
+        fog_enabled: false,
         ..default()
     });
     commands.spawn((
         SkySphere,
-        Mesh3d(meshes.add(Sphere::new(220.0).mesh().uv(32, 32))),
+        Mesh3d(meshes.add(Sphere::new(SKY_RADIUS).mesh().uv(32, 32))),
         MeshMaterial3d(sky_mat),
         Transform::from_translation(Vec3::Y * -6.0),
         Visibility::default(),
@@ -731,6 +762,24 @@ fn handle_rebuild_scene(
 mod fog_tests {
     use super::*;
     use bevy::pbr::FogFalloff;
+
+    /// Regression: enlarging the stadium bowl pushed the establishing camera to
+    /// ~231 m from the origin while the sky dome was 220 m, so the camera sat
+    /// outside the sphere and the inside-out sky hid the entire ground.
+    #[test]
+    fn establishing_camera_stays_inside_the_sky_dome() {
+        use render::camera_rig::broadcast_establishing_view;
+        // Check across the range of stadium sizes the game ships.
+        for boundary in [55.0_f32, 60.0, 65.0, 68.0, 75.0] {
+            let (pos, _, _) = broadcast_establishing_view(boundary);
+            let dist = pos.length();
+            assert!(
+                dist < SKY_RADIUS * 0.9,
+                "establishing camera is {dist:.1} m from origin for boundary {boundary}, \
+                 too close to the {SKY_RADIUS} m sky dome; the dome would occlude the ground"
+            );
+        }
+    }
 
     #[test]
     fn distance_fog_falloff_matches_day_night_constants() {
