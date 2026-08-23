@@ -215,8 +215,12 @@ fn bone_vec3_m(x: f32, y: f32, z: f32) -> Vec3 {
 
 /// Build a child-of-bone [`Transform`] from metre-space translation/rotation.
 fn equipment_transform_m(translation_m: Vec3, rotation: Quat) -> Transform {
-    Transform::from_translation(bone_vec3_m(translation_m.x, translation_m.y, translation_m.z))
-        .with_rotation(rotation)
+    Transform::from_translation(bone_vec3_m(
+        translation_m.x,
+        translation_m.y,
+        translation_m.z,
+    ))
+    .with_rotation(rotation)
 }
 
 fn equipment_transform_m_scaled(translation_m: Vec3, rotation: Quat, scale: Vec3) -> Transform {
@@ -512,7 +516,11 @@ pub fn apply_team_kit_materials(
             0.94
         };
         mat.metallic = 0.0;
-        mat.reflectance = if kind == KitMeshKind::Joints { 0.08 } else { 0.06 };
+        mat.reflectance = if kind == KitMeshKind::Joints {
+            0.08
+        } else {
+            0.06
+        };
         let cloned = materials.add(mat);
         commands
             .entity(entity)
@@ -677,15 +685,9 @@ fn attach_chest_crest(
     spawn_mesh_child(
         spine,
         commands,
-        meshes.add(Rectangle::new(
-            metres_to_bone(0.19),
-            metres_to_bone(0.19),
-        )),
+        meshes.add(Rectangle::new(metres_to_bone(0.19), metres_to_bone(0.19))),
         crest,
-        equipment_transform_m(
-            Vec3::new(0.0, 0.11, 0.12),
-            Quat::from_rotation_x(-0.08),
-        ),
+        equipment_transform_m(Vec3::new(0.0, 0.11, 0.12), Quat::from_rotation_x(-0.08)),
     );
 }
 
@@ -704,10 +706,7 @@ fn attach_bat(
         metres_to_bone(0.60),
         metres_to_bone(0.046),
     ));
-    let handle = meshes.add(Capsule3d::new(
-        metres_to_bone(0.017),
-        metres_to_bone(0.26),
-    ));
+    let handle = meshes.add(Capsule3d::new(metres_to_bone(0.017), metres_to_bone(0.26)));
     let wood = willow_mat(materials);
     let grip_mat = matte(materials, Color::srgb_u8(0x24, 0x28, 0x30), 0.9);
     // Mixamo arm chain runs along local -X; mesh long axis is +Y. Map +Y onto
@@ -739,8 +738,7 @@ fn attach_glove(
     materials: &mut Assets<StandardMaterial>,
     left: bool,
 ) {
-    let glove = meshes
-        .add(Sphere::new(metres_to_bone(0.062)).mesh().ico(2).unwrap());
+    let glove = meshes.add(Sphere::new(metres_to_bone(0.062)).mesh().ico(2).unwrap());
     let mat = matte(materials, Color::srgb_u8(0xE8, 0xE2, 0xD2), 0.85);
     let x = if left { -0.03 } else { 0.03 };
     spawn_mesh_child(
@@ -765,8 +763,7 @@ fn attach_helmet(
 ) {
     let s = primary.to_srgba();
     let shell_col = Color::srgb(s.red * 0.55, s.green * 0.55, s.blue * 0.55);
-    let shell = meshes
-        .add(Sphere::new(metres_to_bone(0.128)).mesh().ico(3).unwrap());
+    let shell = meshes.add(Sphere::new(metres_to_bone(0.128)).mesh().ico(3).unwrap());
     let peak = meshes.add(Cuboid::new(
         metres_to_bone(0.17),
         metres_to_bone(0.028),
@@ -801,12 +798,8 @@ fn attach_cap(
     materials: &mut Assets<StandardMaterial>,
     primary: Color,
 ) {
-    let dome = meshes
-        .add(Sphere::new(metres_to_bone(0.118)).mesh().ico(2).unwrap());
-    let brim = meshes.add(Cylinder::new(
-        metres_to_bone(0.105),
-        metres_to_bone(0.012),
-    ));
+    let dome = meshes.add(Sphere::new(metres_to_bone(0.118)).mesh().ico(2).unwrap());
+    let brim = meshes.add(Cylinder::new(metres_to_bone(0.105), metres_to_bone(0.012)));
     let dome_mat = matte(materials, primary, 0.85);
     commands.entity(head).with_children(|p| {
         p.spawn((
@@ -1281,11 +1274,23 @@ fn bat_swing(p: f32, pose: &mut PoseTargets) {
         pc,
     );
     let hips_y = kf(
-        &[(0.0, -0.10), (0.28, -0.22), (0.58, 0.32), (0.72, 0.38), (1.0, 0.30)],
+        &[
+            (0.0, -0.10),
+            (0.28, -0.22),
+            (0.58, 0.32),
+            (0.72, 0.38),
+            (1.0, 0.30),
+        ],
         pc,
     );
     let bend = kf(
-        &[(0.0, 0.82), (0.30, 0.62), (0.58, 1.08), (0.72, 0.92), (1.0, 0.48)],
+        &[
+            (0.0, 0.82),
+            (0.30, 0.62),
+            (0.58, 1.08),
+            (0.72, 0.92),
+            (1.0, 0.48),
+        ],
         pc,
     );
     pose.ra = rz(arm_z * 0.85) * rx(arm_x) * rz(-0.34);
@@ -1405,7 +1410,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// The colour fallback in `kit_mesh_kind` classifies willow and white gear
     /// as jersey material, so equipment must be excluded from the recolour pass
     /// by marker, not by colour. Regression: the bat rendered in team colours.

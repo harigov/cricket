@@ -5,12 +5,12 @@ use crate::core::stadiums::Stadium;
 use crate::core::teams::Team;
 use crate::render::outfield_grass::{self, MOW_BAND_COUNT};
 use crate::render::ring_geometry::{
-    floodlight_angles, floodlight_radius, ring_band_specs, ring_boxes_mesh,
-    ring_face_center_rotation, ring_position, ring_segment_transform, ring_tangent,
-    ring_tube_mesh, stadium_ground_disc_mesh, stadium_ground_radius,
+    floodlight_angles, floodlight_radius, ring_band_specs, ring_boxes_mesh, ring_position,
+    ring_segment_transform, ring_tangent, ring_tube_mesh, stadium_ground_disc_mesh,
+    stadium_ground_radius,
 };
 use crate::render::{FloodlightFixture, FloodlightMaterials, NightEnvironmentLight};
-use bevy::gltf::GltfAssetLabel;
+use crate::render::{crowd, environment};
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -23,26 +23,22 @@ pub struct Stumps {
 }
 
 const STUMP_GAP: f32 = 0.114;
-const LOWER_TIER_COUNT: usize = 7;
-const UPPER_TIER_COUNT: usize = 5;
-const TIER_COUNT: usize = LOWER_TIER_COUNT + UPPER_TIER_COUNT;
+pub(crate) const LOWER_TIER_COUNT: usize = 7;
+pub(crate) const UPPER_TIER_COUNT: usize = 5;
+pub(crate) const TIER_COUNT: usize = LOWER_TIER_COUNT + UPPER_TIER_COUNT;
 const TIER_MAT_COUNT: usize = 8;
 const TIER_SEGMENTS: usize = 96;
 const FACADE_SEGMENTS: usize = 48;
 const AISLE_EVERY: usize = 8;
-const CROWD_SEGMENTS: usize = 90;
-const CROWD_AISLE_EVERY: usize = 10;
-/// Spectator tiers spread across lower and upper decks (keeps crowd count stable).
-const CROWD_TIERS: [usize; 5] = [1, 3, 5, 8, 10];
 
 pub(crate) struct BowlLayout {
-    inner_radius: f32,
-    tier_depth: f32,
-    tier_rise: f32,
-    tread_thickness: f32,
-    base_height: f32,
-    upper_deck_setback: f32,
-    upper_deck_rise_gap: f32,
+    pub(crate) inner_radius: f32,
+    pub(crate) tier_depth: f32,
+    pub(crate) tier_rise: f32,
+    pub(crate) tread_thickness: f32,
+    pub(crate) base_height: f32,
+    pub(crate) upper_deck_setback: f32,
+    pub(crate) upper_deck_rise_gap: f32,
 }
 
 impl BowlLayout {
@@ -58,7 +54,7 @@ impl BowlLayout {
         }
     }
 
-    fn lower_outer_radius(&self) -> f32 {
+    pub(crate) fn lower_outer_radius(&self) -> f32 {
         self.inner_radius + self.tier_depth * LOWER_TIER_COUNT as f32
     }
 
@@ -68,11 +64,11 @@ impl BowlLayout {
             + self.tier_depth * UPPER_TIER_COUNT as f32
     }
 
-    fn upper_inner_radius(&self) -> f32 {
+    pub(crate) fn upper_inner_radius(&self) -> f32 {
         self.lower_outer_radius() + self.upper_deck_setback
     }
 
-    fn tier_mid_radius(&self, tier: usize) -> f32 {
+    pub(crate) fn tier_mid_radius(&self, tier: usize) -> f32 {
         if tier < LOWER_TIER_COUNT {
             self.inner_radius + (tier as f32 + 0.5) * self.tier_depth
         } else {
@@ -81,7 +77,7 @@ impl BowlLayout {
         }
     }
 
-    fn tier_height(&self, tier: usize) -> f32 {
+    pub(crate) fn tier_height(&self, tier: usize) -> f32 {
         if tier < LOWER_TIER_COUNT {
             self.base_height + tier as f32 * self.tier_rise
         } else {
@@ -93,16 +89,16 @@ impl BowlLayout {
         }
     }
 
-    fn stand_top_height(&self) -> f32 {
+    pub(crate) fn stand_top_height(&self) -> f32 {
         self.tier_height(TIER_COUNT - 1) + self.tread_thickness
     }
 
-    fn is_upper_deck(&self, tier: usize) -> bool {
+    pub(crate) fn is_upper_deck(&self, tier: usize) -> bool {
         tier >= LOWER_TIER_COUNT
     }
 }
 
-struct SharedStadiumAssets {
+pub(crate) struct SharedStadiumAssets {
     unit_cuboid: Handle<Mesh>,
     rope_mesh: Handle<Mesh>,
     column_mesh: Handle<Mesh>,
@@ -211,38 +207,30 @@ fn build_shared_assets(
     }
 }
 
-struct StadiumBuildCtx<'a> {
-    meshes: &'a mut Assets<Mesh>,
-    materials: &'a mut Assets<StandardMaterial>,
-    images: &'a mut Assets<Image>,
-    asset_server: &'a AssetServer,
-    stadium: &'a Stadium,
-    shared: &'a SharedStadiumAssets,
-    bowl: BowlLayout,
-    outfield_base: Color,
-    batting_crest_mat: Handle<StandardMaterial>,
-    fielding_crest_mat: Handle<StandardMaterial>,
-    apron_disc_mesh: Handle<Mesh>,
-    rope_ring_mesh: Handle<Mesh>,
-    pitch_mesh: Handle<Mesh>,
-    pitch_worn_mesh: Handle<Mesh>,
-    crease_line_mesh: Handle<Mesh>,
-    crease_cross_mesh: Handle<Mesh>,
-    pitch_mat: Handle<StandardMaterial>,
-    pitch_worn_mat: Handle<StandardMaterial>,
-    mow_band_mats: Vec<Handle<StandardMaterial>>,
+pub(crate) struct StadiumBuildCtx<'a> {
+    pub(crate) meshes: &'a mut Assets<Mesh>,
+    pub(crate) materials: &'a mut Assets<StandardMaterial>,
+    pub(crate) images: &'a mut Assets<Image>,
+    pub(crate) asset_server: &'a AssetServer,
+    pub(crate) stadium: &'a Stadium,
+    pub(crate) shared: &'a SharedStadiumAssets,
+    pub(crate) bowl: BowlLayout,
+    pub(crate) outfield_base: Color,
+    pub(crate) batting_crest_mat: Handle<StandardMaterial>,
+    pub(crate) fielding_crest_mat: Handle<StandardMaterial>,
+    pub(crate) apron_disc_mesh: Handle<Mesh>,
+    pub(crate) rope_ring_mesh: Handle<Mesh>,
+    pub(crate) pitch_mesh: Handle<Mesh>,
+    pub(crate) pitch_worn_mesh: Handle<Mesh>,
+    pub(crate) crease_line_mesh: Handle<Mesh>,
+    pub(crate) crease_cross_mesh: Handle<Mesh>,
+    pub(crate) pitch_mat: Handle<StandardMaterial>,
+    pub(crate) pitch_worn_mat: Handle<StandardMaterial>,
+    pub(crate) mow_band_mats: Vec<Handle<StandardMaterial>>,
 }
 
-fn track_spawn(spawn_count: &mut usize) {
+pub(crate) fn track_spawn(spawn_count: &mut usize) {
     *spawn_count += 1;
-}
-
-fn crowd_segment_skipped(seg: usize) -> bool {
-    seg.is_multiple_of(CROWD_AISLE_EVERY)
-}
-
-fn crowd_seats_at(seg: usize, tier: usize) -> usize {
-    1 + (seg * 7 + tier * 11).is_multiple_of(3) as usize
 }
 
 fn spawn_stadium_apron(
@@ -446,8 +434,7 @@ fn spawn_tiers_and_roof(
             let inner_r = if bowl.is_upper_deck(tier) && tier == LOWER_TIER_COUNT {
                 bowl.upper_inner_radius() - 0.08
             } else if bowl.is_upper_deck(tier) {
-                bowl.upper_inner_radius()
-                    + (tier - LOWER_TIER_COUNT) as f32 * bowl.tier_depth
+                bowl.upper_inner_radius() + (tier - LOWER_TIER_COUNT) as f32 * bowl.tier_depth
                     - 0.08
             } else {
                 bowl.inner_radius + tier as f32 * bowl.tier_depth - 0.08
@@ -493,8 +480,9 @@ fn spawn_tiers_and_roof(
 
     // Concourse ring between lower bowl and upper deck (vomitory level).
     let concourse_r = bowl.lower_outer_radius() + bowl.upper_deck_setback * 0.42;
-    let concourse_h =
-        bowl.base_height + LOWER_TIER_COUNT as f32 * bowl.tier_rise + bowl.upper_deck_rise_gap * 0.35;
+    let concourse_h = bowl.base_height
+        + LOWER_TIER_COUNT as f32 * bowl.tier_rise
+        + bowl.upper_deck_rise_gap * 0.35;
     let concourse_arc = 2.0 * PI * concourse_r / TIER_SEGMENTS as f32 * 1.04;
     let concourse_specs = ring_band_specs(
         TIER_SEGMENTS,
@@ -631,14 +619,7 @@ fn spawn_pavilions_and_media_box(
     let top = bowl.stand_top_height();
 
     // Pavilion blocks rising above the stand line at four quadrants + two ends.
-    let pavilion_angles: [f32; 6] = [
-        0.0,
-        PI * 0.5,
-        PI,
-        PI * 1.5,
-        PI * 0.25,
-        PI * 1.25,
-    ];
+    let pavilion_angles: [f32; 6] = [0.0, PI * 0.5, PI, PI * 1.5, PI * 0.25, PI * 1.25];
     for (i, &angle) in pavilion_angles.iter().enumerate() {
         let r = bowl.outer_radius() + 3.5 + (i % 2) as f32 * 1.2;
         let h = top + 4.5 + (i % 3) as f32 * 2.8;
@@ -654,7 +635,11 @@ fn spawn_pavilions_and_media_box(
         p.spawn((
             Mesh3d(ctx.shared.unit_cuboid.clone()),
             MeshMaterial3d(ctx.shared.canopy_mat.clone()),
-            ring_segment_transform(angle, r, h + 0.6).with_scale(Vec3::new(width * 1.08, 0.35, depth * 1.1)),
+            ring_segment_transform(angle, r, h + 0.6).with_scale(Vec3::new(
+                width * 1.08,
+                0.35,
+                depth * 1.1,
+            )),
         ));
         track_spawn(spawn_count);
     }
@@ -674,8 +659,11 @@ fn spawn_pavilions_and_media_box(
     p.spawn((
         Mesh3d(ctx.shared.unit_cuboid.clone()),
         MeshMaterial3d(ctx.shared.board_frame_mat.clone()),
-        ring_segment_transform(media_angle, media_r - 2.2, media_h * 0.55)
-            .with_scale(Vec3::new(20.0, media_h * 0.45, 0.28)),
+        ring_segment_transform(media_angle, media_r - 2.2, media_h * 0.55).with_scale(Vec3::new(
+            20.0,
+            media_h * 0.45,
+            0.28,
+        )),
     ));
     track_spawn(spawn_count);
 }
@@ -758,65 +746,6 @@ fn spawn_floodlights(
         ));
         track_spawn(spawn_count);
     }
-}
-
-fn spawn_crowd(
-    p: &mut ChildSpawnerCommands,
-    ctx: &StadiumBuildCtx<'_>,
-    spawn_count: &mut usize,
-) -> usize {
-    // ---- Crowd: ~350–550 seated spectators ----
-    let crowd_variants = [
-        ctx.asset_server
-            .load(GltfAssetLabel::Scene(0).from_asset("crowd/crowd-a.glb")),
-        ctx.asset_server
-            .load(GltfAssetLabel::Scene(0).from_asset("crowd/crowd-b.glb")),
-        ctx.asset_server
-            .load(GltfAssetLabel::Scene(0).from_asset("crowd/crowd-c.glb")),
-        ctx.asset_server
-            .load(GltfAssetLabel::Scene(0).from_asset("crowd/crowd-d.glb")),
-    ];
-    let crowd_scale = 0.62;
-    let mut crowd_count = 0usize;
-    let bowl = &ctx.bowl;
-
-    for seg in 0..CROWD_SEGMENTS {
-        if crowd_segment_skipped(seg) {
-            continue;
-        }
-        for &tier in &CROWD_TIERS {
-            // Stagger each tier's seat ring so figures don't stack in radial columns.
-            let tier_phase =
-                ((tier * 19 + 7) % CROWD_SEGMENTS) as f32 / CROWD_SEGMENTS as f32 * TAU;
-            let seg_jitter = ((seg * 3 + tier * 13) % 5) as f32 - 2.0;
-            let mid =
-                (seg as f32 + 0.5 + seg_jitter * 0.18) / CROWD_SEGMENTS as f32 * TAU + tier_phase;
-            let seats = crowd_seats_at(seg, tier);
-            let seat_r = bowl.tier_mid_radius(tier) - 0.15;
-            let seat_h = bowl.tier_height(tier) + bowl.tread_thickness - 0.06;
-            let tangent = ring_tangent(mid);
-            for k in 0..seats {
-                let off = (k as f32 - (seats as f32 - 1.0) * 0.5) * 0.95
-                    + ((seg * 13 + tier * 5 + k) % 7) as f32 * 0.04;
-                let pos = ring_position(mid, seat_r, seat_h) + tangent * off;
-                let variant = crowd_variants[(seg * 7 + tier * 11 + k * 5) % 4].clone();
-                let s = 0.94 + ((seg * 11 + tier * 17 + k * 13) % 7) as f32 * 0.014;
-                let rot = ring_face_center_rotation(mid) * Quat::from_rotation_x(-0.26);
-                p.spawn((
-                    SceneRoot(variant),
-                    Transform::from_translation(pos)
-                        .with_rotation(rot)
-                        .with_scale(Vec3::splat(s * crowd_scale)),
-                    Visibility::default(),
-                    InheritedVisibility::default(),
-                    ViewVisibility::default(),
-                ));
-                track_spawn(spawn_count);
-                crowd_count += 1;
-            }
-        }
-    }
-    crowd_count
 }
 
 fn spawn_big_screen_and_dugouts(
@@ -979,8 +908,11 @@ pub fn build_stadium(
             .size(geo::PITCH_LENGTH + 1.0, geo::PITCH_WIDTH * 0.35),
     );
     let crease_line_mesh = meshes.add(Plane3d::default().mesh().size(0.06, geo::PITCH_WIDTH));
-    let crease_cross_mesh =
-        meshes.add(Plane3d::default().mesh().size(geo::CREASE_DEPTH * 2.0, 0.06));
+    let crease_cross_mesh = meshes.add(
+        Plane3d::default()
+            .mesh()
+            .size(geo::CREASE_DEPTH * 2.0, 0.06),
+    );
 
     let pitch_img = images.add(create_pitch_image());
     let pitch_mat = materials.add(StandardMaterial {
@@ -1064,8 +996,9 @@ pub fn build_stadium(
         spawn_sight_screens(p, &ctx, &mut spawn_count);
         spawn_tiers_and_roof(p, &mut ctx, &mut spawn_count);
         spawn_floodlights(p, &ctx, &mut spawn_count);
-        let crowd_count = spawn_crowd(p, &ctx, &mut spawn_count);
+        let crowd_count = crowd::spawn_crowd(p, &ctx, &mut spawn_count);
         info!("Stadium crowd spawned: {crowd_count} spectators");
+        environment::spawn_environment(p, &mut ctx, &mut spawn_count);
         spawn_big_screen_and_dugouts(p, &mut ctx, batting_team, fielding_team, &mut spawn_count);
     });
 
@@ -1088,20 +1021,6 @@ pub fn build_stadium(
     }
 
     root
-}
-
-/// Expected crowd count for a standard bowl (used by tests).
-pub fn expected_crowd_count() -> usize {
-    let mut count = 0usize;
-    for seg in 0..CROWD_SEGMENTS {
-        if crowd_segment_skipped(seg) {
-            continue;
-        }
-        for &tier in &CROWD_TIERS {
-            count += crowd_seats_at(seg, tier);
-        }
-    }
-    count
 }
 
 fn mat(color: Color) -> StandardMaterial {
@@ -1371,13 +1290,6 @@ fn big_screen_image(home: &str, away: &str) -> Image {
 #[cfg(test)]
 mod tests {
     use super::{stadium_ground_radius, *};
-
-    #[test]
-    fn crowd_count_in_target_range() {
-        let n = expected_crowd_count();
-        assert!(n >= 350, "crowd too sparse: {n}");
-        assert!(n <= 550, "crowd too dense: {n}");
-    }
 
     #[test]
     fn bowl_outer_exceeds_boundary() {

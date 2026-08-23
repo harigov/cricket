@@ -108,11 +108,7 @@ pub fn stadium_ground_disc_mesh(radius: f32, segments: usize) -> Mesh {
                 if ring == 1 {
                     indices.extend_from_slice(&[prev_base, curr_base + i1, curr_base + i0]);
                 } else {
-                    indices.extend_from_slice(&[
-                        prev_base + i0,
-                        curr_base + i1,
-                        curr_base + i0,
-                    ]);
+                    indices.extend_from_slice(&[prev_base + i0, curr_base + i1, curr_base + i0]);
                     indices.extend_from_slice(&[prev_base + i0, prev_base + i1, curr_base + i1]);
                 }
             }
@@ -120,7 +116,10 @@ pub fn stadium_ground_disc_mesh(radius: f32, segments: usize) -> Mesh {
         ring_start = base;
     }
 
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
@@ -158,7 +157,10 @@ pub fn ring_boxes_mesh(specs: &[RingBoxSpec]) -> Mesh {
         );
     }
 
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
@@ -217,7 +219,10 @@ pub fn ring_tube_mesh(radius: f32, y: f32, segments: usize, tube_radius: f32) ->
         );
     }
 
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
@@ -235,10 +240,25 @@ fn append_oriented_box(
 ) {
     const FACE_CORNERS: [[(f32, f32, f32); 4]; 6] = [
         [(1., 1., -1.), (-1., 1., -1.), (-1., 1., 1.), (1., 1., 1.)],
-        [(1., -1., 1.), (-1., -1., 1.), (-1., -1., -1.), (1., -1., -1.)],
+        [
+            (1., -1., 1.),
+            (-1., -1., 1.),
+            (-1., -1., -1.),
+            (1., -1., -1.),
+        ],
         [(1., 1., 1.), (-1., 1., 1.), (-1., -1., 1.), (1., -1., 1.)],
-        [(-1., 1., -1.), (1., 1., -1.), (1., -1., -1.), (-1., -1., -1.)],
-        [(-1., 1., 1.), (-1., 1., -1.), (-1., -1., -1.), (-1., -1., 1.)],
+        [
+            (-1., 1., -1.),
+            (1., 1., -1.),
+            (1., -1., -1.),
+            (-1., -1., -1.),
+        ],
+        [
+            (-1., 1., 1.),
+            (-1., 1., -1.),
+            (-1., -1., -1.),
+            (-1., -1., 1.),
+        ],
         [(1., 1., -1.), (1., 1., 1.), (1., -1., 1.), (1., -1., -1.)],
     ];
     const FACE_NORMALS: [Vec3; 6] = [

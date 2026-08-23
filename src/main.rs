@@ -193,11 +193,11 @@ struct AutotestScript {
 // between the venue pick and the first ball; the flip and result slides
 // auto-advance, the other two wait for Confirm.
 const QUICK_MATCH_PRESSES: [(f32, input::Action); 12] = [
-    (2.0, input::Action::Confirm),  // Quick Match -> team select
-    (3.5, input::Action::Confirm),  // pick your team
-    (5.0, input::Action::Confirm),  // pick opponent
-    (6.5, input::Action::Confirm),  // overs
-    (8.0, input::Action::Confirm),  // stadium (random)
+    (2.0, input::Action::Confirm), // Quick Match -> team select
+    (3.5, input::Action::Confirm), // pick your team
+    (5.0, input::Action::Confirm), // pick opponent
+    (6.5, input::Action::Confirm), // overs
+    (8.0, input::Action::Confirm), // stadium (random)
     // The toss slides auto-advance on Time<Virtual>, whose delta Bevy clamps
     // to 0.25 s. An unfocused window updates about once a second, so the 3.5 s
     // of slides can take ~14 s of wall clock here. Spread the remaining
@@ -300,7 +300,7 @@ impl AutotestMode {
                     (2.0, input::Action::Confirm), // Quick Match -> team select
                     (3.0, input::Action::Right),   // across one column
                     (3.6, input::Action::Right),
-                    (4.2, input::Action::Next), // down one row
+                    (4.2, input::Action::Next),    // down one row
                     (5.2, input::Action::Confirm), // lock team -> opponent grid
                     (6.2, input::Action::Right),
                     (6.8, input::Action::Next),
@@ -319,11 +319,11 @@ impl AutotestMode {
             // each one so the setup screens can be reviewed as images.
             Self::Setup => AutotestScript {
                 presses: [
-                    (2.0, input::Action::Confirm), // Quick Match -> team
-                    (3.0, input::Action::Confirm), // team -> opponent
-                    (4.0, input::Action::Confirm), // opponent -> overs
-                    (5.0, input::Action::Confirm), // overs -> stadium
-                    (8.0, input::Action::Confirm), // stadium -> toss flip
+                    (2.0, input::Action::Confirm),  // Quick Match -> team
+                    (3.0, input::Action::Confirm),  // team -> opponent
+                    (4.0, input::Action::Confirm),  // opponent -> overs
+                    (5.0, input::Action::Confirm),  // overs -> stadium
+                    (8.0, input::Action::Confirm),  // stadium -> toss flip
                     (14.0, input::Action::Confirm), // toss choice
                     (99.0, input::Action::Confirm),
                     (99.5, input::Action::Confirm),

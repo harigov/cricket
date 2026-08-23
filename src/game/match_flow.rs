@@ -317,11 +317,7 @@ pub fn match_intro_walk_progress(elapsed: f32, duration: f32) -> f32 {
 }
 
 /// Striker and non-striker positions during the opening walk-on.
-pub fn match_intro_batter_positions(
-    elapsed: f32,
-    duration: f32,
-    boundary_r: f32,
-) -> (Vec2, Vec2) {
+pub fn match_intro_batter_positions(elapsed: f32, duration: f32, boundary_r: f32) -> (Vec2, Vec2) {
     let striker_goal = geo::BATSMAN_POS;
     let non_striker_goal = Vec2::new(-geo::PITCH_HALF_LEN + 1.6, 0.9);
     let p = match_intro_walk_progress(elapsed, duration);
@@ -340,11 +336,7 @@ pub(crate) struct MatchIntroParams<'w, 's> {
     br: Option<Res<'w, BoundaryRadius>>,
     audio: Res<'w, crate::game::audio::AudioSettings>,
     durations: Option<Res<'w, crate::game::audio::CommentaryDurations>>,
-    batters: Query<
-        'w,
-        's,
-        (&'static Figure, &'static mut Transform, &'static mut Anim),
-    >,
+    batters: Query<'w, 's, (&'static Figure, &'static mut Transform, &'static mut Anim)>,
     cam: ResMut<'w, CameraRig>,
 }
 
@@ -378,10 +370,7 @@ pub fn sys_match_intro(
     for (fig, mut tf, mut anim) in &mut scene.batters {
         let (pos, prev_goal) = match fig.kind {
             FigureKind::Batter => (striker_pos, geo::BATSMAN_POS),
-            FigureKind::NonStriker => (
-                non_striker_pos,
-                Vec2::new(-geo::PITCH_HALF_LEN + 1.6, 0.9),
-            ),
+            FigureKind::NonStriker => (non_striker_pos, Vec2::new(-geo::PITCH_HALF_LEN + 1.6, 0.9)),
             _ => continue,
         };
         tf.translation = Vec3::new(pos.x, 0.0, pos.y);
@@ -924,68 +913,64 @@ pub fn sys_shot_input(
             shot.attempt.dir_x = input.move_vec.x;
             info!(
                 "SHOT registered: offset {:.3}s (arrive {:.3}s, t {:.3}s) loft={} dir={:.2}",
-                offset,
-                shot.rel.t_arrive,
-                shot.rel.t,
-                shot.attempt.loft,
-                shot.attempt.dir_x
+                offset, shot.rel.t_arrive, shot.rel.t, shot.attempt.loft, shot.attempt.dir_x
             );
         }
     } else if let (Some(am), Some(wd)) = (shot.am.as_ref(), shot.wd.as_ref()) {
         if !shot.attempt.ai_scheduled && shot.rel.t > shot.rel.t_arrive - 0.45 {
-        // AI batter: line/length aware decision
-        shot.attempt.ai_scheduled = true;
-        if plan.wide {
-            return;
-        }
-        let batsman = am.striker(wd);
-        let q = plan.quality_vs_batsman();
-        let skill = batsman.batting as f32 / 100.0;
-        // Fuller / good-length balls are easier to time; short balls harder
-        let length_factor = if plan.length_from_stumps < 4.5 {
-            0.04
-        } else if plan.length_from_stumps > 11.0 {
-            0.025
-        } else {
-            0.0
-        };
-        let sigma =
-            (0.045 + (1.0 - q) * 0.10 - (skill - 0.7) * 0.04 + length_factor).clamp(0.028, 0.30);
-        let agg = chase_pressure(
-            am.state.innings.target,
-            am.state.innings.runs,
-            am.state.innings.legal_balls,
-            am.state.overs,
-        );
-        // Defend good balls more often unless chasing hard
-        let defend_bias = if q > 0.75 && agg < 0.6 { 0.18 } else { 0.0 };
-        let swing_prob = (0.58 + agg * 0.38 - q * 0.32 - defend_bias).clamp(0.18, 0.96);
-        if coin(swing_prob) {
-            shot.attempt.pressed = true;
-            shot.attempt.offset = Some((gauss() * sigma).clamp(-0.5, 0.5));
-            // Direction mapped to line & length
-            let mut preferred = 0.0f32;
-            if plan.line_z > 0.45 {
-                preferred = 0.55; // wide off -> square through off
-            } else if plan.line_z < -0.30 {
-                preferred = -0.55; // leg stump -> flick / pull leg side
-            } else if plan.length_from_stumps < 4.5 {
-                preferred = 0.10; // yorker -> straight
+            // AI batter: line/length aware decision
+            shot.attempt.ai_scheduled = true;
+            if plan.wide {
+                return;
+            }
+            let batsman = am.striker(wd);
+            let q = plan.quality_vs_batsman();
+            let skill = batsman.batting as f32 / 100.0;
+            // Fuller / good-length balls are easier to time; short balls harder
+            let length_factor = if plan.length_from_stumps < 4.5 {
+                0.04
             } else if plan.length_from_stumps > 11.0 {
-                preferred = -0.40; // bouncer -> pull leg side
-                // short balls lofted more often
-                shot.attempt.loft = coin((0.35 + agg * 0.45).clamp(0.1, 0.85));
+                0.025
+            } else {
+                0.0
+            };
+            let sigma = (0.045 + (1.0 - q) * 0.10 - (skill - 0.7) * 0.04 + length_factor)
+                .clamp(0.028, 0.30);
+            let agg = chase_pressure(
+                am.state.innings.target,
+                am.state.innings.runs,
+                am.state.innings.legal_balls,
+                am.state.overs,
+            );
+            // Defend good balls more often unless chasing hard
+            let defend_bias = if q > 0.75 && agg < 0.6 { 0.18 } else { 0.0 };
+            let swing_prob = (0.58 + agg * 0.38 - q * 0.32 - defend_bias).clamp(0.18, 0.96);
+            if coin(swing_prob) {
+                shot.attempt.pressed = true;
+                shot.attempt.offset = Some((gauss() * sigma).clamp(-0.5, 0.5));
+                // Direction mapped to line & length
+                let mut preferred = 0.0f32;
+                if plan.line_z > 0.45 {
+                    preferred = 0.55; // wide off -> square through off
+                } else if plan.line_z < -0.30 {
+                    preferred = -0.55; // leg stump -> flick / pull leg side
+                } else if plan.length_from_stumps < 4.5 {
+                    preferred = 0.10; // yorker -> straight
+                } else if plan.length_from_stumps > 11.0 {
+                    preferred = -0.40; // bouncer -> pull leg side
+                    // short balls lofted more often
+                    shot.attempt.loft = coin((0.35 + agg * 0.45).clamp(0.1, 0.85));
+                }
+                if plan.length_from_stumps <= 11.0 && plan.length_from_stumps >= 4.5 {
+                    // good length: loft only when chasing or bad ball
+                    shot.attempt.loft = coin((agg * 0.45 * (1.25 - q)).clamp(0.05, 0.88));
+                } else if shot.attempt.loft {
+                    // already set for short balls; keep
+                }
+                // Add variation around preferred
+                let spread = 0.32 + (1.0 - skill) * 0.18;
+                shot.attempt.dir_x = (preferred + (unit() * 2.0 - 1.0) * spread).clamp(-1.0, 1.0);
             }
-            if plan.length_from_stumps <= 11.0 && plan.length_from_stumps >= 4.5 {
-                // good length: loft only when chasing or bad ball
-                shot.attempt.loft = coin((agg * 0.45 * (1.25 - q)).clamp(0.05, 0.88));
-            } else if shot.attempt.loft {
-                // already set for short balls; keep
-            }
-            // Add variation around preferred
-            let spread = 0.32 + (1.0 - skill) * 0.18;
-            shot.attempt.dir_x = (preferred + (unit() * 2.0 - 1.0) * spread).clamp(-1.0, 1.0);
-        }
         }
     }
 }
@@ -1038,11 +1023,9 @@ pub fn sys_contact_watch(mut watch: ContactWatchParams) {
     let PhaseEnum::BallLive = watch.phase.0 else {
         return;
     };
-    let (Some(mut am), Some(wd), Some(layout)) = (
-        watch.am.as_mut(),
-        watch.wd.as_ref(),
-        watch.layout.as_ref(),
-    ) else {
+    let (Some(mut am), Some(wd), Some(layout)) =
+        (watch.am.as_mut(), watch.wd.as_ref(), watch.layout.as_ref())
+    else {
         return;
     };
     if !watch.rel.active || watch.rel.resolved {
@@ -2445,11 +2428,8 @@ mod tests {
         app.insert_resource(CameraRig::default());
         app.insert_resource(Pending::default());
         app.insert_resource(RecentBalls::default());
-        app.world_mut().spawn((
-            CricketBall,
-            BallState::default(),
-            BallFlags::default(),
-        ));
+        app.world_mut()
+            .spawn((CricketBall, BallState::default(), BallFlags::default()));
 
         app.add_systems(
             Update,
@@ -2529,7 +2509,8 @@ mod tests {
         app.world_mut().insert_resource(PlayerInput::default());
         app.world_mut().insert_resource(minimal_active_match());
         app.world_mut().insert_resource(BoundaryRadius(65.0));
-        app.world_mut().insert_resource(crate::game::audio::AudioSettings::default());
+        app.world_mut()
+            .insert_resource(crate::game::audio::AudioSettings::default());
         app.world_mut()
             .insert_resource(crate::game::audio::CommentaryDurations::default());
         app.world_mut().insert_resource(CameraRig::default());
@@ -2591,7 +2572,8 @@ mod tests {
         });
         app.world_mut().insert_resource(minimal_active_match());
         app.world_mut().insert_resource(BoundaryRadius(65.0));
-        app.world_mut().insert_resource(crate::game::audio::AudioSettings::default());
+        app.world_mut()
+            .insert_resource(crate::game::audio::AudioSettings::default());
         app.world_mut()
             .insert_resource(crate::game::audio::CommentaryDurations::default());
         app.world_mut().insert_resource(CameraRig::default());

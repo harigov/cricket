@@ -1,4 +1,6 @@
 pub mod camera_rig;
+pub mod crowd;
+pub mod environment;
 pub mod outfield_grass;
 pub mod player;
 pub mod ring_geometry;
