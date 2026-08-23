@@ -364,7 +364,7 @@ fn update_menu_animations(
     ms: Res<MenuState>,
     trans: Res<MenuTransition>,
     mut coin_q: Query<&mut Text, With<MenuCoinLabel>>,
-    mut coin_visual_q: Query<&mut Transform, With<MenuCoinVisual>>,
+    mut coin_visual_q: Query<&mut UiTransform, With<MenuCoinVisual>>,
     mut coin_face_q: Query<(&MenuCoinFace, &mut Visibility)>,
     mut fade_q: Query<&mut BackgroundColor, With<MenuFadeOverlay>>,
 ) {
@@ -375,19 +375,20 @@ fn update_menu_animations(
     };
 
     if ms.screen == Screen::SetupTossFlip {
-        let spin = anim.0 * 6.0;
+        // The coin spins about its vertical axis, which a UI node cannot express
+        // as a rotation: `Rot2` only turns within the screen plane. Narrowing the
+        // width is what actually reads as a coin turning edge-on, and the face
+        // swap above lands the flip.
         let squash = (anim.0 * 12.0).sin().abs().max(0.14);
         for mut transform in coin_visual_q.iter_mut() {
-            transform.rotation = Quat::from_rotation_y(spin);
-            transform.scale = Vec3::new(squash, 1.0, 1.0);
+            transform.scale = Vec2::new(squash, 1.0);
         }
     } else if matches!(
         ms.screen,
         Screen::SetupTossResult | Screen::SetupTossChoice | Screen::SetupTossSummary
     ) {
         for mut transform in coin_visual_q.iter_mut() {
-            transform.rotation = Quat::IDENTITY;
-            transform.scale = Vec3::ONE;
+            *transform = UiTransform::IDENTITY;
         }
     }
 
@@ -1514,7 +1515,7 @@ fn spawn_toss_coin(parent: &mut ChildSpawnerCommands, fonts: &UiFonts, scale: f3
                 justify_content: JustifyContent::Center,
                 ..default()
             },
-            Transform::default(),
+            UiTransform::IDENTITY,
         ))
         .with_children(|coin| {
             for (is_heads, label) in [(true, "H"), (false, "T")] {
@@ -2916,6 +2917,53 @@ mod tests {
 
         assert_eq!(before, mid_flip);
         assert_eq!(before, late_flip);
+    }
+
+    /// A UI node carries `UiTransform`, not `Transform`: bevy_ui ignores
+    /// `Transform` for layout, and pulling in its required `GlobalTransform`
+    /// under a `GlobalTransform`-less parent node also trips warning B0004.
+    #[test]
+    fn toss_coin_squash_animates_ui_transform() {
+        let mut app = App::new();
+        app.insert_resource(MenuState {
+            screen: Screen::SetupTossFlip,
+            ..Default::default()
+        });
+        app.insert_resource(MenuAnimTime(0.0));
+        app.insert_resource(MenuTransition::default());
+        app.add_systems(Update, update_menu_animations);
+
+        let coin = app
+            .world_mut()
+            .spawn((MenuCoinVisual, Node::default(), UiTransform::IDENTITY))
+            .id();
+
+        // A quarter of the way into the squash cycle the coin is edge-on.
+        app.insert_resource(MenuAnimTime(std::f32::consts::FRAC_PI_2 / 12.0));
+        app.update();
+
+        let entity = app.world().entity(coin);
+        assert!(
+            !entity.contains::<GlobalTransform>(),
+            "UI coin must not pull in GlobalTransform under a UI parent (B0004)"
+        );
+        let ui = entity.get::<UiTransform>().expect("coin keeps UiTransform");
+        assert!(
+            (ui.scale.x - 1.0).abs() < 0.01,
+            "coin should be at full width at peak squash, got {}",
+            ui.scale.x
+        );
+        assert_eq!(ui.scale.y, 1.0, "flip must not squash the coin vertically");
+
+        // Edge-on: the width collapses towards the 0.14 floor.
+        app.insert_resource(MenuAnimTime(std::f32::consts::PI / 12.0));
+        app.update();
+        let ui = *app.world().entity(coin).get::<UiTransform>().unwrap();
+        assert!(
+            ui.scale.x < 0.2,
+            "coin should be near edge-on, got {}",
+            ui.scale.x
+        );
     }
 
     #[test]

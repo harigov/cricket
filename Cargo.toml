@@ -43,6 +43,12 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "vorbis",
     "wav",
     "webgl2",
+    # Both Linux windowing backends: winit picks Wayland when the session
+    # provides it and falls back to X11 otherwise. Going through XWayland on a
+    # Wayland session stalls NVIDIA's Vulkan swapchain acquire once the
+    # compositor stops presenting to an idle window, which bevy_render turns
+    # into a hard panic on adapters outside its AMD/Intel timeout allowlist.
+    "wayland",
     "x11",
     "ktx2",
     "zstd_rust",
