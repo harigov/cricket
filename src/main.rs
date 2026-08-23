@@ -176,6 +176,8 @@ enum AutotestMode {
     Menus,
     /// Enters a match then opens the pause overlay with Esc.
     Pause,
+    /// Captures the venue picker and every toss slide.
+    Setup,
 }
 
 struct AutotestScript {
@@ -215,6 +217,7 @@ impl AutotestMode {
             "stadium-night" => Some(Self::StadiumNight),
             "menus" => Some(Self::Menus),
             "pause" => Some(Self::Pause),
+            "setup" => Some(Self::Setup),
             _ => None,
         }
     }
@@ -292,6 +295,25 @@ impl AutotestMode {
                 ],
                 milestones: &[3.4, 4.8, 5.8, 7.4],
                 end_time: 9.0,
+                switches_to_night: false,
+                swings: false,
+            },
+            // Walks to the venue picker and through every toss slide, capturing
+            // each one so the setup screens can be reviewed as images.
+            Self::Setup => AutotestScript {
+                presses: [
+                    (2.0, input::Action::Confirm), // Quick Match -> team
+                    (3.0, input::Action::Confirm), // team -> opponent
+                    (4.0, input::Action::Confirm), // opponent -> overs
+                    (5.0, input::Action::Confirm), // overs -> stadium
+                    (8.0, input::Action::Confirm), // stadium -> toss flip
+                    (14.0, input::Action::Confirm), // toss choice
+                    (99.0, input::Action::Confirm),
+                    (99.5, input::Action::Confirm),
+                    (100.0, input::Action::Confirm),
+                ],
+                milestones: &[6.5, 9.5, 11.5, 13.0, 15.5],
+                end_time: 17.0,
                 switches_to_night: false,
                 swings: false,
             },
