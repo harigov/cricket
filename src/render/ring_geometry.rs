@@ -59,10 +59,40 @@ pub fn stadium_ground_half_extent(bowl_outer_radius: f32) -> f32 {
     stadium_ground_radius(bowl_outer_radius)
 }
 
+/// Ground tint for the apron disc.
+///
+/// Every stadium sits in a different world, so the site around the bowl is
+/// tarmac, sand, meadow or dust depending on the theme, and its rim has to
+/// dissolve into that theme's horizon rather than a fixed day blue.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroundPalette {
+    /// Flat colour of the ground directly around the stadium.
+    pub base: [f32; 3],
+    /// Colour the rim fades into — match the theme's sky at the horizon.
+    pub horizon: [f32; 3],
+}
+
+impl GroundPalette {
+    /// Neutral apron beige fading into the default day horizon.
+    pub const DEFAULT: Self = Self {
+        base: [0.431, 0.424, 0.392],
+        horizon: [0.42, 0.62, 0.82],
+    };
+}
+
 /// Horizontal disc with radial colour/alpha fade so the outer rim blends into sky.
 pub fn stadium_ground_disc_mesh(radius: f32, segments: usize) -> Mesh {
-    const BASE_RGB: [f32; 3] = [0.431, 0.424, 0.392]; // apron beige
-    const SKY_RGB: [f32; 3] = [0.42, 0.62, 0.82]; // day horizon tint
+    stadium_ground_disc_mesh_tinted(radius, segments, GroundPalette::DEFAULT)
+}
+
+/// [`stadium_ground_disc_mesh`] in a stadium theme's own ground/horizon colours.
+pub fn stadium_ground_disc_mesh_tinted(
+    radius: f32,
+    segments: usize,
+    palette: GroundPalette,
+) -> Mesh {
+    let base_rgb = palette.base;
+    let sky_rgb = palette.horizon;
     const RINGS: usize = 12;
     const FADE_START: f32 = 0.86;
 
@@ -78,9 +108,9 @@ pub fn stadium_ground_disc_mesh(radius: f32, segments: usize) -> Mesh {
         let r = frac * radius;
         let fade = ((frac - FADE_START) / (1.0 - FADE_START)).clamp(0.0, 1.0);
         let rgb = [
-            BASE_RGB[0] + (SKY_RGB[0] - BASE_RGB[0]) * fade,
-            BASE_RGB[1] + (SKY_RGB[1] - BASE_RGB[1]) * fade,
-            BASE_RGB[2] + (SKY_RGB[2] - BASE_RGB[2]) * fade,
+            base_rgb[0] + (sky_rgb[0] - base_rgb[0]) * fade,
+            base_rgb[1] + (sky_rgb[1] - base_rgb[1]) * fade,
+            base_rgb[2] + (sky_rgb[2] - base_rgb[2]) * fade,
         ];
 
         let base = positions.len() as u32;
@@ -358,6 +388,35 @@ mod tests {
         let bowl_outer = 101.0;
         let r = stadium_ground_radius(bowl_outer);
         assert!(r < 580.0, "disc radius {r} must stay inside 600 m sky dome");
+    }
+
+    fn disc_colors(mesh: &Mesh) -> Vec<[f32; 4]> {
+        match mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
+            Some(bevy::mesh::VertexAttributeValues::Float32x4(c)) => c.clone(),
+            other => panic!("expected float4 vertex colours, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tinted_disc_uses_palette_at_centre_and_rim() {
+        let palette = GroundPalette {
+            base: [0.9, 0.1, 0.2],
+            horizon: [0.1, 0.8, 0.3],
+        };
+        let mesh = stadium_ground_disc_mesh_tinted(500.0, 24, palette);
+        let colors = disc_colors(&mesh);
+        let close = |a: &[f32], b: &[f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
+        // Vertex 0 is the disc centre; the last ring is the rim that meets the sky.
+        assert!(close(&colors[0][..3], &palette.base), "{:?}", colors[0]);
+        let rim = colors[colors.len() - 1];
+        assert!(close(&rim[..3], &palette.horizon), "{rim:?}");
+    }
+
+    #[test]
+    fn untinted_disc_matches_default_palette() {
+        let plain = stadium_ground_disc_mesh(500.0, 24);
+        let tinted = stadium_ground_disc_mesh_tinted(500.0, 24, GroundPalette::DEFAULT);
+        assert_eq!(disc_colors(&plain), disc_colors(&tinted));
     }
 
     #[test]
