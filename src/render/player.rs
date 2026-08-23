@@ -100,25 +100,27 @@ pub enum BoneKind {
     RightFoot,
 }
 fn bone_kind_for_name(name: &str) -> Option<BoneKind> {
+    // glTF node names are `mixamorig:RightHand`; match the bone suffix.
+    let name = name.rsplit(':').next().unwrap_or(name);
     match name {
-        "mixamorig:Hips" => Some(BoneKind::Hips),
-        "mixamorig:Spine" => Some(BoneKind::Spine),
-        "mixamorig:Spine1" => Some(BoneKind::Spine1),
-        "mixamorig:Spine2" => Some(BoneKind::Spine2),
-        "mixamorig:Neck" => Some(BoneKind::Neck),
-        "mixamorig:Head" => Some(BoneKind::Head),
-        "mixamorig:LeftArm" => Some(BoneKind::LeftArm),
-        "mixamorig:LeftForeArm" => Some(BoneKind::LeftForeArm),
-        "mixamorig:LeftHand" => Some(BoneKind::LeftHand),
-        "mixamorig:RightArm" => Some(BoneKind::RightArm),
-        "mixamorig:RightForeArm" => Some(BoneKind::RightForeArm),
-        "mixamorig:RightHand" => Some(BoneKind::RightHand),
-        "mixamorig:LeftUpLeg" => Some(BoneKind::LeftUpLeg),
-        "mixamorig:LeftLeg" => Some(BoneKind::LeftLeg),
-        "mixamorig:LeftFoot" => Some(BoneKind::LeftFoot),
-        "mixamorig:RightUpLeg" => Some(BoneKind::RightUpLeg),
-        "mixamorig:RightLeg" => Some(BoneKind::RightLeg),
-        "mixamorig:RightFoot" => Some(BoneKind::RightFoot),
+        "Hips" => Some(BoneKind::Hips),
+        "Spine" => Some(BoneKind::Spine),
+        "Spine1" => Some(BoneKind::Spine1),
+        "Spine2" => Some(BoneKind::Spine2),
+        "Neck" => Some(BoneKind::Neck),
+        "Head" => Some(BoneKind::Head),
+        "LeftArm" => Some(BoneKind::LeftArm),
+        "LeftForeArm" => Some(BoneKind::LeftForeArm),
+        "LeftHand" => Some(BoneKind::LeftHand),
+        "RightArm" => Some(BoneKind::RightArm),
+        "RightForeArm" => Some(BoneKind::RightForeArm),
+        "RightHand" => Some(BoneKind::RightHand),
+        "LeftUpLeg" => Some(BoneKind::LeftUpLeg),
+        "LeftLeg" => Some(BoneKind::LeftLeg),
+        "LeftFoot" => Some(BoneKind::LeftFoot),
+        "RightUpLeg" => Some(BoneKind::RightUpLeg),
+        "RightLeg" => Some(BoneKind::RightLeg),
+        "RightFoot" => Some(BoneKind::RightFoot),
         _ => None,
     }
 }
@@ -191,11 +193,63 @@ const SCENE_GROUND_Y: f32 = -FOOT_BIND_Y;
 /// Mixamo hips rest translation in armature space (metres, after glTF scale).
 const HIPS_BIND_TRANSLATION: Vec3 = Vec3::new(0.0, 1.039_914_7, 0.020_760_939);
 
+/// Mixamo bone local translations are centimetre-like; the imported `Armature`
+/// node applies `scale = 0.01` so `mixamorig:Hips` y = 103.99 → 1.04 m in
+/// world space. Equipment parented to a bone must be sized and offset in bone
+/// units, not metres.
+const BONE_UNITS_PER_METRE: f32 = 100.0;
+
+fn metres_to_bone(metres: f32) -> f32 {
+    metres * BONE_UNITS_PER_METRE
+}
+
+fn bone_vec3_m(x: f32, y: f32, z: f32) -> Vec3 {
+    Vec3::new(metres_to_bone(x), metres_to_bone(y), metres_to_bone(z))
+}
+
+/// Build a child-of-bone [`Transform`] from metre-space translation/rotation.
+fn equipment_transform_m(translation_m: Vec3, rotation: Quat) -> Transform {
+    Transform::from_translation(bone_vec3_m(translation_m.x, translation_m.y, translation_m.z))
+        .with_rotation(rotation)
+}
+
+fn equipment_transform_m_scaled(translation_m: Vec3, rotation: Quat, scale: Vec3) -> Transform {
+    equipment_transform_m(translation_m, rotation).with_scale(scale)
+}
+
 /// Imported Xbot root faces **+Z** in world space when Y rotation is zero.
 pub const MODEL_FORWARD_XZ: Vec2 = Vec2::new(0.0, 1.0);
 
 #[derive(Component)]
 pub struct KitStyled;
+
+/// Classify an imported Xbot body mesh from its glTF node name or the default
+/// salmon / brown PBR colours baked into the asset.
+fn kit_mesh_kind(mesh_name: &str, mat: &StandardMaterial) -> Option<KitMeshKind> {
+    if mesh_name.contains("Joint") || mesh_name.contains("Joints_MAT") {
+        return Some(KitMeshKind::Joints);
+    }
+    if mesh_name.contains("Surface")
+        || mesh_name.contains("HighLimbs")
+        || mesh_name.contains("GeoSG")
+    {
+        return Some(KitMeshKind::Surface);
+    }
+    let c = mat.base_color.to_srgba();
+    if c.red > 0.70 && c.green > 0.22 && c.blue > 0.18 {
+        Some(KitMeshKind::Surface)
+    } else if c.red < 0.45 && c.green < 0.16 && c.blue < 0.14 {
+        Some(KitMeshKind::Joints)
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KitMeshKind {
+    Surface,
+    Joints,
+}
 
 /// Marker: frustum culling was disabled on this figure mesh.
 #[derive(Component)]
@@ -281,8 +335,9 @@ pub fn spawn_figure(
     fig
 }
 
-/// Procedural jersey pattern texture keyed by team kit style. Head UV band
-/// (high V) keeps a warm skin tone so faces stay human on the shared mesh.
+/// Procedural jersey pattern keyed by team kit style. Mixamo Xbot UVs are a
+/// per-part atlas (not head-to-toe in V), so every texel is dyed from team
+/// colours; helmets/caps cover the head on the pitch.
 fn kit_pattern_image(style: KitStyle, primary: Color, secondary: Color) -> Image {
     use bevy::asset::RenderAssetUsages;
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -294,26 +349,18 @@ fn kit_pattern_image(style: KitStyle, primary: Color, secondary: Color) -> Image
         for x in 0..S {
             let u = x as f32 / S as f32;
             let v = y as f32 / S as f32;
-            let (r, g, b) = if v > 0.70 {
-                // Face/head UV band – warm skin, not kit dye.
-                (0.84, 0.70, 0.58)
-            } else if v < 0.14 {
-                // Boot zone.
-                (0.22, 0.20, 0.18)
+            let use_secondary = match style {
+                KitStyle::Solid => false,
+                KitStyle::VerticalStripes => (x / 4) % 2 == 0,
+                KitStyle::HorizontalBand => v > 0.28 && v < 0.52,
+                KitStyle::Chevron => v < 0.22 + (u - 0.5).abs() * 0.55,
+                KitStyle::DiagonalSplit => u + v * 0.85 > 1.05,
+                KitStyle::Hoops => (y / 6) % 2 == 0,
+            };
+            let (r, g, b) = if use_secondary {
+                (s.red, s.green, s.blue)
             } else {
-                let use_secondary = match style {
-                    KitStyle::Solid => false,
-                    KitStyle::VerticalStripes => (x / 4) % 2 == 0,
-                    KitStyle::HorizontalBand => v > 0.28 && v < 0.52,
-                    KitStyle::Chevron => v < 0.22 + (u - 0.5).abs() * 0.55,
-                    KitStyle::DiagonalSplit => u + v * 0.85 > 1.05,
-                    KitStyle::Hoops => (y / 6) % 2 == 0,
-                };
-                if use_secondary {
-                    (s.red, s.green, s.blue)
-                } else {
-                    (p.red, p.green, p.blue)
-                }
+                (p.red, p.green, p.blue)
             };
             data.extend_from_slice(&[(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]);
         }
@@ -398,48 +445,53 @@ pub fn apply_team_kit_materials(
     mut commands: Commands,
     kits: Query<&TeamKit>,
     parents: Query<&ChildOf>,
-    meshes: Query<(Entity, &Name, &MeshMaterial3d<StandardMaterial>), Without<KitStyled>>,
+    meshes: Query<
+        (Entity, Option<&Name>, &MeshMaterial3d<StandardMaterial>),
+        (Without<KitStyled>, With<Mesh3d>),
+    >,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     for (entity, name, mat_handle) in &meshes {
-        let mut current = parents.get(entity).ok().map(ChildOf::parent);
+        let mut cur = parents.get(entity).ok().map(ChildOf::parent);
         let mut kit = None;
-        for _ in 0..16 {
-            let Some(parent) = current else { break };
+        for _ in 0..32 {
+            let Some(parent) = cur else { break };
             if let Ok(found) = kits.get(parent) {
                 kit = Some(found);
                 break;
             }
-            current = parents.get(parent).ok().map(ChildOf::parent);
+            cur = parents.get(parent).ok().map(ChildOf::parent);
         }
         let Some(kit) = kit else { continue };
-        let mesh_name = name.as_str();
-        let is_joints = mesh_name.contains("Joints");
-        let is_surface = mesh_name.contains("Surface");
-        if !is_joints && !is_surface {
-            continue;
-        }
         let Some(mut mat) = materials.get(&mat_handle.0).cloned() else {
             continue;
         };
-        let team_col = if is_joints {
+        let mesh_name = name.map(|n| n.as_str()).unwrap_or("");
+        let Some(kind) = kit_mesh_kind(mesh_name, &mat) else {
+            continue;
+        };
+        let team_col = if kind == KitMeshKind::Joints {
             kit.secondary_color
         } else {
             kit.primary_color
         };
         let base_srgba = team_col.to_srgba();
         let orig = mat.base_color.to_srgba();
-        if is_surface {
-            // Jersey/trousers pattern reads as cloth; head UV band stays skin.
-            mat.base_color_texture = Some(images.add(kit_pattern_image(
-                kit.kit_style,
-                kit.primary_color,
-                kit.secondary_color,
-            )));
-            mat.base_color = Color::WHITE;
+        if kind == KitMeshKind::Surface {
+            if kit.kit_style == KitStyle::Solid {
+                // Solid kits tint the whole mesh — reads clearly on broadcast cameras.
+                mat.base_color_texture = None;
+                mat.base_color = kit.primary_color;
+            } else {
+                mat.base_color_texture = Some(images.add(kit_pattern_image(
+                    kit.kit_style,
+                    kit.primary_color,
+                    kit.secondary_color,
+                )));
+                mat.base_color = Color::WHITE;
+            }
         } else {
-            // Joint trim mesh – secondary accent, matte fabric/plastic trim.
             let lerp = 0.72;
             mat.base_color = Color::srgba(
                 orig.red * (1.0 - lerp) + base_srgba.red * lerp,
@@ -448,9 +500,13 @@ pub fn apply_team_kit_materials(
                 1.0,
             );
         }
-        mat.perceptual_roughness = if is_joints { 0.90 } else { 0.94 };
+        mat.perceptual_roughness = if kind == KitMeshKind::Joints {
+            0.90
+        } else {
+            0.94
+        };
         mat.metallic = 0.0;
-        mat.reflectance = if is_joints { 0.08 } else { 0.06 };
+        mat.reflectance = if kind == KitMeshKind::Joints { 0.08 } else { 0.06 };
         let cloned = materials.add(mat);
         commands
             .entity(entity)
@@ -615,9 +671,15 @@ fn attach_chest_crest(
     spawn_mesh_child(
         spine,
         commands,
-        meshes.add(Rectangle::new(0.19, 0.19)),
+        meshes.add(Rectangle::new(
+            metres_to_bone(0.19),
+            metres_to_bone(0.19),
+        )),
         crest,
-        Transform::from_xyz(0.0, 0.11, 0.12).with_rotation(Quat::from_rotation_x(-0.08)),
+        equipment_transform_m(
+            Vec3::new(0.0, 0.11, 0.12),
+            Quat::from_rotation_x(-0.08),
+        ),
     );
 }
 
@@ -631,23 +693,32 @@ fn attach_bat(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
-    let blade = meshes.add(Cuboid::new(0.11, 0.60, 0.046));
-    let handle = meshes.add(Capsule3d::new(0.017, 0.26));
+    let blade = meshes.add(Cuboid::new(
+        metres_to_bone(0.11),
+        metres_to_bone(0.60),
+        metres_to_bone(0.046),
+    ));
+    let handle = meshes.add(Capsule3d::new(
+        metres_to_bone(0.017),
+        metres_to_bone(0.26),
+    ));
     let wood = willow_mat(materials);
     let grip_mat = matte(materials, Color::srgb_u8(0x24, 0x28, 0x30), 0.9);
     // Whole bat hangs down-forward from the hands, tilted into a stance.
     let swing = Quat::from_rotation_x(-0.5) * Quat::from_rotation_z(0.15);
+    let blade_tf = equipment_transform_m(Vec3::new(0.0, -0.44, 0.10), swing);
+    let handle_tf = equipment_transform_m(Vec3::new(0.0, -0.20, 0.05), swing);
     commands.entity(hand).with_children(|p| {
         p.spawn((
             Bat,
             Mesh3d(blade),
             MeshMaterial3d(wood.clone()),
-            Transform::from_xyz(0.0, -0.44, 0.10).with_rotation(swing),
+            blade_tf,
         ));
         p.spawn((
             Mesh3d(handle),
             MeshMaterial3d(grip_mat),
-            Transform::from_xyz(0.0, -0.20, 0.05).with_rotation(swing),
+            handle_tf,
         ));
     });
 }
@@ -659,7 +730,8 @@ fn attach_glove(
     materials: &mut Assets<StandardMaterial>,
     left: bool,
 ) {
-    let glove = meshes.add(Sphere::new(0.062).mesh().ico(2).unwrap());
+    let glove = meshes
+        .add(Sphere::new(metres_to_bone(0.062)).mesh().ico(2).unwrap());
     let mat = matte(materials, Color::srgb_u8(0xE8, 0xE2, 0xD2), 0.85);
     let x = if left { -0.03 } else { 0.03 };
     spawn_mesh_child(
@@ -667,7 +739,11 @@ fn attach_glove(
         commands,
         glove,
         mat,
-        Transform::from_xyz(x, -0.01, 0.045).with_scale(Vec3::new(1.0, 1.25, 0.85)),
+        equipment_transform_m_scaled(
+            Vec3::new(x, -0.01, 0.045),
+            Quat::IDENTITY,
+            Vec3::new(1.0, 1.25, 0.85),
+        ),
     );
 }
 
@@ -680,20 +756,29 @@ fn attach_helmet(
 ) {
     let s = primary.to_srgba();
     let shell_col = Color::srgb(s.red * 0.55, s.green * 0.55, s.blue * 0.55);
-    let shell = meshes.add(Sphere::new(0.128).mesh().ico(3).unwrap());
-    let peak = meshes.add(Cuboid::new(0.17, 0.028, 0.14));
+    let shell = meshes
+        .add(Sphere::new(metres_to_bone(0.128)).mesh().ico(3).unwrap());
+    let peak = meshes.add(Cuboid::new(
+        metres_to_bone(0.17),
+        metres_to_bone(0.028),
+        metres_to_bone(0.14),
+    ));
     let shell_mat = matte_shell(materials, shell_col, 0.78, 0.12);
     let peak_mat = matte_shell(materials, shell_col, 0.82, 0.10);
     commands.entity(head).with_children(|p| {
         p.spawn((
             Mesh3d(shell),
             MeshMaterial3d(shell_mat),
-            Transform::from_xyz(0.0, 0.075, 0.005).with_scale(Vec3::new(1.0, 1.08, 1.14)),
+            equipment_transform_m_scaled(
+                Vec3::new(0.0, 0.075, 0.005),
+                Quat::IDENTITY,
+                Vec3::new(1.0, 1.08, 1.14),
+            ),
         ));
         p.spawn((
             Mesh3d(peak),
             MeshMaterial3d(peak_mat),
-            Transform::from_xyz(0.0, 0.115, 0.115),
+            equipment_transform_m(Vec3::new(0.0, 0.115, 0.115), Quat::IDENTITY),
         ));
     });
 }
@@ -705,21 +790,31 @@ fn attach_cap(
     materials: &mut Assets<StandardMaterial>,
     primary: Color,
 ) {
-    let dome = meshes.add(Sphere::new(0.118).mesh().ico(2).unwrap());
-    let brim = meshes.add(Cylinder::new(0.105, 0.012));
+    let dome = meshes
+        .add(Sphere::new(metres_to_bone(0.118)).mesh().ico(2).unwrap());
+    let brim = meshes.add(Cylinder::new(
+        metres_to_bone(0.105),
+        metres_to_bone(0.012),
+    ));
     let dome_mat = matte(materials, primary, 0.85);
     commands.entity(head).with_children(|p| {
         p.spawn((
             Mesh3d(dome),
             MeshMaterial3d(dome_mat.clone()),
-            Transform::from_xyz(0.0, 0.09, 0.0).with_scale(Vec3::new(1.0, 0.72, 1.0)),
+            equipment_transform_m_scaled(
+                Vec3::new(0.0, 0.09, 0.0),
+                Quat::IDENTITY,
+                Vec3::new(1.0, 0.72, 1.0),
+            ),
         ));
         p.spawn((
             Mesh3d(brim),
             MeshMaterial3d(dome_mat),
-            Transform::from_xyz(0.0, 0.095, 0.09)
-                .with_rotation(Quat::from_rotation_x(0.18))
-                .with_scale(Vec3::new(1.0, 1.0, 1.35)),
+            equipment_transform_m_scaled(
+                Vec3::new(0.0, 0.095, 0.09),
+                Quat::from_rotation_x(0.18),
+                Vec3::new(1.0, 1.0, 1.35),
+            ),
         ));
     });
 }
@@ -733,14 +828,18 @@ fn attach_pad(
 ) {
     let w = if keeper { 0.10 } else { 0.082 };
     let h = if keeper { 0.26 } else { 0.21 };
-    let pad = meshes.add(Cuboid::new(w * 2.0, h * 2.0, 0.056));
+    let pad = meshes.add(Cuboid::new(
+        metres_to_bone(w * 2.0),
+        metres_to_bone(h * 2.0),
+        metres_to_bone(0.056),
+    ));
     let mat = matte(materials, Color::srgb_u8(0xF1, 0xEE, 0xE4), 0.88);
     spawn_mesh_child(
         leg,
         commands,
         pad,
         mat,
-        Transform::from_xyz(0.0, -h - 0.02, 0.055),
+        equipment_transform_m(Vec3::new(0.0, -h - 0.02, 0.055), Quat::IDENTITY),
     );
 }
 
@@ -1130,42 +1229,63 @@ fn bowl_settle(p: f32, pose: &mut PoseTargets) {
     }
 }
 
-/// Bat swing: backlift → decisive downswing through the line → full
-/// follow-through with hip rotation.
+/// Bat swing: high backlift → accelerating downswing through the line → full
+/// follow-through with hip and shoulder rotation.
 fn bat_swing(p: f32, pose: &mut PoseTargets) {
-    let pc = (p.clamp(0.0, 1.0)).min(1.0);
-    let az = kf(
+    let pc = p.clamp(0.0, 1.0);
+    let arm_z = kf(
         &[
-            (0.0, 0.35),
-            (0.20, 0.92),
-            (0.38, 0.80),
-            (0.56, -1.45),
-            (0.76, -2.12),
-            (1.0, -2.28),
+            (0.0, 0.32),
+            (0.14, 1.08),
+            (0.30, 0.82),
+            (0.48, -0.55),
+            (0.60, -1.62),
+            (0.74, -2.28),
+            (1.0, -2.55),
+        ],
+        pc,
+    );
+    let arm_x = kf(
+        &[
+            (0.0, 0.58),
+            (0.14, 0.18),
+            (0.30, 0.32),
+            (0.48, 0.88),
+            (0.60, 1.22),
+            (0.74, 0.78),
+            (1.0, 0.42),
         ],
         pc,
     );
     let spine_y = kf(
         &[
-            (0.0, 0.0),
-            (0.26, -0.24),
-            (0.50, -0.04),
-            (0.68, 0.30),
-            (1.0, 0.38),
+            (0.0, -0.28),
+            (0.22, -0.38),
+            (0.48, -0.08),
+            (0.62, 0.34),
+            (1.0, 0.42),
         ],
         pc,
     );
-    let hips_y = kf(&[(0.0, 0.0), (0.30, -0.14), (0.62, 0.26), (1.0, 0.34)], pc);
-    let bend = kf(&[(0.0, 0.85), (0.35, 0.70), (0.56, 0.95), (1.0, 0.55)], pc);
-    pose.ra = rz(az * 0.78) * rx(0.26);
-    pose.la = rz(az * 0.55);
+    let hips_y = kf(
+        &[(0.0, -0.10), (0.28, -0.22), (0.58, 0.32), (0.72, 0.38), (1.0, 0.30)],
+        pc,
+    );
+    let bend = kf(
+        &[(0.0, 0.82), (0.30, 0.62), (0.58, 1.08), (0.72, 0.92), (1.0, 0.48)],
+        pc,
+    );
+    pose.ra = rz(arm_z * 0.85) * rx(arm_x) * rz(-0.34);
+    pose.la = rz(arm_z * 0.60) * rx(arm_x * 0.94) * rz(0.30);
     pose.rfa = rx(bend);
-    pose.lfa = rx(bend * 0.9);
-    pose.spine = ry(spine_y) * rx(0.16);
+    pose.lfa = rx(bend * 0.92);
+    pose.spine = ry(spine_y) * rx(0.20);
     pose.hips = ry(hips_y);
     // Weight shifts onto the front foot through contact.
-    pose.lup = rx(kf(&[(0.0, 0.5), (0.6, 0.30), (1.0, 0.24)], pc));
-    pose.rup = rx(kf(&[(0.0, 0.54), (0.6, 0.62), (1.0, 0.66)], pc));
+    pose.lup = rx(kf(&[(0.0, 0.50), (0.58, 0.26), (1.0, 0.20)], pc));
+    pose.rup = rx(kf(&[(0.0, 0.54), (0.58, 0.66), (1.0, 0.70)], pc));
+    pose.ll = rx(kf(&[(0.0, -0.66), (0.58, -0.52), (1.0, -0.38)], pc));
+    pose.rl = rx(kf(&[(0.0, -0.70), (0.58, -0.62), (1.0, -0.55)], pc));
 }
 
 /// Quick underarm-ish return throw with wrist snap.
@@ -1218,6 +1338,68 @@ pub fn animate_skeleton(
 mod tests {
     use super::*;
     use bevy::math::Vec2;
+
+    #[test]
+    fn metres_to_bone_units_scales_by_armature_ratio() {
+        assert!((metres_to_bone(1.0) - 100.0).abs() < 1e-5);
+        assert!((metres_to_bone(0.44) - 44.0).abs() < 1e-5);
+        let tf = equipment_transform_m(Vec3::new(0.0, -0.44, 0.10), Quat::IDENTITY);
+        assert!((tf.translation.y + 44.0).abs() < 1e-4);
+        assert!((tf.translation.z - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn kit_pattern_uses_team_colour_at_high_v() {
+        let primary = Color::srgb(0.1, 0.2, 0.9);
+        let secondary = Color::srgb(0.9, 0.8, 0.1);
+        let img = kit_pattern_image(KitStyle::Solid, primary, secondary);
+        // High-V texels were wrongly mapped to skin tone before the UV fix.
+        let idx = ((64 * 58 + 32) * 4) as usize;
+        let data = img.data.as_ref().expect("kit pattern pixel data");
+        let r = data[idx] as f32 / 255.0;
+        let g = data[idx + 1] as f32 / 255.0;
+        let b = data[idx + 2] as f32 / 255.0;
+        let p = primary.to_srgba();
+        assert!(
+            (r - p.red).abs() < 0.02 && (g - p.green).abs() < 0.02 && (b - p.blue).abs() < 0.02,
+            "high-v pixel should be primary kit colour, got ({r},{g},{b})",
+        );
+    }
+
+    #[test]
+    fn bat_swing_reaches_full_follow_through() {
+        let mut start = PoseTargets::default();
+        let mut contact = PoseTargets::default();
+        let mut end = PoseTargets::default();
+        bat_swing(0.0, &mut start);
+        bat_swing(0.60, &mut contact);
+        bat_swing(1.0, &mut end);
+        assert!(
+            contact.ra.angle_between(start.ra) > 0.35,
+            "backlift should separate from contact pose"
+        );
+        assert!(
+            end.ra.angle_between(contact.ra) > 0.25,
+            "follow-through should continue past contact"
+        );
+    }
+
+    #[test]
+    fn bone_kind_matches_mixamo_prefix() {
+        assert_eq!(
+            bone_kind_for_name("mixamorig:RightHand"),
+            Some(BoneKind::RightHand)
+        );
+    }
+
+    #[test]
+    fn kit_mesh_kind_detects_imported_surface_colour() {
+        let mat = StandardMaterial {
+            base_color: Color::srgb(0.837, 0.302, 0.264),
+            ..Default::default()
+        };
+        assert_eq!(kit_mesh_kind("", &mat), Some(KitMeshKind::Surface));
+    }
 
     #[test]
     fn face_target_striker_faces_bowler_end() {
@@ -1373,27 +1555,42 @@ mod tests {
 
         let spawn_surface = |world: &mut World, fig: Entity, mat: Handle<StandardMaterial>| {
             world
-                .spawn((Name::new("Beta_Surface"), MeshMaterial3d(mat), ChildOf(fig)))
+                .spawn((
+                    Name::new("Beta_Surface"),
+                    Mesh3d(Handle::default()),
+                    MeshMaterial3d(mat),
+                    ChildOf(fig),
+                ))
                 .id()
         };
 
         let india_fig = app
             .world_mut()
-            .spawn(TeamKit {
-                primary_color: india.primary_color,
-                secondary_color: india.secondary_color,
-                kit_style: india.kit_style,
-                crest: crest.clone(),
-            })
+            .spawn((
+                Figure {
+                    kind: FigureKind::Fielder(0),
+                },
+                TeamKit {
+                    primary_color: india.primary_color,
+                    secondary_color: india.secondary_color,
+                    kit_style: india.kit_style,
+                    crest: crest.clone(),
+                },
+            ))
             .id();
         let aus_fig = app
             .world_mut()
-            .spawn(TeamKit {
-                primary_color: australia.primary_color,
-                secondary_color: australia.secondary_color,
-                kit_style: australia.kit_style,
-                crest: crest.clone(),
-            })
+            .spawn((
+                Figure {
+                    kind: FigureKind::Fielder(1),
+                },
+                TeamKit {
+                    primary_color: australia.primary_color,
+                    secondary_color: australia.secondary_color,
+                    kit_style: australia.kit_style,
+                    crest: crest.clone(),
+                },
+            ))
             .id();
 
         let india_mesh = spawn_surface(app.world_mut(), india_fig, shared_import.clone());
@@ -1427,22 +1624,22 @@ mod tests {
         assert_ne!(aus_handle, shared_import);
         assert_ne!(india_handle, aus_handle);
 
-        let india_tex = materials
-            .get(&india_handle)
-            .unwrap()
-            .base_color_texture
-            .clone()
-            .expect("surface kit should have pattern texture");
-        let aus_tex = materials
-            .get(&aus_handle)
-            .unwrap()
-            .base_color_texture
-            .clone()
-            .expect("surface kit should have pattern texture");
-        assert_ne!(
-            india_tex, aus_tex,
-            "distinct kits must get distinct pattern textures"
+        let india_mat = materials.get(&india_handle).unwrap();
+        let aus_mat = materials.get(&aus_handle).unwrap();
+        assert!(
+            india_mat.base_color_texture.is_none(),
+            "solid kit should tint base colour directly",
         );
+        assert_eq!(india_mat.base_color, india.primary_color);
+        let aus_tex = aus_mat
+            .base_color_texture
+            .clone()
+            .expect("patterned kit should have pattern texture");
+        assert_ne!(
+            india_mat.base_color, aus_mat.base_color,
+            "distinct kits must get distinct materials",
+        );
+        assert!(aus_tex != Handle::default());
 
         assert!(world.entity(india_mesh).contains::<KitStyled>());
         assert!(world.entity(aus_mesh).contains::<KitStyled>());
