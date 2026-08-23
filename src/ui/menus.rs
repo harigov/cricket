@@ -29,6 +29,19 @@ pub const TEAM_GRID_WIDTH: f32 =
 const TOSS_FLIP_DURATION: f32 = 2.0;
 const TOSS_RESULT_PAUSE: f32 = 1.5;
 
+/// Approximate row stride for scroll math (design pixels, pre-scale).
+const STADIUM_ROW_HEIGHT: f32 = 100.0;
+const STADIUM_ROW_GAP: f32 = 8.0;
+const STADIUM_LIST_VIEWPORT_HEIGHT: f32 = 320.0;
+
+const SETTINGS_ROW_HEIGHT: f32 = 28.0;
+const SETTINGS_ROW_GAP: f32 = 3.0;
+const SETTINGS_LIST_VIEWPORT_HEIGHT: f32 = 268.0;
+
+const BRACKET_ROW_HEIGHT: f32 = 26.0;
+const BRACKET_ROW_GAP: f32 = 7.0;
+const BRACKET_LIST_VIEWPORT_HEIGHT: f32 = 310.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsTab {
     Audio,
@@ -791,6 +804,162 @@ fn spawn_menu_header_block(
     ));
 }
 
+fn list_content_height(item_count: usize, row_height: f32, row_gap: f32) -> f32 {
+    if item_count == 0 {
+        return 0.0;
+    }
+    row_height * item_count as f32 + row_gap * item_count.saturating_sub(1) as f32
+}
+
+fn spawn_scroll_edge_hint(
+    parent: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    scale: f32,
+    top: bool,
+    show: bool,
+) {
+    if !show {
+        return;
+    }
+    parent
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                right: theme::spx(8.0, scale),
+                height: theme::spx(20.0, scale),
+                top: if top { px(0) } else { Val::Auto },
+                bottom: if top { Val::Auto } else { px(0) },
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BackgroundColor(theme::palette::scroll_edge_fade()),
+            ZIndex(3),
+        ))
+        .with_children(|hint| {
+            hint.spawn((
+                Text::new(if top { "▲" } else { "▼" }),
+                TextFont {
+                    font: fonts.bold.clone(),
+                    font_size: 10.0 * scale,
+                    ..default()
+                },
+                TextColor(theme::palette::text_muted()),
+            ));
+        });
+}
+
+fn spawn_scroll_thumb(
+    parent: &mut ChildSpawnerCommands,
+    scale: f32,
+    offset: f32,
+    viewport_height: f32,
+    content_height: f32,
+) {
+    let max_offset = (content_height - viewport_height).max(0.0);
+    if max_offset <= 0.0 {
+        return;
+    }
+    let track_h = viewport_height;
+    let thumb_h = (viewport_height / content_height * track_h).clamp(24.0 * scale, track_h);
+    let thumb_top = if max_offset > 0.0 {
+        (offset / max_offset) * (track_h - thumb_h)
+    } else {
+        0.0
+    };
+
+    parent
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(0),
+                top: px(0),
+                width: theme::spx(4.0, scale),
+                height: px(viewport_height),
+                ..default()
+            },
+            BackgroundColor(theme::palette::scroll_track()),
+            ZIndex(2),
+        ))
+        .with_children(|track| {
+            track.spawn((
+                Node {
+                    width: percent(100),
+                    height: px(thumb_h),
+                    margin: UiRect::top(px(thumb_top)),
+                    border_radius: BorderRadius::all(theme::spx(2.0, scale)),
+                    ..default()
+                },
+                BackgroundColor(theme::palette::scroll_thumb()),
+            ));
+        });
+}
+
+/// Clipped, keyboard-driven scroll region with edge hints and a thumb indicator.
+fn spawn_scroll_viewport<R>(
+    parent: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    scale: f32,
+    viewport_height: f32,
+    selected: usize,
+    item_count: usize,
+    row_height: f32,
+    row_gap: f32,
+    width: Val,
+    build_rows: R,
+) where
+    R: FnOnce(&mut ChildSpawnerCommands),
+{
+    let row_h = theme::scaled_px(row_height, scale);
+    let gap = theme::scaled_px(row_gap, scale);
+    let content_h = list_content_height(item_count, row_h, gap);
+    let max_offset = (content_h - viewport_height).max(0.0);
+    let offset = theme::list_scroll_offset(selected, row_h, gap, viewport_height, item_count);
+    let can_scroll = max_offset > 0.5;
+    let show_top = offset > 0.5;
+    let show_bottom = offset < max_offset - 0.5;
+
+    parent
+        .spawn((Node {
+            position_type: PositionType::Relative,
+            width,
+            height: px(viewport_height),
+            min_height: px(viewport_height),
+            max_height: px(viewport_height),
+            flex_shrink: 0.0,
+            ..default()
+        },))
+        .with_children(|shell| {
+            shell
+                .spawn((
+                    Node {
+                        width: percent(100),
+                        height: percent(100),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    ScrollPosition(Vec2::new(0.0, offset)),
+                ))
+                .with_children(|viewport| {
+                    viewport
+                        .spawn((Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: theme::spx(row_gap, scale),
+                            width: percent(100),
+                            ..default()
+                        },))
+                        .with_children(build_rows);
+                });
+
+            if can_scroll {
+                spawn_scroll_edge_hint(shell, fonts, scale, true, show_top);
+                spawn_scroll_edge_hint(shell, fonts, scale, false, show_bottom);
+                spawn_scroll_thumb(shell, scale, offset, viewport_height, content_h);
+            }
+        });
+}
+
 fn spawn_menu_settings_tabs(
     parent: &mut ChildSpawnerCommands,
     ms: &MenuState,
@@ -1158,7 +1327,36 @@ fn refresh_menu(
                     screen_items(&ms, &wd, &ct, &bindings, &audio, &rebind, &ui_prefs)
                 };
 
-                spawn_menu_item_rows(items, &ms, fonts, lines, is_main);
+                if matches!(ms.screen, Screen::Settings | Screen::Bracket) {
+                    let (row_h, row_gap, vp_design) = if ms.screen == Screen::Settings {
+                        (
+                            SETTINGS_ROW_HEIGHT,
+                            SETTINGS_ROW_GAP,
+                            SETTINGS_LIST_VIEWPORT_HEIGHT,
+                        )
+                    } else {
+                        (
+                            BRACKET_ROW_HEIGHT,
+                            BRACKET_ROW_GAP,
+                            BRACKET_LIST_VIEWPORT_HEIGHT,
+                        )
+                    };
+                    let vp_h = theme::scaled_px(vp_design, scale);
+                    spawn_scroll_viewport(
+                        items,
+                        fonts,
+                        scale,
+                        vp_h,
+                        ms.sel,
+                        lines.len(),
+                        row_h,
+                        row_gap,
+                        percent(100),
+                        |content| spawn_menu_item_rows(content, &ms, fonts, lines, is_main),
+                    );
+                } else {
+                    spawn_menu_item_rows(items, &ms, fonts, lines, is_main);
+                }
             });
 
         spawn_menu_footer_hint(p, &ms, fonts, scale);
@@ -1236,6 +1434,7 @@ fn spawn_stadium_row(
         .spawn((
             Node {
                 width: percent(100),
+                min_height: theme::spx(STADIUM_ROW_HEIGHT, scale),
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::FlexStart,
                 row_gap: theme::spx(6.0, scale),
@@ -1692,50 +1891,59 @@ fn spawn_setup_visuals(
                 });
         }
         Screen::SetupStadium => {
+            let count = wd.stadiums.len() + 1;
+            let vp_h = theme::scaled_px(STADIUM_LIST_VIEWPORT_HEIGHT, scale);
             parent
                 .spawn((Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: theme::spx(8.0, scale),
-                    width: theme::spx(560.0, scale),
-                    max_height: theme::spx(320.0, scale),
-                    overflow: Overflow::clip(),
                     margin: UiRect::bottom(theme::spx(8.0, scale)),
                     ..default()
                 },))
-                .with_children(|list| {
-                    let count = wd.stadiums.len() + 1;
-                    for i in 0..count {
-                        let selected = i == ms.sel;
-                        if i >= wd.stadiums.len() {
-                            spawn_stadium_row(
-                                list,
-                                fonts,
-                                scale,
-                                "Random Venue",
-                                StadiumRowMeta {
-                                    city: Some("Surprise pick each match"),
-                                    pitch: None,
-                                    boundary_m: None,
-                                },
-                                selected,
-                            );
-                        } else {
-                            let s = &wd.stadiums[i];
-                            let pitch_chip = format!("{} pitch", s.pitch.label());
-                            spawn_stadium_row(
-                                list,
-                                fonts,
-                                scale,
-                                &s.name,
-                                StadiumRowMeta {
-                                    city: Some(&s.city),
-                                    pitch: Some(&pitch_chip),
-                                    boundary_m: Some(s.boundary_radius()),
-                                },
-                                selected,
-                            );
-                        }
-                    }
+                .with_children(|wrap| {
+                    spawn_scroll_viewport(
+                        wrap,
+                        fonts,
+                        scale,
+                        vp_h,
+                        ms.sel,
+                        count,
+                        STADIUM_ROW_HEIGHT,
+                        STADIUM_ROW_GAP,
+                        theme::spx(560.0, scale),
+                        |list| {
+                            for i in 0..count {
+                                let selected = i == ms.sel;
+                                if i >= wd.stadiums.len() {
+                                    spawn_stadium_row(
+                                        list,
+                                        fonts,
+                                        scale,
+                                        "Random Venue",
+                                        StadiumRowMeta {
+                                            city: Some("Surprise pick each match"),
+                                            pitch: None,
+                                            boundary_m: None,
+                                        },
+                                        selected,
+                                    );
+                                } else {
+                                    let s = &wd.stadiums[i];
+                                    let pitch_chip = format!("{} pitch", s.pitch.label());
+                                    spawn_stadium_row(
+                                        list,
+                                        fonts,
+                                        scale,
+                                        &s.name,
+                                        StadiumRowMeta {
+                                            city: Some(&s.city),
+                                            pitch: Some(&pitch_chip),
+                                            boundary_m: Some(s.boundary_radius()),
+                                        },
+                                        selected,
+                                    );
+                                }
+                            }
+                        },
+                    );
                 });
         }
         Screen::SetupTossFlip => {
@@ -2624,5 +2832,29 @@ mod tests {
 
         assert_eq!(before, mid_flip);
         assert_eq!(before, late_flip);
+    }
+
+    #[test]
+    fn list_scroll_offset_keeps_selected_row_visible() {
+        let row_h = 100.0;
+        let gap = 8.0;
+        let vp = 320.0;
+        let count = 5;
+
+        for sel in 0..count {
+            let offset = theme::list_scroll_offset(sel, row_h, gap, vp, count);
+            let stride = row_h + gap;
+            let row_top = sel as f32 * stride;
+            let row_bottom = row_top + row_h;
+            assert!(
+                row_top + 0.01 >= offset,
+                "sel {sel}: row top {row_top} above offset {offset}"
+            );
+            assert!(
+                row_bottom <= offset + vp + 0.01,
+                "sel {sel}: row bottom {row_bottom} below viewport end {}",
+                offset + vp
+            );
+        }
     }
 }
