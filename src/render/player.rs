@@ -223,6 +223,117 @@ fn equipment_transform_m_scaled(translation_m: Vec3, rotation: Quat, scale: Vec3
     equipment_transform_m(translation_m, rotation).with_scale(scale)
 }
 
+/// Dominant child offset axis for a Mixamo limb bone (empirical from `Xbot.glb`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MixamoLimbAxis {
+    PosX,
+    NegX,
+    PosY,
+    NegY,
+}
+
+fn mixamo_limb_axis(kind: BoneKind) -> Option<MixamoLimbAxis> {
+    match kind {
+        BoneKind::RightArm | BoneKind::RightForeArm | BoneKind::RightHand => {
+            Some(MixamoLimbAxis::NegX)
+        }
+        BoneKind::LeftArm | BoneKind::LeftForeArm | BoneKind::LeftHand => Some(MixamoLimbAxis::PosX),
+        BoneKind::LeftLeg | BoneKind::RightLeg | BoneKind::LeftFoot | BoneKind::RightFoot => {
+            Some(MixamoLimbAxis::NegY)
+        }
+        BoneKind::Spine
+        | BoneKind::Spine1
+        | BoneKind::Spine2
+        | BoneKind::Neck
+        | BoneKind::Head => Some(MixamoLimbAxis::PosY),
+        _ => None,
+    }
+}
+
+/// Bat mesh length is authored on +Y. Measured bind-pose hand axes from
+/// `Xbot.glb` put the limb along ±X and the palm normal on −Z; in
+/// [`batter_stance`] the posed hand +Z axis hangs toward the ground, so map
+/// mesh +Y onto hand +Z and tip the face toward the bowler.
+fn bat_grip_rotation() -> Quat {
+    Quat::from_rotation_x(std::f32::consts::FRAC_PI_2) * Quat::from_rotation_y(-0.14)
+}
+
+/// Blade direction in figure-root space: down with the toe toward the bowler.
+const BATTING_BLADE_DIR_FIGURE: Vec3 = Vec3::new(0.10, -0.96, 0.26);
+
+fn global_rotation_of(
+    entity: Entity,
+    figure: Entity,
+    locals: &std::collections::HashMap<Entity, Quat>,
+    parents: &Query<&ChildOf>,
+) -> Option<Quat> {
+    let mut q = *locals.get(&entity)?;
+    let mut cur = parents.get(entity).ok().map(ChildOf::parent);
+    while let Some(parent) = cur {
+        if parent == figure {
+            return Some(q);
+        }
+        q = locals.get(&parent).copied().unwrap_or(Quat::IDENTITY) * q;
+        cur = parents.get(parent).ok().map(ChildOf::parent);
+    }
+    None
+}
+
+fn orient_attached_bats(
+    idle_batters: &std::collections::HashSet<Entity>,
+    figure_dirs: &[(Entity, Quat, Vec3)],
+    locals: &std::collections::HashMap<Entity, Quat>,
+    bone_figure: &std::collections::HashMap<Entity, Entity>,
+    parents: &Query<&ChildOf>,
+    bats: &mut Query<(&mut Transform, &ChildOf), With<Bat>>,
+) {
+    for (fig_ent, fig_rot, desired_world) in figure_dirs {
+        if !idle_batters.contains(fig_ent) {
+            continue;
+        }
+        for (mut bat_tf, child_of) in bats.iter_mut() {
+            let hand = child_of.parent();
+            if bone_figure.get(&hand) != Some(fig_ent) {
+                continue;
+            }
+            let Some(hand_in_figure) = global_rotation_of(hand, *fig_ent, locals, parents) else {
+                continue;
+            };
+            let hand_world = *fig_rot * hand_in_figure;
+            let blade_in_hand = hand_world.inverse() * *desired_world;
+            if blade_in_hand.length_squared() < 1e-6 {
+                continue;
+            }
+            bat_tf.rotation = Quat::from_rotation_arc(Vec3::Y, blade_in_hand.normalize());
+        }
+    }
+}
+
+/// Build the procedural pose for the current animation state.
+fn procedural_pose_for(state: AnimState, kind: FigureKind, t_global: f32) -> PoseTargets {
+    let mut pose = PoseTargets::default();
+    match state {
+        AnimState::Idle if matches!(kind, FigureKind::Batter | FigureKind::NonStriker) => {
+            batter_stance(t_global, &mut pose);
+        }
+        AnimState::Idle => idle_sway(t_global, &mut pose),
+        AnimState::Run { t } => run_pose(t, &mut pose),
+        AnimState::BowlAction { p } => bowl_action(p, &mut pose),
+        AnimState::BowlSettle { t } => bowl_settle(t, &mut pose),
+        AnimState::BatSwing { p } => bat_swing(p, &mut pose),
+        AnimState::Throw { p } => throw_pose(p, &mut pose),
+    }
+    pose
+}
+
+fn locomotion_clip_drives(state: AnimState, kind: FigureKind) -> bool {
+    match state {
+        AnimState::Idle => idle_state_uses_locomotion_clip(kind),
+        AnimState::Run { .. } => true,
+        _ => false,
+    }
+}
+
 /// Imported Xbot root faces **+Z** in world space when Y rotation is zero.
 pub const MODEL_FORWARD_XZ: Vec2 = Vec2::new(0.0, 1.0);
 
@@ -683,8 +794,8 @@ fn attach_chest_crest(
         )),
         crest,
         equipment_transform_m(
-            Vec3::new(0.0, 0.11, 0.12),
-            Quat::from_rotation_x(-0.08),
+            Vec3::new(0.0, 0.10, 0.13),
+            Quat::from_rotation_x(-0.06),
         ),
     );
 }
@@ -710,10 +821,11 @@ fn attach_bat(
     ));
     let wood = willow_mat(materials);
     let grip_mat = matte(materials, Color::srgb_u8(0x24, 0x28, 0x30), 0.9);
-    // Whole bat hangs down-forward from the hands, tilted into a stance.
-    let swing = Quat::from_rotation_x(-0.5) * Quat::from_rotation_z(0.15);
-    let blade_tf = equipment_transform_m(Vec3::new(0.0, -0.44, 0.10), swing);
-    let handle_tf = equipment_transform_m(Vec3::new(0.0, -0.20, 0.05), swing);
+    // Arm bones run along −X; stance pose makes hand +Z point at the ground so
+    // the blade hangs beside the front pad with the handle in the grip.
+    let grip = bat_grip_rotation();
+    let blade_tf = equipment_transform_m(Vec3::new(-0.02, 0.0, 0.36), grip);
+    let handle_tf = equipment_transform_m(Vec3::new(-0.02, 0.0, -0.14), grip);
     commands.entity(hand).with_children(|p| {
         p.spawn((
             Bat,
@@ -723,6 +835,7 @@ fn attach_bat(
             blade_tf,
         ));
         p.spawn((
+            Bat,
             Equipment,
             Mesh3d(handle),
             MeshMaterial3d(grip_mat),
@@ -741,14 +854,15 @@ fn attach_glove(
     let glove = meshes
         .add(Sphere::new(metres_to_bone(0.062)).mesh().ico(2).unwrap());
     let mat = matte(materials, Color::srgb_u8(0xE8, 0xE2, 0xD2), 0.85);
-    let x = if left { -0.03 } else { 0.03 };
+    // Hands extend along ±X; palms face −Z in bind pose.
+    let x = if left { 0.04 } else { -0.04 };
     spawn_mesh_child(
         hand,
         commands,
         glove,
         mat,
         equipment_transform_m_scaled(
-            Vec3::new(x, -0.01, 0.045),
+            Vec3::new(x, 0.0, -0.02),
             Quat::IDENTITY,
             Vec3::new(1.0, 1.25, 0.85),
         ),
@@ -779,7 +893,7 @@ fn attach_helmet(
             Mesh3d(shell),
             MeshMaterial3d(shell_mat),
             equipment_transform_m_scaled(
-                Vec3::new(0.0, 0.075, 0.005),
+                Vec3::new(0.0, 0.082, 0.01),
                 Quat::IDENTITY,
                 Vec3::new(1.0, 1.08, 1.14),
             ),
@@ -788,7 +902,7 @@ fn attach_helmet(
             Equipment,
             Mesh3d(peak),
             MeshMaterial3d(peak_mat),
-            equipment_transform_m(Vec3::new(0.0, 0.115, 0.115), Quat::IDENTITY),
+            equipment_transform_m(Vec3::new(0.0, 0.108, 0.12), Quat::IDENTITY),
         ));
     });
 }
@@ -851,7 +965,7 @@ fn attach_pad(
         commands,
         pad,
         mat,
-        equipment_transform_m(Vec3::new(0.0, -h - 0.02, 0.055), Quat::IDENTITY),
+        equipment_transform_m(Vec3::new(0.0, -h - 0.02, 0.062), Quat::IDENTITY),
     );
 }
 
@@ -908,13 +1022,69 @@ pub fn face_target_quat(from: Vec2, to: Vec2) -> Quat {
     Quat::from_rotation_y(face_target(from, to))
 }
 
-/// Strip vertical root motion from mocap clips so feet stay grounded.
-pub fn strip_skeleton_root_motion(mut bones: Query<(&Bone, &mut Transform)>) {
-    for (bone, mut tf) in &mut bones {
-        if bone.kind == BoneKind::Hips {
-            tf.translation = HIPS_BIND_TRANSLATION;
+/// Strip mocap root motion and re-apply procedural poses after the animation
+/// graph has written bone transforms for the frame.
+pub fn strip_skeleton_root_motion(
+    time: Res<Time>,
+    figure_kinds: Query<(Entity, &Figure, &Anim)>,
+    parents: Query<&ChildOf>,
+    mut params: ParamSet<(
+        Query<(Entity, &Bone, &BoneBindPose, &mut Transform)>,
+        Query<(Entity, &Transform), With<Figure>>,
+        Query<(&mut Transform, &ChildOf), With<Bat>>,
+    )>,
+) {
+    let t_global = time.elapsed_secs();
+    let (locals, bone_figure, idle_batters) = {
+        let mut bones = params.p0();
+        for (_, bone, _, mut tf) in &mut bones {
+            if bone.kind == BoneKind::Hips {
+                tf.translation = HIPS_BIND_TRANSLATION;
+            }
         }
-    }
+        let mut idle_batters = std::collections::HashSet::new();
+        for (fig_ent, fig, anim) in &figure_kinds {
+            if locomotion_clip_drives(anim.state, fig.kind) {
+                continue;
+            }
+            let pose = procedural_pose_for(anim.state, fig.kind, t_global);
+            apply_pose(fig_ent, &pose, 1.0, &mut bones);
+            if matches!(
+                (fig.kind, anim.state),
+                (FigureKind::Batter | FigureKind::NonStriker, AnimState::Idle)
+            ) {
+                idle_batters.insert(fig_ent);
+            }
+        }
+        let locals: std::collections::HashMap<Entity, Quat> = bones
+            .iter()
+            .map(|(entity, _, _, tf)| (entity, tf.rotation))
+            .collect();
+        let bone_figure: std::collections::HashMap<Entity, Entity> = bones
+            .iter()
+            .map(|(entity, bone, _, _)| (entity, bone.figure))
+            .collect();
+        (locals, bone_figure, idle_batters)
+    };
+    let figure_dirs: Vec<(Entity, Quat, Vec3)> = params
+        .p1()
+        .iter()
+        .map(|(entity, tf)| {
+            (
+                entity,
+                tf.rotation,
+                (tf.rotation * BATTING_BLADE_DIR_FIGURE).normalize(),
+            )
+        })
+        .collect();
+    orient_attached_bats(
+        &idle_batters,
+        &figure_dirs,
+        &locals,
+        &bone_figure,
+        &parents,
+        &mut params.p2(),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -924,9 +1094,10 @@ pub fn strip_skeleton_root_motion(mut bones: Query<(&Bone, &mut Transform)>) {
 const BLEND_RATE: f32 = 12.0;
 const BOWL_SETTLE_SECS: f32 = 0.85;
 
-/// Every figure kind uses the shared idle mocap clip while in [`AnimState::Idle`].
-fn idle_state_uses_locomotion_clip(_kind: FigureKind) -> bool {
-    true
+/// Fielders use the shared idle mocap clip; batters at the crease use the
+/// procedural [`batter_stance`] so gear authored for that pose lines up.
+fn idle_state_uses_locomotion_clip(kind: FigureKind) -> bool {
+    !matches!(kind, FigureKind::Batter | FigureKind::NonStriker)
 }
 
 /// Locomotion clip selection for hybrid animation (idle/run clips vs procedural).
@@ -958,7 +1129,7 @@ pub fn animate_figures(
         &mut AnimationTransitions,
         &mut ClipState,
     )>,
-    mut bones: Query<(&Bone, &BoneBindPose, &mut Transform)>,
+    mut bones: Query<(Entity, &Bone, &BoneBindPose, &mut Transform)>,
 ) {
     let t_global = time.elapsed_secs();
     let blend = (BLEND_RATE * time.delta_secs()).clamp(0.0, 1.0);
@@ -1006,10 +1177,17 @@ pub fn animate_figures(
             continue; // clip drives the skeleton this frame
         }
 
-        // Procedural pose targets.
+        // Procedural pose targets (applied in PostUpdate after the animation
+        // graph so mocap clips cannot stomp batting/bowling keyframes).
         let mut pose = PoseTargets::default();
         match &mut anim.state {
-            AnimState::Idle => idle_sway(t_global, &mut pose),
+            AnimState::Idle => {
+                if matches!(fig.kind, FigureKind::Batter | FigureKind::NonStriker) {
+                    batter_stance(t_global, &mut pose);
+                } else {
+                    idle_sway(t_global, &mut pose);
+                }
+            }
             AnimState::Run { t } => run_pose(*t, &mut pose),
             AnimState::BowlAction { p } => bowl_action(*p, &mut pose),
             AnimState::BowlSettle { t } => {
@@ -1023,7 +1201,9 @@ pub fn animate_figures(
             AnimState::BatSwing { p } => bat_swing(*p, &mut pose),
             AnimState::Throw { p } => throw_pose(*p, &mut pose),
         }
-        apply_pose(fig_ent, &pose, blend, &mut bones);
+        if !locomotion_clip_drives(anim.state, fig.kind) {
+            apply_pose(fig_ent, &pose, blend, &mut bones);
+        }
     }
 }
 
@@ -1247,25 +1427,25 @@ fn bat_swing(p: f32, pose: &mut PoseTargets) {
     let pc = p.clamp(0.0, 1.0);
     let arm_z = kf(
         &[
-            (0.0, 0.32),
-            (0.14, 1.08),
-            (0.30, 0.82),
-            (0.48, -0.55),
-            (0.60, -1.62),
-            (0.74, -2.28),
-            (1.0, -2.55),
+            (0.0, -0.34),
+            (0.12, 0.42),
+            (0.28, 0.18),
+            (0.46, -0.72),
+            (0.58, -1.48),
+            (0.72, -2.05),
+            (1.0, -2.35),
         ],
         pc,
     );
     let arm_x = kf(
         &[
-            (0.0, 0.58),
-            (0.14, 0.18),
-            (0.30, 0.32),
-            (0.48, 0.88),
-            (0.60, 1.22),
-            (0.74, 0.78),
-            (1.0, 0.42),
+            (0.0, 0.62),
+            (0.12, 0.38),
+            (0.28, 0.52),
+            (0.46, 1.05),
+            (0.58, 1.28),
+            (0.72, 0.92),
+            (1.0, 0.55),
         ],
         pc,
     );
@@ -1326,9 +1506,9 @@ fn apply_pose(
     fig_ent: Entity,
     pose: &PoseTargets,
     blend: f32,
-    bones: &mut Query<(&Bone, &BoneBindPose, &mut Transform)>,
+    bones: &mut Query<(Entity, &Bone, &BoneBindPose, &mut Transform)>,
 ) {
-    for (bone, bind, mut tf) in &mut *bones {
+    for (_, bone, bind, mut tf) in &mut *bones {
         if bone.figure != fig_ent {
             continue;
         }
@@ -1379,6 +1559,30 @@ mod tests {
     }
 
     #[test]
+    fn mixamo_arm_and_leg_axes_match_gltf_offsets() {
+        assert_eq!(mixamo_limb_axis(BoneKind::RightHand), Some(MixamoLimbAxis::NegX));
+        assert_eq!(mixamo_limb_axis(BoneKind::LeftHand), Some(MixamoLimbAxis::PosX));
+        assert_eq!(mixamo_limb_axis(BoneKind::RightLeg), Some(MixamoLimbAxis::NegY));
+        assert_eq!(mixamo_limb_axis(BoneKind::Head), Some(MixamoLimbAxis::PosY));
+    }
+
+    #[test]
+    fn bat_grip_rotation_aligns_blade_with_stance_down_axis() {
+        let mut pose = PoseTargets::default();
+        batter_stance(0.0, &mut pose);
+        let hand = compose_pose_rotation(Quat::IDENTITY, pose.ra * pose.rfa);
+        let blade_dir = hand * (bat_grip_rotation() * Vec3::Y);
+        assert!(
+            blade_dir.y < -0.55,
+            "blade should hang below the grip in stance, got {blade_dir:?}"
+        );
+        assert!(
+            blade_dir.z > 0.10,
+            "blade toe should sit forward of the hands, got {blade_dir:?}"
+        );
+    }
+
+    #[test]
     fn bat_swing_reaches_full_follow_through() {
         let mut start = PoseTargets::default();
         let mut contact = PoseTargets::default();
@@ -1408,7 +1612,6 @@ mod tests {
     /// The colour fallback in `kit_mesh_kind` classifies willow and white gear
     /// as jersey material, so equipment must be excluded from the recolour pass
     /// by marker, not by colour. Regression: the bat rendered in team colours.
-    #[test]
     fn willow_and_pad_colours_would_be_misread_as_kit() {
         let willow = StandardMaterial {
             base_color: Color::srgb_u8(0xE6, 0xD2, 0xA0),
@@ -1510,6 +1713,13 @@ mod tests {
     }
 
     #[test]
+    fn crease_figures_use_batting_stance_not_idle_clip() {
+        assert!(!idle_state_uses_locomotion_clip(FigureKind::Batter));
+        assert!(!idle_state_uses_locomotion_clip(FigureKind::NonStriker));
+        assert!(idle_state_uses_locomotion_clip(FigureKind::Bowler));
+    }
+
+    #[test]
     fn all_figure_kinds_use_idle_clip_in_idle_state() {
         let kinds = [
             FigureKind::Batter,
@@ -1520,8 +1730,16 @@ mod tests {
             FigureKind::Umpire,
         ];
         for kind in kinds {
+            let uses_clip = idle_state_uses_locomotion_clip(kind);
+            if matches!(kind, FigureKind::Batter | FigureKind::NonStriker) {
+                assert!(
+                    !uses_clip,
+                    "{kind:?} should use procedural batting stance at the crease",
+                );
+                continue;
+            }
             assert!(
-                idle_state_uses_locomotion_clip(kind),
+                uses_clip,
                 "{kind:?} should use idle locomotion clip",
             );
             assert!(
