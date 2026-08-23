@@ -9,6 +9,7 @@ use crate::render::ring_geometry::{
     ring_segment_transform, ring_tangent, ring_tube_mesh, stadium_ground_disc_mesh,
     stadium_ground_radius,
 };
+use crate::render::stand_geometry as sg;
 use crate::render::{FloodlightFixture, FloodlightMaterials, NightEnvironmentLight};
 use crate::render::{crowd, environment};
 use bevy::prelude::*;
@@ -30,6 +31,20 @@ const TIER_MAT_COUNT: usize = 8;
 const TIER_SEGMENTS: usize = 96;
 const FACADE_SEGMENTS: usize = 48;
 const AISLE_EVERY: usize = 8;
+/// Radial trusses in the cantilever roof. Two per aisle bay reads as a real
+/// structure from the establishing crane without ballooning the vertex count.
+const ROOF_TRUSS_COUNT: usize = 24;
+/// Light and speaker clusters slung from the roof soffit.
+const ROOF_CLUSTER_COUNT: usize = 18;
+/// Flags ranged along the roof crown.
+const ROOF_FLAG_COUNT: usize = 24;
+/// Every second aisle carries a tunnel mouth; the rest stay stair-only.
+const VOMITORY_EVERY_NTH_AISLE: usize = 2;
+/// Vomitories pierce the bowl at these tiers (lower deck, upper deck).
+const VOMITORY_TIERS: [usize; 2] = [2, LOWER_TIER_COUNT + 1];
+const GATE_COUNT: usize = 8;
+/// Broadcast camera gantry positions, in radians around the bowl.
+const GANTRY_ANGLES: [f32; 4] = [PI * 0.5, PI * 1.5, PI * 0.85, PI * 1.15];
 
 pub(crate) struct BowlLayout {
     pub(crate) inner_radius: f32,
@@ -96,6 +111,58 @@ impl BowlLayout {
     pub(crate) fn is_upper_deck(&self, tier: usize) -> bool {
         tier >= LOWER_TIER_COUNT
     }
+
+    /// Walking surface of a tier tread: where seats stand and spectators sit.
+    /// `tier_height` is the *underside* of the tread slab.
+    pub(crate) fn tread_top(&self, tier: usize) -> f32 {
+        self.tier_height(tier) + self.tread_thickness
+    }
+
+    /// Radial depth of the tread slab, matching the spawned tread geometry.
+    pub(crate) fn tread_depth(&self) -> f32 {
+        self.tier_depth * 0.92
+    }
+
+    /// Pitch-side radius of a tier's tread (where its riser face stands).
+    pub(crate) fn tier_inner_radius(&self, tier: usize) -> f32 {
+        if tier < LOWER_TIER_COUNT {
+            self.inner_radius + tier as f32 * self.tier_depth
+        } else {
+            self.upper_inner_radius() + (tier - LOWER_TIER_COUNT) as f32 * self.tier_depth
+        }
+    }
+
+    /// Deck level where the lower bowl's vomitories and concourse sit.
+    pub(crate) fn upper_deck_base_height(&self) -> f32 {
+        self.base_height + LOWER_TIER_COUNT as f32 * self.tier_rise + self.upper_deck_rise_gap
+    }
+
+    pub(crate) fn concourse_radius(&self) -> f32 {
+        self.lower_outer_radius() + self.upper_deck_setback * 0.42
+    }
+
+    pub(crate) fn concourse_height(&self) -> f32 {
+        self.base_height
+            + LOWER_TIER_COUNT as f32 * self.tier_rise
+            + self.upper_deck_rise_gap * 0.35
+    }
+
+    /// Cantilever roof: tips reach in over the back of the upper deck, rear
+    /// supports land on the columns behind it.
+    pub(crate) fn roof_spec(&self) -> sg::RoofSpec {
+        let top = self.stand_top_height();
+        sg::RoofSpec {
+            truss_count: ROOF_TRUSS_COUNT,
+            inner_radius: self.upper_inner_radius() + self.tier_depth * 0.6,
+            outer_radius: self.outer_radius() + 2.6,
+            inner_y: top + 6.4,
+            outer_y: top + 9.2,
+            depth: 2.4,
+            member: 0.22,
+            camber: 1.1,
+            web_panels: 6,
+        }
+    }
 }
 
 pub(crate) struct SharedStadiumAssets {
@@ -125,6 +192,30 @@ pub(crate) struct SharedStadiumAssets {
     pub(crate) lamp_day_mat: Handle<StandardMaterial>,
     pub(crate) lamp_night_mat: Handle<StandardMaterial>,
     pub(crate) sponsor_mats: Vec<Handle<StandardMaterial>>,
+    /// Moulded seat plastic. Vertex colours carry the palette, so every seat in
+    /// the bowl shares this one handle.
+    pub(crate) seat_mat: Handle<StandardMaterial>,
+    /// Painted structural steel: roof trusses, gantries, screen supports.
+    pub(crate) steel_mat: Handle<StandardMaterial>,
+    /// Weathered concrete: facade ribs, parapet, vomitory surrounds, gates.
+    pub(crate) concrete_mat: Handle<StandardMaterial>,
+    /// Architectural glazing on the facade and media box.
+    pub(crate) glass_mat: Handle<StandardMaterial>,
+    /// Opaque roof decking (coated metal).
+    pub(crate) roof_panel_mat: Handle<StandardMaterial>,
+    /// Translucent polycarbonate roof bays that let daylight through.
+    pub(crate) roof_glazing_mat: Handle<StandardMaterial>,
+    /// Banners, flags and awnings.
+    pub(crate) fabric_mat: Handle<StandardMaterial>,
+    /// Matte rubber: stair nosings, tunnel floors, dugout mats.
+    pub(crate) rubber_mat: Handle<StandardMaterial>,
+    /// Unlit interiors seen through vomitories and gates.
+    pub(crate) tunnel_mat: Handle<StandardMaterial>,
+    /// Self-lit concourse soffits read through the facade openings.
+    pub(crate) concourse_glow_mat: Handle<StandardMaterial>,
+    pub(crate) gate_number_mats: Vec<Handle<StandardMaterial>>,
+    pub(crate) seat_palette: sg::SeatPalette,
+    pub(crate) team_tones: Vec<[f32; 3]>,
     pub(crate) grass_tex: Handle<Image>,
     pub(crate) grass_mesh: Handle<Mesh>,
     pub(crate) stump_cylinder_mesh: Handle<Mesh>,
@@ -149,8 +240,24 @@ fn build_shared_assets(
 
     let tier_mats: [Handle<StandardMaterial>; TIER_MAT_COUNT] = std::array::from_fn(|i| {
         let shade = 1.0 - i as f32 * 0.07;
-        materials.add(mat(tint(shade, 0.04)))
+        materials.add(concrete_mat(tint(shade, 0.04)))
     });
+
+    // Seats take the stand tint but pushed brighter and more saturated than the
+    // concrete around them — moulded polypropylene, not painted structure.
+    let seat_tone = |mul: f32, add: f32| {
+        let c = tint(mul, add).to_srgba();
+        [c.red, c.green, c.blue]
+    };
+    let seat_palette = sg::SeatPalette {
+        tones: [
+            seat_tone(1.28, 0.06),
+            seat_tone(1.12, 0.10),
+            seat_tone(1.42, 0.03),
+        ],
+        // Real grounds pick the mosaic out in a near-white or cream seat.
+        accent: seat_tone(0.55, 0.52),
+    };
 
     SharedStadiumAssets {
         unit_cuboid: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
@@ -159,28 +266,28 @@ fn build_shared_assets(
         tower_pole_mesh: meshes.add(Cylinder::new(0.38, 1.0)),
         tower_truss_mesh: meshes.add(Cuboid::new(1.0, 0.35, 0.35)),
         lamp_bank_mesh: meshes.add(Cuboid::new(1.0, 0.55, 0.42)),
-        rope_mat: materials.add(mat(Color::srgb_u8(0xEE, 0xEE, 0xEE))),
-        white_mat: materials.add(mat(Color::WHITE)),
-        stump_mat: materials.add(mat(Color::srgb_u8(0xF5, 0xE9, 0xC8))),
-        sight_screen_mat: materials.add(mat(Color::srgb_u8(0x1A, 0x1A, 0x1E))),
-        board_frame_mat: materials.add(mat(Color::srgb_u8(0x08, 0x12, 0x1C))),
+        rope_mat: materials.add(cloth_mat(Color::srgb_u8(0xEE, 0xEE, 0xEE))),
+        white_mat: materials.add(matte_paint_mat(Color::WHITE)),
+        stump_mat: materials.add(lacquered_wood_mat(Color::srgb_u8(0xF5, 0xE9, 0xC8))),
+        sight_screen_mat: materials.add(matte_paint_mat(Color::srgb_u8(0x1A, 0x1A, 0x1E))),
+        board_frame_mat: materials.add(matte_paint_mat(Color::srgb_u8(0x08, 0x12, 0x1C))),
         tier_mats,
-        riser_mat: materials.add(mat(tint(0.62, 0.02))),
-        rail_mat: materials.add(mat(tint(0.48, 0.03))),
-        column_mat: materials.add(mat(tint(0.55, 0.06))),
-        canopy_mat: materials.add(mat(tint(0.38, 0.05))),
-        facade_mat: materials.add(mat(Color::srgb_u8(0x6A, 0x6E, 0x74))),
-        concourse_mat: materials.add(mat(Color::srgb_u8(0x8A, 0x8E, 0x92))),
+        riser_mat: materials.add(concrete_mat(tint(0.62, 0.02))),
+        rail_mat: materials.add(painted_steel_mat(tint(0.48, 0.03))),
+        column_mat: materials.add(concrete_mat(tint(0.55, 0.06))),
+        canopy_mat: materials.add(painted_steel_mat(tint(0.38, 0.05))),
+        facade_mat: materials.add(concrete_mat(Color::srgb_u8(0x6A, 0x6E, 0x74))),
+        concourse_mat: materials.add(concrete_mat(Color::srgb_u8(0x8A, 0x8E, 0x92))),
         apron_mat: materials.add(StandardMaterial {
             base_color: Color::WHITE,
             perceptual_roughness: 0.94,
             reflectance: 0.28,
             ..default()
         }),
-        pavilion_mat: materials.add(mat(Color::srgb_u8(0x5C, 0x60, 0x68))),
-        media_box_mat: materials.add(mat(Color::srgb_u8(0x2A, 0x32, 0x3C))),
-        roof_truss_mat: materials.add(mat(Color::srgb_u8(0x3C, 0x40, 0x48))),
-        tower_mat: materials.add(mat(Color::srgb_u8(0x48, 0x4C, 0x52))),
+        pavilion_mat: materials.add(concrete_mat(Color::srgb_u8(0x5C, 0x60, 0x68))),
+        media_box_mat: materials.add(painted_steel_mat(Color::srgb_u8(0x2A, 0x32, 0x3C))),
+        roof_truss_mat: materials.add(painted_steel_mat(Color::srgb_u8(0x3C, 0x40, 0x48))),
+        tower_mat: materials.add(painted_steel_mat(Color::srgb_u8(0x48, 0x4C, 0x52))),
         lamp_day_mat: materials.add(StandardMaterial {
             base_color: Color::srgb_u8(0xC8, 0xCE, 0xD4),
             emissive: LinearRgba::from(Color::srgb(0.08, 0.09, 0.11)),
@@ -199,6 +306,99 @@ fn build_shared_assets(
             ))),
             materials.add(texture_mat(images.add(sponsor_board_image(0)))),
             materials.add(texture_mat(images.add(sponsor_board_image(1)))),
+        ],
+        // Vertex-coloured merged geometry: base_color stays white so the mesh
+        // colours come through unmodulated.
+        seat_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.44,
+            metallic: 0.0,
+            reflectance: 0.46,
+            ..default()
+        }),
+        steel_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.34,
+            metallic: 0.82,
+            reflectance: 0.62,
+            ..default()
+        }),
+        concrete_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.96,
+            metallic: 0.0,
+            reflectance: 0.14,
+            ..default()
+        }),
+        glass_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.07,
+            metallic: 0.0,
+            reflectance: 0.92,
+            alpha_mode: AlphaMode::Blend,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        }),
+        roof_panel_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.30,
+            metallic: 0.55,
+            reflectance: 0.55,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        }),
+        roof_glazing_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE.with_alpha(0.34),
+            perceptual_roughness: 0.16,
+            metallic: 0.0,
+            reflectance: 0.72,
+            alpha_mode: AlphaMode::Blend,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        }),
+        fabric_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.90,
+            metallic: 0.0,
+            reflectance: 0.06,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        }),
+        rubber_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.74,
+            metallic: 0.0,
+            reflectance: 0.05,
+            ..default()
+        }),
+        tunnel_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.88,
+            metallic: 0.0,
+            reflectance: 0.02,
+            ..default()
+        }),
+        concourse_glow_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            emissive: LinearRgba::from(Color::srgb(0.30, 0.28, 0.22)),
+            perceptual_roughness: 0.80,
+            reflectance: 0.10,
+            ..default()
+        }),
+        gate_number_mats: (0..GATE_COUNT)
+            .map(|i| materials.add(texture_mat(images.add(gate_number_image(i + 1)))))
+            .collect(),
+        seat_palette,
+        team_tones: vec![
+            [0.78, 0.16, 0.16],
+            [0.94, 0.78, 0.24],
+            [0.16, 0.34, 0.68],
+            [0.92, 0.92, 0.88],
+            [0.14, 0.46, 0.28],
         ],
         grass_tex: images.add(crate::render::create_outfield_grass_image()),
         grass_mesh: meshes.add(Plane3d::default().mesh().size(1.0, 1.0).subdivisions(4)),
@@ -397,16 +597,49 @@ fn spawn_sight_screens(
     }
 }
 
+/// Spawn one merged mesh, skipping the entity when the builder came back empty.
+fn spawn_merged(
+    p: &mut ChildSpawnerCommands,
+    meshes: &mut Assets<Mesh>,
+    mesh: Mesh,
+    material: Handle<StandardMaterial>,
+    spawn_count: &mut usize,
+) {
+    if sg::mesh_is_empty(&mesh) {
+        return;
+    }
+    p.spawn((
+        Mesh3d(meshes.add(mesh)),
+        MeshMaterial3d(material),
+        Transform::IDENTITY,
+    ));
+    track_spawn(spawn_count);
+}
+
 fn spawn_tiers_and_roof(
     p: &mut ChildSpawnerCommands,
     ctx: &mut StadiumBuildCtx<'_>,
     spawn_count: &mut usize,
 ) {
-    // ---- Multi-deck raked seating bowl (lower bowl + set-back upper deck) ----
+    spawn_seating_bowl(p, ctx, spawn_count);
+    spawn_vomitories_and_stairs(p, ctx, spawn_count);
+    spawn_concourse_and_facade(p, ctx, spawn_count);
+    spawn_roof(p, ctx, spawn_count);
+    spawn_pavilions_and_media_box(p, ctx, spawn_count);
+    spawn_bowl_detail(p, ctx, spawn_count);
+}
+
+/// Raked seating bowl: tread slabs, risers, guard rails and — the part that
+/// makes it read as a stadium rather than a greybox — a merged mesh of real
+/// seats on every tread.
+fn spawn_seating_bowl(
+    p: &mut ChildSpawnerCommands,
+    ctx: &mut StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
     let bowl = &ctx.bowl;
-    let arc_w = 2.0 * PI * bowl.inner_radius / TIER_SEGMENTS as f32 * 1.02;
-    let tread_arc = arc_w;
-    let tread_radial = bowl.tier_depth * 0.92;
+    let tread_arc = 2.0 * PI * bowl.inner_radius / TIER_SEGMENTS as f32 * 1.02;
+    let tread_radial = bowl.tread_depth();
 
     for tier in 0..TIER_COUNT {
         let mid_r = bowl.tier_mid_radius(tier);
@@ -431,14 +664,7 @@ fn spawn_tiers_and_roof(
 
         // Riser face at inner edge of each tier (except ground).
         if tier > 0 {
-            let inner_r = if bowl.is_upper_deck(tier) && tier == LOWER_TIER_COUNT {
-                bowl.upper_inner_radius() - 0.08
-            } else if bowl.is_upper_deck(tier) {
-                bowl.upper_inner_radius() + (tier - LOWER_TIER_COUNT) as f32 * bowl.tier_depth
-                    - 0.08
-            } else {
-                bowl.inner_radius + tier as f32 * bowl.tier_depth - 0.08
-            };
+            let inner_r = bowl.tier_inner_radius(tier) - 0.08;
             let riser_h = bowl.tier_rise;
             let riser_specs = ring_band_specs(
                 TIER_SEGMENTS,
@@ -476,13 +702,118 @@ fn spawn_tiers_and_roof(
             ));
             track_spawn(spawn_count);
         }
-    }
 
-    // Concourse ring between lower bowl and upper deck (vomitory level).
-    let concourse_r = bowl.lower_outer_radius() + bowl.upper_deck_setback * 0.42;
-    let concourse_h = bowl.base_height
-        + LOWER_TIER_COUNT as f32 * bowl.tier_rise
-        + bowl.upper_deck_rise_gap * 0.35;
+        // One merged mesh per tread carries every seat in that row. Tens of
+        // thousands of seat entities would dominate frame time, so the palette
+        // rides on `Mesh::ATTRIBUTE_COLOR` and the whole bowl shares one
+        // material handle.
+        let band = sg::SeatBand {
+            segments: TIER_SEGMENTS,
+            aisle_every: AISLE_EVERY,
+            radius: mid_r,
+            tread_top: bowl.tread_top(tier),
+            row: tier,
+            // Only the upper deck carries the block mosaic, the way real grounds
+            // pick out a pattern across the tier that empties first.
+            mosaic: bowl.is_upper_deck(tier),
+        };
+        let seats = sg::seat_band_mesh(&band, &ctx.shared.seat_palette);
+        spawn_merged(
+            p,
+            ctx.meshes,
+            seats,
+            ctx.shared.seat_mat.clone(),
+            spawn_count,
+        );
+    }
+}
+
+/// Tunnel mouths cut through the bowl at the aisles, and the stair flights that
+/// climb every aisle between them.
+fn spawn_vomitories_and_stairs(
+    p: &mut ChildSpawnerCommands,
+    ctx: &mut StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
+    let bowl = &ctx.bowl;
+    let vom_angles = sg::vomitory_angles(TIER_SEGMENTS, AISLE_EVERY, VOMITORY_EVERY_NTH_AISLE);
+    let mut voms = Vec::with_capacity(vom_angles.len() * VOMITORY_TIERS.len());
+    for &tier in &VOMITORY_TIERS {
+        let mouth_r = bowl.tier_inner_radius(tier);
+        for &angle in &vom_angles {
+            voms.push(sg::Vomitory {
+                angle,
+                mouth_radius: mouth_r,
+                // Bores back under roughly two rows of seating.
+                depth: bowl.tier_depth * 1.9,
+                width: TAU * mouth_r / TIER_SEGMENTS as f32 * 0.86,
+                height: 2.1,
+                floor_y: bowl.tread_top(tier),
+            });
+        }
+    }
+    let interior = sg::vomitory_interior_mesh(&voms);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        interior,
+        ctx.shared.tunnel_mat.clone(),
+        spawn_count,
+    );
+    let frame = sg::vomitory_frame_mesh(&voms);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        frame,
+        ctx.shared.concrete_mat.clone(),
+        spawn_count,
+    );
+
+    // Aisles are gaps in every tread ring, so without stairs they read as slots
+    // cut through the bowl. Fill each one with a solid flight, stepping aside
+    // where a tunnel mouth breaks through.
+    let mut flights = Vec::new();
+    for (aisle, angle) in sg::aisle_angles(TIER_SEGMENTS, AISLE_EVERY)
+        .into_iter()
+        .enumerate()
+    {
+        let pierced = aisle.is_multiple_of(VOMITORY_EVERY_NTH_AISLE);
+        for tier in 0..TIER_COUNT {
+            if pierced && VOMITORY_TIERS.iter().any(|&t| tier == t || tier == t + 1) {
+                continue;
+            }
+            let inner = bowl.tier_inner_radius(tier);
+            flights.push(sg::StairFlight {
+                angle,
+                inner_radius: inner,
+                run: bowl.tier_depth,
+                rise: bowl.tier_rise,
+                base_y: bowl.tread_top(tier),
+                foot_y: bowl.tier_height(tier) - 0.08,
+                width: TAU * inner / TIER_SEGMENTS as f32 * 0.94,
+                steps: 3,
+            });
+        }
+    }
+    let stairs = sg::stair_flights_mesh(&flights);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        stairs,
+        ctx.shared.concrete_mat.clone(),
+        spawn_count,
+    );
+}
+
+/// Concourse deck, the structured outer wall, and the ground-level entry gates.
+fn spawn_concourse_and_facade(
+    p: &mut ChildSpawnerCommands,
+    ctx: &mut StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
+    let bowl = &ctx.bowl;
+    let concourse_r = bowl.concourse_radius();
+    let concourse_h = bowl.concourse_height();
     let concourse_arc = 2.0 * PI * concourse_r / TIER_SEGMENTS as f32 * 1.04;
     let concourse_specs = ring_band_specs(
         TIER_SEGMENTS,
@@ -499,6 +830,23 @@ fn spawn_tiers_and_roof(
         Transform::IDENTITY,
     ));
     track_spawn(spawn_count);
+
+    // Lit soffit above the concourse slab, so the gap between the decks reads as
+    // an occupied level through the facade openings instead of a black slot.
+    let reveal = sg::concourse_reveal_mesh(
+        FACADE_SEGMENTS,
+        concourse_r + bowl.upper_deck_setback * 0.30,
+        concourse_h,
+        bowl.upper_deck_setback * 0.70,
+        2.3,
+    );
+    spawn_merged(
+        p,
+        ctx.meshes,
+        reveal,
+        ctx.shared.concourse_glow_mat.clone(),
+        spawn_count,
+    );
 
     // Concrete facade bulk behind the lower bowl (visible architectural mass).
     let facade_r = bowl.lower_outer_radius() + 2.6;
@@ -522,8 +870,7 @@ fn spawn_tiers_and_roof(
 
     // Upper-deck rear facade (taller wall set back from the pitch).
     let upper_facade_r = bowl.outer_radius() + 1.8;
-    let upper_facade_base =
-        bowl.base_height + LOWER_TIER_COUNT as f32 * bowl.tier_rise + bowl.upper_deck_rise_gap;
+    let upper_facade_base = bowl.upper_deck_base_height();
     let upper_facade_h = UPPER_TIER_COUNT as f32 * bowl.tier_rise + 4.5;
     let upper_facade_arc = 2.0 * PI * upper_facade_r / FACADE_SEGMENTS as f32 * 1.04;
     let upper_facade_specs = ring_band_specs(
@@ -542,6 +889,82 @@ fn spawn_tiers_and_roof(
     ));
     track_spawn(spawn_count);
 
+    // Ground storey carrying the upper facade down to the apron. Without it the
+    // outer wall floats and the gates have nothing to sit in.
+    let plinth_arc = 2.0 * PI * upper_facade_r / FACADE_SEGMENTS as f32 * 1.04;
+    let plinth_specs = ring_band_specs(
+        FACADE_SEGMENTS,
+        0,
+        upper_facade_r,
+        upper_facade_base * 0.5,
+        plinth_arc,
+        upper_facade_base,
+        3.2,
+    );
+    p.spawn((
+        Mesh3d(ctx.meshes.add(ring_boxes_mesh(&plinth_specs))),
+        MeshMaterial3d(ctx.shared.facade_mat.clone()),
+        Transform::IDENTITY,
+    ));
+    track_spawn(spawn_count);
+
+    // Outer face of the wall, where the ribs and glazing live.
+    let facade = sg::FacadeSpec {
+        segments: FACADE_SEGMENTS,
+        radius: upper_facade_r + 2.1,
+        base_y: upper_facade_base,
+        height: upper_facade_h,
+        rib_width: 1.15,
+        rib_depth: 0.85,
+        glazing_bands: 6,
+    };
+    let ribs = sg::facade_rib_mesh(&facade);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        ribs,
+        ctx.shared.concrete_mat.clone(),
+        spawn_count,
+    );
+    let glazing = sg::facade_glazing_mesh(&facade);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        glazing,
+        ctx.shared.glass_mat.clone(),
+        spawn_count,
+    );
+    let parapet = sg::facade_parapet_mesh(&facade);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        parapet,
+        ctx.shared.concrete_mat.clone(),
+        spawn_count,
+    );
+
+    // Numbered entry gates at ground level, cut into the plinth.
+    const GATE_HEIGHT: f32 = 4.2;
+    let gate_r = upper_facade_r + 1.6;
+    let gates = sg::gate_angles(GATE_COUNT);
+    let portals = sg::gate_portal_mesh(&gates, gate_r, 5.4, GATE_HEIGHT);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        portals,
+        ctx.shared.concrete_mat.clone(),
+        spawn_count,
+    );
+    for (i, &angle) in gates.iter().enumerate() {
+        p.spawn((
+            Mesh3d(ctx.shared.unit_cuboid.clone()),
+            MeshMaterial3d(ctx.shared.gate_number_mats[i].clone()),
+            ring_segment_transform(angle, gate_r + 1.6, GATE_HEIGHT + 0.55)
+                .with_scale(Vec3::new(1.15, 1.15, 0.10)),
+        ));
+        track_spawn(spawn_count);
+    }
+
     // Support columns at aisle junctions (lower + upper deck).
     for seg in (0..TIER_SEGMENTS).step_by(AISLE_EVERY) {
         let a = seg as f32 / TIER_SEGMENTS as f32 * TAU;
@@ -555,8 +978,6 @@ fn spawn_tiers_and_roof(
         ));
         track_spawn(spawn_count);
         let upper_col_r = bowl.upper_inner_radius() + bowl.tier_depth * 2.0;
-        let upper_col_base =
-            bowl.base_height + LOWER_TIER_COUNT as f32 * bowl.tier_rise + bowl.upper_deck_rise_gap;
         let upper_col_h = UPPER_TIER_COUNT as f32 * bowl.tier_rise + 2.4;
         p.spawn((
             Mesh3d(ctx.shared.column_mesh.clone()),
@@ -564,55 +985,86 @@ fn spawn_tiers_and_roof(
             Transform::from_translation(ring_position(
                 a,
                 upper_col_r,
-                upper_col_base + upper_col_h * 0.5,
+                upper_facade_base + upper_col_h * 0.5,
             ))
             .with_scale(Vec3::new(1.15, upper_col_h, 1.15)),
         ));
         track_spawn(spawn_count);
     }
+}
 
-    // Roof canopy over upper deck with supporting trusses.
-    let canopy_r = bowl.outer_radius() + 2.4;
-    let canopy_h = bowl.stand_top_height() + 2.2;
-    let canopy_arc = 2.0 * PI * canopy_r / TIER_SEGMENTS as f32 * 1.06;
-    let canopy_specs = ring_band_specs(
-        TIER_SEGMENTS,
-        AISLE_EVERY,
-        canopy_r,
-        canopy_h,
-        canopy_arc,
-        0.32,
-        4.8,
+/// Cantilever roof: radial trusses off the rear columns, a tension ring at the
+/// free tips, mixed opaque and glazed decking, a shaded soffit and the services
+/// slung beneath it.
+fn spawn_roof(
+    p: &mut ChildSpawnerCommands,
+    ctx: &mut StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
+    let spec = ctx.bowl.roof_spec();
+
+    let trusses = sg::roof_truss_mesh(&spec);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        trusses,
+        ctx.shared.steel_mat.clone(),
+        spawn_count,
     );
-    p.spawn((
-        Mesh3d(ctx.meshes.add(ring_boxes_mesh(&canopy_specs))),
-        MeshMaterial3d(ctx.shared.canopy_mat.clone()),
-        Transform::IDENTITY,
-    ));
-    track_spawn(spawn_count);
-    // Truss ribs under the canopy at aisle spokes.
-    for seg in (0..TIER_SEGMENTS).step_by(AISLE_EVERY) {
-        let a = seg as f32 / TIER_SEGMENTS as f32 * TAU;
-        let truss_r = bowl.outer_radius() + 1.0;
-        let truss_len = canopy_r - truss_r;
-        let truss_mid_r = (truss_r + canopy_r) * 0.5;
-        let truss_base = bowl.stand_top_height() + 0.4;
-        let truss_h = canopy_h - truss_base;
-        p.spawn((
-            Mesh3d(ctx.shared.unit_cuboid.clone()),
-            MeshMaterial3d(ctx.shared.roof_truss_mat.clone()),
-            ring_segment_transform(a, truss_mid_r, truss_base + truss_h * 0.5)
-                .with_scale(Vec3::new(0.42, truss_h, truss_len)),
-        ));
-        track_spawn(spawn_count);
-    }
-
-    spawn_pavilions_and_media_box(p, ctx, spawn_count);
+    let deck = sg::roof_panel_mesh(&spec, false);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        deck,
+        ctx.shared.roof_panel_mat.clone(),
+        spawn_count,
+    );
+    // Glazed bays let daylight down onto the back rows.
+    let glazed = sg::roof_panel_mesh(&spec, true);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        glazed,
+        ctx.shared.roof_glazing_mat.clone(),
+        spawn_count,
+    );
+    let soffit = sg::roof_soffit_mesh(&spec);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        soffit,
+        ctx.shared.concrete_mat.clone(),
+        spawn_count,
+    );
+    let edge = sg::roof_edge_mesh(&spec);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        edge,
+        ctx.shared.steel_mat.clone(),
+        spawn_count,
+    );
+    let clusters = sg::roof_cluster_mesh(&spec, ROOF_CLUSTER_COUNT);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        clusters,
+        ctx.shared.steel_mat.clone(),
+        spawn_count,
+    );
+    let flags = sg::roof_flag_mesh(&spec, ROOF_FLAG_COUNT, &ctx.shared.team_tones);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        flags,
+        ctx.shared.fabric_mat.clone(),
+        spawn_count,
+    );
 }
 
 fn spawn_pavilions_and_media_box(
     p: &mut ChildSpawnerCommands,
-    ctx: &StadiumBuildCtx<'_>,
+    ctx: &mut StadiumBuildCtx<'_>,
     spawn_count: &mut usize,
 ) {
     let bowl = &ctx.bowl;
@@ -655,46 +1107,165 @@ fn spawn_pavilions_and_media_box(
             .with_scale(Vec3::new(22.0, media_h, 5.5)),
     ));
     track_spawn(spawn_count);
-    // Glazed front strip.
-    p.spawn((
-        Mesh3d(ctx.shared.unit_cuboid.clone()),
-        MeshMaterial3d(ctx.shared.board_frame_mat.clone()),
-        ring_segment_transform(media_angle, media_r - 2.2, media_h * 0.55).with_scale(Vec3::new(
-            20.0,
-            media_h * 0.45,
-            0.28,
-        )),
-    ));
-    track_spawn(spawn_count);
+
+    // Continuous glazed front with mullions between the commentary positions,
+    // and a brow above it to kill the reflection of the sky.
+    let glass_y = media_h * 0.62;
+    let glass_h = media_h * 0.30;
+    let mut glazing = sg::StandMesh::new();
+    let mut frame = sg::StandMesh::new();
+    const BAYS: usize = 7;
+    const MEDIA_WIDTH: f32 = 20.4;
+    let bay_w = MEDIA_WIDTH / BAYS as f32;
+    let front = ring_segment_transform(media_angle, media_r - 2.6, glass_y);
+    for bay in 0..BAYS {
+        let x = (bay as f32 - (BAYS as f32 - 1.0) * 0.5) * bay_w;
+        // Tinted broadcast glazing, each bay reflecting a slightly different sky.
+        let t = 0.42 + sg::stand_unit(bay as u32, 1, 0x9EDA) * 0.22;
+        glazing.push_box(
+            front * Transform::from_xyz(x, 0.0, 0.0),
+            Vec3::new(bay_w * 0.44, glass_h * 0.5, 0.06),
+            [t * 0.66, t * 0.80, t * 0.94, 0.74],
+        );
+        frame.push_box(
+            front * Transform::from_xyz(x + bay_w * 0.5, 0.0, 0.10),
+            Vec3::new(0.09, glass_h * 0.55, 0.16),
+            [0.22, 0.23, 0.26, 1.0],
+        );
+    }
+    frame.push_ring_box(
+        media_angle,
+        media_r - 3.1,
+        glass_y + glass_h * 0.5 + 0.35,
+        Vec3::new(MEDIA_WIDTH + 0.8, 0.30, 1.9),
+        [0.18, 0.19, 0.22, 1.0],
+    );
+    let glazing = glazing.build();
+    spawn_merged(
+        p,
+        ctx.meshes,
+        glazing,
+        ctx.shared.glass_mat.clone(),
+        spawn_count,
+    );
+    let frame = frame.build();
+    spawn_merged(
+        p,
+        ctx.meshes,
+        frame,
+        ctx.shared.steel_mat.clone(),
+        spawn_count,
+    );
+}
+
+/// Hoardings, gantries and the player tunnel — the dressing that tells the eye
+/// this is a broadcast venue and not an empty bowl.
+fn spawn_bowl_detail(
+    p: &mut ChildSpawnerCommands,
+    ctx: &mut StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
+    let bowl = &ctx.bowl;
+    let br = ctx.stadium.boundary_radius();
+
+    // Advertising at three heights: a second course above the rope-side boards,
+    // the lower bowl's front fascia, and the upper deck's front fascia.
+    let hoardings: [(f32, f32, f32, usize); 3] = [
+        (br + 1.25, 2.55, 0.90, 3),
+        (bowl.inner_radius - 0.35, bowl.base_height + 0.80, 1.25, 2),
+        (
+            bowl.upper_inner_radius() - 0.35,
+            bowl.upper_deck_base_height() - 1.10,
+            1.35,
+            2,
+        ),
+    ];
+    for (i, &(radius, y, height, every)) in hoardings.iter().enumerate() {
+        let backing = sg::hoarding_backing_mesh(TIER_SEGMENTS, radius, y, height, every);
+        spawn_merged(
+            p,
+            ctx.meshes,
+            backing,
+            ctx.shared.rubber_mat.clone(),
+            spawn_count,
+        );
+        let boards = sg::hoarding_ring_mesh(TIER_SEGMENTS, radius, y, height, every);
+        let sponsor = ctx.shared.sponsor_mats[i % ctx.shared.sponsor_mats.len()].clone();
+        spawn_merged(p, ctx.meshes, boards, sponsor, spawn_count);
+    }
+
+    // Broadcast gantries cantilevered into the gap between the two decks.
+    let gantries = sg::camera_gantry_mesh(
+        &GANTRY_ANGLES,
+        bowl.lower_outer_radius() + 1.2,
+        bowl.upper_deck_base_height() + 0.4,
+    );
+    spawn_merged(
+        p,
+        ctx.meshes,
+        gantries,
+        ctx.shared.steel_mat.clone(),
+        spawn_count,
+    );
+
+    // Covered walk from the pavilion out onto the field, at the bowler's end.
+    let tunnel_start = br + 1.5;
+    let tunnel = sg::player_tunnel_mesh(PI, tunnel_start, bowl.inner_radius - tunnel_start + 2.5);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        tunnel,
+        ctx.shared.concrete_mat.clone(),
+        spawn_count,
+    );
 }
 
 fn spawn_floodlights(
     p: &mut ChildSpawnerCommands,
-    ctx: &StadiumBuildCtx<'_>,
+    ctx: &mut StadiumBuildCtx<'_>,
     spawn_count: &mut usize,
 ) {
     // ---- Floodlight towers integrated with stand perimeter ----
     let outer = ctx.bowl.outer_radius();
     let stand_top = ctx.bowl.stand_top_height();
+    let roof = ctx.bowl.roof_spec();
     let tower_r = floodlight_radius(outer);
     let tower_h = stand_top + 22.0;
+
+    // Braced frames tying each pylon back into the roof's rear support line, so
+    // the towers read as part of the structure instead of four poles nearby.
+    let mut ties = sg::StandMesh::new();
+    const STEEL: [f32; 4] = [0.68, 0.69, 0.72, 1.0];
+    for angle in floodlight_angles() {
+        let foot = ring_position(angle, tower_r, roof.outer_y - 3.0);
+        let shoulder = ring_position(angle, tower_r, tower_h * 0.72);
+        for off in [-2.4_f32, 2.4] {
+            let tangent = ring_tangent(angle);
+            let anchor = ring_position(angle, roof.outer_radius, roof.outer_y) + tangent * off;
+            ties.push_strut(anchor, foot + tangent * off * 0.4, 0.20, STEEL);
+            ties.push_strut(anchor + Vec3::Y * 1.2, shoulder, 0.13, STEEL);
+        }
+        // Horizontal collar where the frame meets the pylon.
+        ties.push_ring_box(
+            angle,
+            tower_r,
+            roof.outer_y - 3.0,
+            Vec3::new(5.6, 0.42, 0.42),
+            STEEL,
+        );
+    }
+    let ties = ties.build();
+    spawn_merged(
+        p,
+        ctx.meshes,
+        ties,
+        ctx.shared.steel_mat.clone(),
+        spawn_count,
+    );
+
     for (tower_idx, angle) in floodlight_angles().into_iter().enumerate() {
         let base = ring_position(angle, tower_r, 0.0);
         let top = ring_position(angle, tower_r, tower_h);
-
-        // Pylon rises from stand roofline with a short tie-back truss to the bowl.
-        let tie_r = outer + 1.5;
-        let tie_top = ring_position(angle, tie_r, stand_top + 1.8);
-        p.spawn((
-            Mesh3d(ctx.shared.tower_truss_mesh.clone()),
-            MeshMaterial3d(ctx.shared.roof_truss_mat.clone()),
-            Transform::from_translation(
-                (top + tie_top) * 0.5 + Vec3::Y * (tower_h - stand_top) * 0.15,
-            )
-            .with_scale(Vec3::new(2.8, 1.0, 1.0))
-            .with_rotation(ring_segment_transform(angle, tower_r, tower_h).rotation),
-        ));
-        track_spawn(spawn_count);
 
         p.spawn((
             Mesh3d(ctx.shared.tower_pole_mesh.clone()),
@@ -755,32 +1326,69 @@ fn spawn_big_screen_and_dugouts(
     fielding_team: &Team,
     spawn_count: &mut usize,
 ) {
-    // Big screen + dugouts + tents (unchanged layout, shared materials).
     let br = ctx.stadium.boundary_radius();
-    let screen_frame = ctx.materials.add(mat(Color::srgb_u8(0x10, 0x12, 0x16)));
-    let screen_face = ctx
+    let screen_frame = ctx
         .materials
-        .add(texture_mat(ctx.images.add(big_screen_image(
-            &batting_team.short.to_uppercase(),
-            &fielding_team.short.to_uppercase(),
-        ))));
+        .add(painted_steel_mat(Color::srgb_u8(0x10, 0x12, 0x16)));
+    let screen_img = ctx.images.add(big_screen_image(
+        &batting_team.short.to_uppercase(),
+        &fielding_team.short.to_uppercase(),
+    ));
+    // The panel is a light source, not a printed board: an emissive texture is
+    // what makes it read as switched on once the floodlights come up.
+    let screen_face = ctx.materials.add(StandardMaterial {
+        base_color: Color::srgb(0.16, 0.16, 0.18),
+        base_color_texture: Some(screen_img.clone()),
+        emissive: LinearRgba::new(2.6, 2.6, 2.6, 1.0),
+        emissive_texture: Some(screen_img),
+        perceptual_roughness: 0.34,
+        reflectance: 0.30,
+        ..default()
+    });
     let sx = -(br - 2.5);
+    let screen_center = Vec3::new(sx - 1.1, 5.6, 0.0);
+    let screen_half_w = 8.0;
+
+    // Bezel: a deep surround so the panel sits inside a box rather than floating.
+    for (offset, size) in [
+        (Vec3::new(0.0, 3.1, 0.0), Vec3::new(0.72, 0.55, 17.4)),
+        (Vec3::new(0.0, -3.1, 0.0), Vec3::new(0.72, 0.55, 17.4)),
+        (Vec3::new(0.0, 0.0, 8.4), Vec3::new(0.72, 6.7, 0.55)),
+        (Vec3::new(0.0, 0.0, -8.4), Vec3::new(0.72, 6.7, 0.55)),
+    ] {
+        p.spawn((
+            Mesh3d(ctx.shared.unit_cuboid.clone()),
+            MeshMaterial3d(screen_frame.clone()),
+            Transform::from_translation(screen_center + offset).with_scale(size),
+        ));
+        track_spawn(spawn_count);
+    }
     p.spawn((
         Mesh3d(ctx.shared.unit_cuboid.clone()),
         MeshMaterial3d(screen_frame.clone()),
-        Transform::from_translation(Vec3::new(sx - 1.1, 3.6, 0.0))
-            .with_scale(Vec3::new(0.32, 3.8, 8.0)),
+        Transform::from_translation(screen_center + Vec3::X * 0.3)
+            .with_scale(Vec3::new(0.30, 6.2, 16.6)),
     ));
     track_spawn(spawn_count);
     p.spawn((
         Mesh3d(ctx.shared.unit_cuboid.clone()),
         MeshMaterial3d(screen_face),
-        Transform::from_translation(Vec3::new(sx - 0.92, 3.6, 0.0))
-            .with_scale(Vec3::new(0.18, 3.2, 7.0)),
+        Transform::from_translation(screen_center + Vec3::X * 0.18)
+            .with_scale(Vec3::new(0.20, 5.6, 15.8)),
     ));
     track_spawn(spawn_count);
+    let screen_truss = sg::screen_support_mesh(screen_center, screen_half_w, 0.0);
+    spawn_merged(
+        p,
+        ctx.meshes,
+        screen_truss,
+        ctx.shared.steel_mat.clone(),
+        spawn_count,
+    );
 
-    let dugout_roof = ctx.materials.add(mat(Color::srgb_u8(0xE8, 0xE6, 0xDF)));
+    let dugout_roof = ctx
+        .materials
+        .add(painted_steel_mat(Color::srgb_u8(0xE8, 0xE6, 0xDF)));
     for sign_z in [-1.0_f32, 1.0] {
         let dz = sign_z * (br - 6.0);
         p.spawn((
@@ -805,12 +1413,25 @@ fn spawn_big_screen_and_dugouts(
                 .with_scale(Vec3::new(0.9, 1.05, 2.3)),
         ));
         track_spawn(spawn_count);
+        // Bench seating and kit bags inside the enclosure.
+        let fitout =
+            sg::dugout_fitout_mesh(Vec3::new(sx + 9.6, 0.0, dz), &ctx.shared.team_tones.clone());
+        spawn_merged(
+            p,
+            ctx.meshes,
+            fitout,
+            ctx.shared.seat_mat.clone(),
+            spawn_count,
+        );
     }
 
     let tent_mats = [
-        ctx.materials.add(mat(Color::srgb_u8(0xB8, 0x44, 0x38))),
-        ctx.materials.add(mat(Color::srgb_u8(0xDD, 0xD8, 0xCB))),
-        ctx.materials.add(mat(Color::srgb_u8(0x2E, 0x4A, 0x62))),
+        ctx.materials
+            .add(cloth_mat(Color::srgb_u8(0xB8, 0x44, 0x38))),
+        ctx.materials
+            .add(cloth_mat(Color::srgb_u8(0xDD, 0xD8, 0xCB))),
+        ctx.materials
+            .add(cloth_mat(Color::srgb_u8(0x2E, 0x4A, 0x62))),
     ];
     for i in 0..3 {
         let tz = (i as f32 - 1.0) * 7.5 + 4.0;
@@ -995,7 +1616,7 @@ pub fn build_stadium(
         spawn_boundary_ring_and_boards(p, &ctx, &mut spawn_count);
         spawn_sight_screens(p, &ctx, &mut spawn_count);
         spawn_tiers_and_roof(p, &mut ctx, &mut spawn_count);
-        spawn_floodlights(p, &ctx, &mut spawn_count);
+        spawn_floodlights(p, &mut ctx, &mut spawn_count);
         let crowd_count = crowd::spawn_crowd(p, &ctx, &mut spawn_count);
         info!("Stadium crowd spawned: {crowd_count} spectators");
         environment::spawn_environment(p, &mut ctx, &mut spawn_count);
@@ -1023,10 +1644,63 @@ pub fn build_stadium(
     root
 }
 
-fn mat(color: Color) -> StandardMaterial {
+/// Woven cloth — boundary rope, marquee canvas. Diffuse to the point of having
+/// no highlight at all, which is what separates it from painted metal nearby.
+fn cloth_mat(color: Color) -> StandardMaterial {
     StandardMaterial {
         base_color: color,
-        perceptual_roughness: 0.9,
+        perceptual_roughness: 0.94,
+        metallic: 0.0,
+        reflectance: 0.04,
+        ..Default::default()
+    }
+}
+
+/// Matte paint over board or turf: crease lines, sight screens, board frames.
+/// Sight screens in particular are painted dead flat on purpose so the ball
+/// stays readable against them, so this must not pick up a sheen.
+fn matte_paint_mat(color: Color) -> StandardMaterial {
+    StandardMaterial {
+        base_color: color,
+        perceptual_roughness: 0.84,
+        metallic: 0.0,
+        reflectance: 0.08,
+        ..Default::default()
+    }
+}
+
+/// Lacquered ash — the stumps and bails. The one varnished surface on the
+/// ground, and close enough to camera that a tight highlight is worth it.
+fn lacquered_wood_mat(color: Color) -> StandardMaterial {
+    StandardMaterial {
+        base_color: color,
+        perceptual_roughness: 0.33,
+        metallic: 0.0,
+        reflectance: 0.44,
+        ..Default::default()
+    }
+}
+
+/// Cast concrete: matte, barely reflective, with a touch of colour noise from
+/// the caller's tint so adjacent surfaces never match exactly.
+fn concrete_mat(color: Color) -> StandardMaterial {
+    StandardMaterial {
+        base_color: color,
+        perceptual_roughness: 0.95,
+        metallic: 0.0,
+        reflectance: 0.15,
+        ..Default::default()
+    }
+}
+
+/// Painted structural steel: tight highlights, genuinely metallic, so the
+/// floodlights rake across it instead of flattening it out.
+fn painted_steel_mat(color: Color) -> StandardMaterial {
+    StandardMaterial {
+        base_color: color,
+        perceptual_roughness: 0.36,
+        metallic: 0.78,
+        reflectance: 0.60,
         ..Default::default()
     }
 }
@@ -1078,6 +1752,78 @@ fn create_pitch_image() -> Image {
         ..Default::default()
     });
     img
+}
+
+/// Numbered plaque above an entry gate. Real grounds number every gate, and the
+/// digit is the cheapest possible cue that the facade is a public entrance.
+fn gate_number_image(number: usize) -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    /// 3x5 digit cells, one bit per column, most significant bit leftmost.
+    const DIGITS: [[u8; 5]; 10] = [
+        [0b111, 0b101, 0b101, 0b101, 0b111],
+        [0b010, 0b110, 0b010, 0b010, 0b111],
+        [0b111, 0b001, 0b111, 0b100, 0b111],
+        [0b111, 0b001, 0b111, 0b001, 0b111],
+        [0b101, 0b101, 0b111, 0b001, 0b001],
+        [0b111, 0b100, 0b111, 0b001, 0b111],
+        [0b111, 0b100, 0b111, 0b101, 0b111],
+        [0b111, 0b001, 0b001, 0b001, 0b001],
+        [0b111, 0b101, 0b111, 0b101, 0b111],
+        [0b111, 0b101, 0b111, 0b001, 0b111],
+    ];
+    const W: u32 = 64;
+    const H: u32 = 64;
+    const CELL: u32 = 9;
+
+    let digits: Vec<usize> = if number >= 10 {
+        vec![(number / 10) % 10, number % 10]
+    } else {
+        vec![number % 10]
+    };
+    // Signage green on a dark plate, as used for stadium wayfinding.
+    let mut data = Vec::with_capacity((W * H * 4) as usize);
+    for _ in 0..W * H {
+        data.extend_from_slice(&[0x0C, 0x14, 0x10, 0xFF]);
+    }
+    let glyph_w = 3 * CELL;
+    let total_w = glyph_w * digits.len() as u32 + CELL * (digits.len() as u32 - 1);
+    let ox = (W - total_w) / 2;
+    let oy = (H - 5 * CELL) / 2;
+    for (i, &d) in digits.iter().enumerate() {
+        let gx = ox + i as u32 * (glyph_w + CELL);
+        for (row, &bits) in DIGITS[d].iter().enumerate() {
+            for col in 0..3u32 {
+                if bits & (1 << (2 - col)) == 0 {
+                    continue;
+                }
+                for py in 0..CELL {
+                    for px in 0..CELL {
+                        let x = gx + col * CELL + px;
+                        let y = oy + row as u32 * CELL + py;
+                        if x >= W || y >= H {
+                            continue;
+                        }
+                        let idx = ((y * W + x) * 4) as usize;
+                        data[idx] = 0xE8;
+                        data[idx + 1] = 0xF0;
+                        data[idx + 2] = 0xDC;
+                    }
+                }
+            }
+        }
+    }
+    Image::new(
+        Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    )
 }
 
 fn sponsor_board_image(style: u32) -> Image {
@@ -1315,5 +2061,234 @@ mod tests {
         // Mown outfield must stay inside the apron (no regression to floating bowl).
         let outfield_half = (65.0 + 6.0) * 2.05 / 2.0;
         assert!(radius > outfield_half);
+    }
+
+    /// The camera rig and the crowd module both derive seat positions from these,
+    /// so the detail pass must not have shifted them.
+    #[test]
+    fn published_bowl_dimensions_are_unchanged() {
+        let bowl = BowlLayout::from_boundary(65.0);
+        assert!((bowl.inner_radius - 69.8).abs() < 1e-4);
+        assert!((bowl.lower_outer_radius() - 85.55).abs() < 1e-3);
+        assert!((bowl.upper_inner_radius() - 89.75).abs() < 1e-3);
+        assert!((bowl.outer_radius() - 101.0).abs() < 1e-3);
+        assert!((bowl.tier_height(0) - 0.5).abs() < 1e-4);
+        assert!((bowl.stand_top_height() - 16.17).abs() < 1e-3);
+    }
+
+    #[test]
+    fn tread_top_matches_the_surface_the_crowd_sits_on() {
+        let bowl = BowlLayout::from_boundary(65.0);
+        for tier in 0..TIER_COUNT {
+            // `crowd::spawn_crowd` uses `tier_height + tread_thickness`.
+            let expected = bowl.tier_height(tier) + bowl.tread_thickness;
+            assert!(
+                (bowl.tread_top(tier) - expected).abs() < 1e-5,
+                "tier {tier}"
+            );
+            // Each tread's inner radius must sit half a tread depth inside its mid.
+            let inner = bowl.tier_inner_radius(tier);
+            assert!((bowl.tier_mid_radius(tier) - inner - bowl.tier_depth * 0.5).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn every_tier_carries_a_full_row_of_seats() {
+        let bowl = BowlLayout::from_boundary(65.0);
+        let mut total = 0usize;
+        for tier in 0..TIER_COUNT {
+            let band = sg::SeatBand {
+                segments: TIER_SEGMENTS,
+                aisle_every: AISLE_EVERY,
+                radius: bowl.tier_mid_radius(tier),
+                tread_top: bowl.tread_top(tier),
+                row: tier,
+                mosaic: bowl.is_upper_deck(tier),
+            };
+            let seats = sg::seat_band_count(&band);
+            assert!(seats > 600, "tier {tier} only holds {seats} seats");
+            total += seats;
+        }
+        // A real ground of this size seats tens of thousands; the merged-mesh
+        // approach is the only way to draw them, so guard the order of magnitude.
+        assert!(
+            (9_000..20_000).contains(&total),
+            "bowl capacity {total} out of range"
+        );
+    }
+
+    #[test]
+    fn upper_deck_alone_carries_the_seat_mosaic() {
+        let bowl = BowlLayout::from_boundary(65.0);
+        for tier in 0..TIER_COUNT {
+            assert_eq!(bowl.is_upper_deck(tier), tier >= LOWER_TIER_COUNT);
+        }
+        assert!(!bowl.is_upper_deck(LOWER_TIER_COUNT - 1));
+        assert!(bowl.is_upper_deck(TIER_COUNT - 1));
+    }
+
+    #[test]
+    fn vomitories_land_on_aisles_and_inside_the_bowl() {
+        let bowl = BowlLayout::from_boundary(65.0);
+        let aisles = sg::aisle_angles(TIER_SEGMENTS, AISLE_EVERY);
+        let voms = sg::vomitory_angles(TIER_SEGMENTS, AISLE_EVERY, VOMITORY_EVERY_NTH_AISLE);
+        assert_eq!(aisles.len(), TIER_SEGMENTS / AISLE_EVERY);
+        assert_eq!(voms.len(), aisles.len() / VOMITORY_EVERY_NTH_AISLE);
+        for angle in &voms {
+            assert!(aisles.iter().any(|a| (a - angle).abs() < 1e-5));
+        }
+        // Each pierced tier must leave the bore fully inside the seating deck.
+        for &tier in &VOMITORY_TIERS {
+            let mouth = bowl.tier_inner_radius(tier);
+            let back = mouth + bowl.tier_depth * 1.9;
+            assert!(mouth >= bowl.inner_radius, "tier {tier} mouth {mouth}");
+            assert!(
+                back < bowl.outer_radius(),
+                "tier {tier} bore exits at {back}"
+            );
+            assert!(
+                bowl.tread_top(tier) > 0.0,
+                "tier {tier} floor is below the apron"
+            );
+        }
+    }
+
+    #[test]
+    fn roof_covers_the_upper_deck_and_clears_the_back_row() {
+        let bowl = BowlLayout::from_boundary(65.0);
+        let roof = bowl.roof_spec();
+        assert_eq!(roof.truss_count, ROOF_TRUSS_COUNT);
+        assert_eq!(
+            sg::roof_truss_angles(roof.truss_count).len(),
+            ROOF_TRUSS_COUNT
+        );
+        // Cantilever reaches in over the upper deck without touching the lower bowl.
+        assert!(roof.inner_radius > bowl.upper_inner_radius());
+        assert!(roof.inner_radius < bowl.outer_radius());
+        assert!(roof.outer_radius > bowl.outer_radius());
+        // Headroom over the back row, and the rear support above the tip.
+        assert!(roof.inner_y > bowl.stand_top_height() + 4.0);
+        assert!(roof.outer_y > roof.inner_y);
+        // Towers still rise clear of the roof so the lamp banks light the field.
+        let tower_top = bowl.stand_top_height() + 22.0;
+        assert!(tower_top > roof.outer_y + 8.0, "towers buried in the roof");
+        assert!(floodlight_radius(bowl.outer_radius()) > roof.outer_radius);
+    }
+
+    /// The detail pass is only affordable because it is merged. Ten thousand
+    /// seats as entities would cost more than the whole rest of the frame, so
+    /// guard both halves of the bargain: the geometry arrives in a couple of
+    /// dozen draws, and the vertex total stays inside a sane budget.
+    #[test]
+    fn merged_bowl_geometry_stays_inside_its_budget() {
+        fn vertices(mesh: &Mesh) -> usize {
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                .map(|p| p.len())
+                .unwrap_or(0)
+        }
+
+        let bowl = BowlLayout::from_boundary(65.0);
+        let palette = sg::SeatPalette {
+            tones: [[0.3, 0.4, 0.5], [0.32, 0.42, 0.52], [0.28, 0.38, 0.48]],
+            accent: [0.9, 0.9, 0.85],
+        };
+
+        let mut parts: Vec<Mesh> = Vec::new();
+        let mut seats = 0usize;
+        for tier in 0..TIER_COUNT {
+            let band = sg::SeatBand {
+                segments: TIER_SEGMENTS,
+                aisle_every: AISLE_EVERY,
+                radius: bowl.tier_mid_radius(tier),
+                tread_top: bowl.tread_top(tier),
+                row: tier,
+                mosaic: bowl.is_upper_deck(tier),
+            };
+            seats += sg::seat_band_count(&band);
+            parts.push(sg::seat_band_mesh(&band, &palette));
+        }
+        let seat_verts: usize = parts.iter().map(vertices).sum();
+
+        let roof = bowl.roof_spec();
+        parts.push(sg::roof_truss_mesh(&roof));
+        parts.push(sg::roof_panel_mesh(&roof, false));
+        parts.push(sg::roof_panel_mesh(&roof, true));
+        parts.push(sg::roof_soffit_mesh(&roof));
+        parts.push(sg::roof_edge_mesh(&roof));
+        parts.push(sg::roof_cluster_mesh(&roof, ROOF_CLUSTER_COUNT));
+        let facade = sg::FacadeSpec {
+            segments: FACADE_SEGMENTS,
+            radius: bowl.outer_radius() + 3.9,
+            base_y: bowl.upper_deck_base_height(),
+            height: UPPER_TIER_COUNT as f32 * bowl.tier_rise + 4.5,
+            rib_width: 1.15,
+            rib_depth: 0.85,
+            glazing_bands: 6,
+        };
+        parts.push(sg::facade_rib_mesh(&facade));
+        parts.push(sg::facade_glazing_mesh(&facade));
+        parts.push(sg::facade_parapet_mesh(&facade));
+
+        // One draw per tier of seats plus one per roof and facade layer. If this
+        // ever climbs into the hundreds, something stopped merging.
+        assert_eq!(parts.len(), TIER_COUNT + 9);
+        // Pan and backrest, five faces each, four vertices per face.
+        assert_eq!(seat_verts, seats * 40);
+        let total: usize = parts.iter().map(vertices).sum();
+        assert!(
+            total < 600_000,
+            "merged bowl geometry blew its vertex budget: {total}"
+        );
+        for mesh in &parts {
+            assert!(
+                !sg::mesh_is_empty(mesh),
+                "a merged bowl layer came back empty"
+            );
+        }
+    }
+
+    /// The bowl used to be one roughness value everywhere, which is what made it
+    /// read as plastic under the floodlights. Each finish must stay a distinct
+    /// point in roughness/metallic/reflectance space.
+    #[test]
+    fn surface_finishes_are_physically_distinct() {
+        let finishes = [
+            ("concrete", concrete_mat(Color::WHITE)),
+            ("steel", painted_steel_mat(Color::WHITE)),
+            ("cloth", cloth_mat(Color::WHITE)),
+            ("paint", matte_paint_mat(Color::WHITE)),
+            ("wood", lacquered_wood_mat(Color::WHITE)),
+        ];
+        for (i, (name, a)) in finishes.iter().enumerate() {
+            for (other, b) in finishes.iter().skip(i + 1) {
+                let spread = (a.perceptual_roughness - b.perceptual_roughness).abs()
+                    + (a.metallic - b.metallic).abs()
+                    + (a.reflectance - b.reflectance).abs();
+                assert!(
+                    spread > 0.08,
+                    "{name} and {other} are the same finish (spread {spread})"
+                );
+            }
+        }
+        // Only the steel is genuinely metallic; everything else is a dielectric.
+        assert!(painted_steel_mat(Color::WHITE).metallic > 0.5);
+        for (name, m) in &finishes[2..] {
+            assert_eq!(m.metallic, 0.0, "{name} must not be metallic");
+        }
+    }
+
+    #[test]
+    fn gate_plaque_numbering_covers_every_gate() {
+        let gates = sg::gate_angles(GATE_COUNT);
+        assert_eq!(gates.len(), GATE_COUNT);
+        // One plaque image per gate, and gate 1 must differ from gate 2.
+        let a = gate_number_image(1);
+        let b = gate_number_image(2);
+        assert_ne!(a.data.as_ref().unwrap(), b.data.as_ref().unwrap());
+        assert_eq!(
+            gate_number_image(1).data.as_ref().unwrap(),
+            a.data.as_ref().unwrap(),
+            "gate plaques must be deterministic"
+        );
     }
 }
