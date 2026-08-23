@@ -210,6 +210,14 @@ impl StandMesh {
 // Seats
 // ---------------------------------------------------------------------------
 
+/// Ring segments in a seat row. The treads, risers, aisles, stairs and seats all
+/// share this segmentation (`stadium::TIER_SEGMENTS`), and so must the crowd —
+/// two independent grids is exactly how spectators ended up sitting on the floor
+/// between the seats.
+pub(crate) const SEAT_SEGMENTS: usize = 96;
+/// Every `n`th segment is left open as a stair aisle (`stadium::AISLE_EVERY`).
+pub(crate) const SEAT_AISLE_EVERY: usize = 8;
+
 /// Seat pitch along a row. Real stadium seats sit at 0.50–0.58 m centres.
 const SEAT_PITCH: f32 = 0.56;
 /// Fraction of the pitch filled by the seat shell; the remainder is the gap
@@ -222,10 +230,14 @@ const SEAT_PAN_HEIGHT: f32 = 0.42;
 const SEAT_BACK_THICKNESS: f32 = 0.09;
 /// Backrest crown height above the tread.
 const SEAT_BACK_TOP: f32 = 0.88;
-/// Inward radial offset of the seat pan from the tread mid radius. Matches the
-/// offset `crowd::spawn_crowd` uses for spectator figures so the crowd lands on
-/// the seats instead of floating in the walkway.
+/// Inward radial offset of the seat pan from the tread mid radius, leaving the
+/// rest of the tread as the walkway in front of the row.
 const SEAT_PAN_INWARD: f32 = 0.15;
+/// Top face of the pan: the height a seated pelvis rests at.
+const SEAT_HIP_HEIGHT: f32 = SEAT_PAN_HEIGHT + SEAT_PAN_THICKNESS * 0.5;
+/// How far back from the pan centre that pelvis sits. Nobody perches on the
+/// middle of a stadium seat; they sit back until their spine meets the backrest.
+const SEAT_HIP_SETBACK: f32 = 0.08;
 
 /// Base seat tones cycled row to row.
 pub(crate) const SEAT_TONE_COUNT: usize = 3;
@@ -257,6 +269,114 @@ pub(crate) struct SeatBand {
     pub(crate) mosaic: bool,
 }
 
+impl SeatBand {
+    /// The layout this band's seats are cut from.
+    pub(crate) fn grid(&self) -> SeatGrid {
+        SeatGrid {
+            segments: self.segments,
+            aisle_every: self.aisle_every,
+            radius: self.radius,
+            tread_top: self.tread_top,
+        }
+    }
+}
+
+/// Where the seats in one row are, and where the people in them go.
+///
+/// This is the single source of truth for seat placement: [`seat_band_mesh`]
+/// cuts the shells from it and [`crate::render::crowd`] seats its spectators
+/// from the same call, so a spectator is *in* seat `(seg, k)` by construction and
+/// cannot drift out of alignment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SeatGrid {
+    pub(crate) segments: usize,
+    /// Segments where `seg % aisle_every == 0` stay empty for the aisle.
+    pub(crate) aisle_every: usize,
+    /// Tread mid radius (see `BowlLayout::tier_mid_radius`).
+    pub(crate) radius: f32,
+    /// World height of the tread's walking surface.
+    pub(crate) tread_top: f32,
+}
+
+impl SeatGrid {
+    /// Grid for a tread at `radius`, on the bowl's canonical segmentation.
+    pub(crate) fn on_tread(radius: f32, tread_top: f32) -> Self {
+        Self {
+            segments: SEAT_SEGMENTS,
+            aisle_every: SEAT_AISLE_EVERY,
+            radius,
+            tread_top,
+        }
+    }
+
+    pub(crate) fn seats_per_segment(self) -> usize {
+        seats_per_segment(self.radius, self.segments)
+    }
+
+    pub(crate) fn is_aisle(self, seg: usize) -> bool {
+        segment_is_aisle(seg, self.aisle_every)
+    }
+
+    /// Seats in the whole row — the reference count the mesh must reproduce.
+    pub(crate) fn total_seats(self) -> usize {
+        (0..self.segments).filter(|s| !self.is_aisle(*s)).count() * self.seats_per_segment()
+    }
+
+    /// Centre-to-centre spacing actually achieved. A whole number of seats has
+    /// to fit each segment, so this lands near [`SEAT_PITCH`] rather than on it.
+    pub(crate) fn seat_pitch(self) -> f32 {
+        TAU * self.radius / (self.segments * self.seats_per_segment()) as f32
+    }
+
+    /// Ring angle of seat `k` in segment `seg` — also the way that seat faces.
+    pub(crate) fn seat_angle(self, seg: usize, k: usize) -> f32 {
+        let per = self.seats_per_segment() as f32;
+        (seg as f32 + (k as f32 + 0.5) / per) / self.segments as f32 * TAU
+    }
+
+    /// Frame of one seat: origin on the tread under the seat's centre line, `+X`
+    /// along the row, `+Z` toward the pitch, `+Y` up. Everything fitted to a
+    /// seat — shell, occupant, occupant's knees — is a local offset in here.
+    pub(crate) fn seat_frame(self, seg: usize, k: usize) -> Transform {
+        ring_segment_transform(self.seat_angle(seg, k), self.radius, self.tread_top)
+    }
+
+    /// Local offset of a seated pelvis inside [`SeatGrid::seat_frame`].
+    pub(crate) fn hip_offset(self) -> Vec3 {
+        Vec3::new(0.0, SEAT_HIP_HEIGHT, SEAT_PAN_INWARD - SEAT_HIP_SETBACK)
+    }
+
+    /// World height of a seated pelvis: the top face of the pan.
+    pub(crate) fn hip_height(self) -> f32 {
+        self.tread_top + SEAT_HIP_HEIGHT
+    }
+
+    /// World position of the pelvis of whoever occupies seat `(seg, k)`.
+    pub(crate) fn seat_hip(self, seg: usize, k: usize) -> Vec3 {
+        self.seat_frame(seg, k).transform_point(self.hip_offset())
+    }
+
+    /// Tread directly under that pelvis, where the occupant's feet land.
+    pub(crate) fn seat_foot(self, seg: usize, k: usize) -> Vec3 {
+        let hip = self.hip_offset();
+        self.seat_frame(seg, k)
+            .transform_point(Vec3::new(hip.x, 0.0, hip.z))
+    }
+
+    /// Backrest crown — the line an occupant's head has to clear to read.
+    pub(crate) fn backrest_top(self) -> f32 {
+        self.tread_top + SEAT_BACK_TOP
+    }
+
+    /// Every seat in the row, aisle segments skipped.
+    pub(crate) fn seats(self) -> impl Iterator<Item = (usize, usize)> {
+        let per = self.seats_per_segment();
+        (0..self.segments)
+            .filter(move |seg| !self.is_aisle(*seg))
+            .flat_map(move |seg| (0..per).map(move |k| (seg, k)))
+    }
+}
+
 /// Seats fitted into one ring segment at this radius.
 pub(crate) fn seats_per_segment(radius: f32, segments: usize) -> usize {
     let arc = TAU * radius / segments as f32;
@@ -265,11 +385,7 @@ pub(crate) fn seats_per_segment(radius: f32, segments: usize) -> usize {
 
 /// Total seats in a band — the reference count the mesh must reproduce.
 pub(crate) fn seat_band_count(band: &SeatBand) -> usize {
-    let per_segment = seats_per_segment(band.radius, band.segments);
-    (0..band.segments)
-        .filter(|seg| !segment_is_aisle(*seg, band.aisle_every))
-        .count()
-        * per_segment
+    band.grid().total_seats()
 }
 
 /// True when a ring segment is left open as a stair aisle. Mirrors the skip rule
@@ -305,46 +421,34 @@ fn seat_color(palette: &SeatPalette, band: &SeatBand, seg: usize, k: usize) -> [
 
 /// Merged mesh for one row of seats: pan, backrest and the gap between seats.
 pub(crate) fn seat_band_mesh(band: &SeatBand, palette: &SeatPalette) -> Mesh {
+    let grid = band.grid();
     // 2 boxes per seat, 5 faces each (no underside), 4 vertices per face.
-    let mut m = StandMesh::with_capacity(seat_band_count(band) * 40);
-    let per_segment = seats_per_segment(band.radius, band.segments);
-    let seg_arc = TAU / band.segments as f32;
-    let seat_arc = seg_arc / per_segment as f32;
-    let shell_w = seat_arc * band.radius * SEAT_SHELL_FRAC;
+    let mut m = StandMesh::with_capacity(grid.total_seats() * 40);
+    let shell_w = grid.seat_pitch() * SEAT_SHELL_FRAC;
 
-    let pan_r = band.radius - SEAT_PAN_INWARD;
-    let back_r = pan_r + (SEAT_PAN_DEPTH + SEAT_BACK_THICKNESS) * 0.5;
-    let pan_y = band.tread_top + SEAT_PAN_HEIGHT;
     // The backrest runs from just above the tread to its crown, so it doubles as
     // the visible support for the pan.
-    let back_low = band.tread_top + 0.06;
-    let back_high = band.tread_top + SEAT_BACK_TOP;
-    let back_y = (back_low + back_high) * 0.5;
-    let back_h = back_high - back_low;
+    const BACK_LOW: f32 = 0.06;
+    let back_z = SEAT_PAN_INWARD - (SEAT_PAN_DEPTH + SEAT_BACK_THICKNESS) * 0.5;
+    let back_h = SEAT_BACK_TOP - BACK_LOW;
 
-    for seg in 0..band.segments {
-        if segment_is_aisle(seg, band.aisle_every) {
-            continue;
-        }
-        let seg_start = seg as f32 * seg_arc;
-        for k in 0..per_segment {
-            let angle = seg_start + (k as f32 + 0.5) * seat_arc;
-            let color = seat_color(palette, band, seg, k);
-            m.push_box_open_bottom(
-                ring_segment_transform(angle, pan_r, pan_y),
-                Vec3::new(
-                    shell_w * 0.5,
-                    SEAT_PAN_THICKNESS * 0.5,
-                    SEAT_PAN_DEPTH * 0.5,
-                ),
-                color,
-            );
-            m.push_box_open_bottom(
-                ring_segment_transform(angle, back_r, back_y),
-                Vec3::new(shell_w * 0.5, back_h * 0.5, SEAT_BACK_THICKNESS * 0.5),
-                color,
-            );
-        }
+    for (seg, k) in grid.seats() {
+        let frame = grid.seat_frame(seg, k);
+        let color = seat_color(palette, band, seg, k);
+        m.push_box_open_bottom(
+            frame * Transform::from_xyz(0.0, SEAT_PAN_HEIGHT, SEAT_PAN_INWARD),
+            Vec3::new(
+                shell_w * 0.5,
+                SEAT_PAN_THICKNESS * 0.5,
+                SEAT_PAN_DEPTH * 0.5,
+            ),
+            color,
+        );
+        m.push_box_open_bottom(
+            frame * Transform::from_xyz(0.0, (BACK_LOW + SEAT_BACK_TOP) * 0.5, back_z),
+            Vec3::new(shell_w * 0.5, back_h * 0.5, SEAT_BACK_THICKNESS * 0.5),
+            color,
+        );
     }
     m.build()
 }
@@ -1259,6 +1363,91 @@ mod tests {
         assert!(
             (0.45..0.65).contains(&actual),
             "seat pitch {actual} outside stadium norms"
+        );
+    }
+
+    #[test]
+    fn seat_grid_follows_the_bowl_segmentation() {
+        // These mirror `stadium::TIER_SEGMENTS` / `AISLE_EVERY`. If the bowl ever
+        // resegments, the crowd has to move with it, which is the whole point of
+        // both reading the same grid.
+        assert_eq!(SEAT_SEGMENTS, 96);
+        assert_eq!(SEAT_AISLE_EVERY, 8);
+        let b = band(3, 76.0, false);
+        let grid = SeatGrid::on_tread(b.radius, b.tread_top);
+        assert_eq!(grid.segments, SEAT_SEGMENTS);
+        assert_eq!(grid.aisle_every, SEAT_AISLE_EVERY);
+        // A band and a grid on the same tread must be the same layout, or the
+        // seat shells and the people in them come from different maths again.
+        assert_eq!(grid, b.grid());
+        assert_eq!(grid.total_seats(), seat_band_count(&b));
+    }
+
+    #[test]
+    fn seat_grid_visits_every_seat_exactly_once() {
+        let grid = SeatGrid::on_tread(80.0, 5.0);
+        let per = grid.seats_per_segment();
+        let seats: Vec<(usize, usize)> = grid.seats().collect();
+        assert_eq!(seats.len(), grid.total_seats());
+        for &(seg, k) in &seats {
+            assert!(!grid.is_aisle(seg), "seat in aisle segment {seg}");
+            assert!(k < per, "seat index {k} past the {per} that fit");
+        }
+        let mut sorted = seats.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), seats.len(), "a seat was visited twice");
+    }
+
+    #[test]
+    fn adjacent_seats_sit_one_pitch_apart_across_segment_joins() {
+        let grid = SeatGrid::on_tread(82.0, 6.0);
+        let per = grid.seats_per_segment();
+        let pitch = grid.seat_pitch();
+        // Within a segment, and over the join into the next one: the row must be
+        // evenly spaced, or the seams show as a double-width seat.
+        for (a, b) in [((1, 0), (1, 1)), ((1, per - 1), (2, 0))] {
+            let d = grid.seat_hip(a.0, a.1).distance(grid.seat_hip(b.0, b.1));
+            assert!(
+                (d - pitch).abs() < 0.02,
+                "seats {a:?}->{b:?} are {d} apart, not one {pitch} pitch"
+            );
+        }
+        assert!(
+            (0.45..0.65).contains(&pitch),
+            "pitch {pitch} outside stadium norms"
+        );
+    }
+
+    #[test]
+    fn seated_hip_lands_on_the_pan_against_the_backrest() {
+        let grid = SeatGrid::on_tread(78.0, 7.5);
+        // Pan top, not the tread floor: the whole bug this grid exists to fix.
+        assert!((grid.hip_height() - (7.5 + 0.455)).abs() < 1e-5);
+        assert!(grid.hip_height() > grid.tread_top + SEAT_PAN_HEIGHT);
+        assert!(grid.hip_height() < grid.backrest_top() - 0.3);
+
+        let hip = grid.hip_offset();
+        let pan_front = SEAT_PAN_INWARD + SEAT_PAN_DEPTH * 0.5;
+        let pan_back = SEAT_PAN_INWARD - SEAT_PAN_DEPTH * 0.5;
+        assert!(
+            hip.z > pan_back && hip.z < pan_front,
+            "pelvis at {} is off the pan ({pan_back}..{pan_front})",
+            hip.z
+        );
+        assert!(hip.z < SEAT_PAN_INWARD, "pelvis must sit back, not forward");
+
+        // Feet share the seat's ground plan and stand on the tread itself.
+        let foot = grid.seat_foot(4, 2);
+        let seated = grid.seat_hip(4, 2);
+        assert!((foot.y - grid.tread_top).abs() < 1e-5);
+        assert!(Vec2::new(foot.x - seated.x, foot.z - seated.z).length() < 1e-4);
+        // And the seat is a seat's worth of radius inside the tread mid line.
+        let hip_r = Vec2::new(seated.x, seated.z).length();
+        assert!(
+            hip_r < grid.radius && hip_r > grid.radius - 0.3,
+            "hip radius {hip_r} against tread mid {}",
+            grid.radius
         );
     }
 
