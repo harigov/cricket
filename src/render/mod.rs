@@ -171,6 +171,14 @@ type UnfixedPropMesh<'a> = (Entity, &'a MeshMaterial3d<StandardMaterial>);
 /// Only mesh entities we have not already visited.
 type UnfixedPropMeshFilter = (With<Mesh3d>, Without<PropMaterialFixed>);
 
+/// How much of flat ground's sun a standing prop actually catches.
+///
+/// `day_albedo` inverts the response of ground facing the sky. A tree or a rock
+/// presents mostly vertical faces to a sun 56° up, so correcting it by the full
+/// ground response takes the foliage down to near-black. Four tenths is about
+/// what the visible faces of an upright convex prop average.
+const PROP_SUN_FRACTION: f32 = 0.4;
+
 /// Correct imported kit materials, once per mesh.
 ///
 /// glTF materials are shared per asset, so the first instance of a palm fixes
@@ -210,8 +218,9 @@ pub fn retune_imported_prop_materials(
             if material.base_color_texture.is_none() {
                 let srgb = material.base_color.to_srgba();
                 let albedo = environment::day_albedo([srgb.red, srgb.green, srgb.blue]);
+                let k = 1.0 / PROP_SUN_FRACTION;
                 material.base_color =
-                    Color::linear_rgba(albedo[0], albedo[1], albedo[2], srgb.alpha);
+                    Color::linear_rgba(albedo[0] * k, albedo[1] * k, albedo[2] * k, srgb.alpha);
             }
         }
         commands.entity(entity).insert(PropMaterialFixed);
