@@ -710,10 +710,11 @@ fn attach_bat(
     ));
     let wood = willow_mat(materials);
     let grip_mat = matte(materials, Color::srgb_u8(0x24, 0x28, 0x30), 0.9);
-    // Whole bat hangs down-forward from the hands, tilted into a stance.
-    let swing = Quat::from_rotation_x(-0.5) * Quat::from_rotation_z(0.15);
-    let blade_tf = equipment_transform_m(Vec3::new(0.0, -0.44, 0.10), swing);
-    let handle_tf = equipment_transform_m(Vec3::new(0.0, -0.20, 0.05), swing);
+    // Mixamo arm chain runs along local -X; mesh long axis is +Y. Map +Y onto
+    // hand +Z so the blade hangs down beside the pads in the idle mocap grip.
+    let swing = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2) * Quat::from_rotation_y(-0.14);
+    let blade_tf = equipment_transform_m(Vec3::new(-0.02, 0.0, 0.36), swing);
+    let handle_tf = equipment_transform_m(Vec3::new(-0.02, 0.0, -0.14), swing);
     commands.entity(hand).with_children(|p| {
         p.spawn((
             Bat,
