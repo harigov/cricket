@@ -1212,13 +1212,13 @@ mod tests {
         assert!(yaw_to_face(MODEL_FORWARD_XZ).abs() < 1e-5);
     }
 
-    /// `Quat::from_rotation_y(yaw)` applied to [`MODEL_FORWARD_XZ`] must recover `dir`.
+    /// Rotate the model's forward axis by `yaw` using the same `Quat` the
+    /// spawner applies, so the test exercises Bevy's real rotation rather than
+    /// re-deriving the formula the convention already assumes.
     fn rotate_model_forward(yaw: f32) -> Vec2 {
         let f = MODEL_FORWARD_XZ;
-        Vec2::new(
-            f.x * yaw.cos() + f.y * yaw.sin(),
-            -f.x * yaw.sin() + f.y * yaw.cos(),
-        )
+        let v = Quat::from_rotation_y(yaw) * Vec3::new(f.x, 0.0, f.y);
+        Vec2::new(v.x, v.z)
     }
 
     #[test]
