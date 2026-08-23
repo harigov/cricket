@@ -91,6 +91,8 @@ pub struct MenuState {
     pub toss_winner: usize,
     /// What the toss winner elected (bat first).
     pub toss_elects_bat: bool,
+    /// Coin flip outcome (heads = true); fixed when the toss begins.
+    pub coin_heads: bool,
     /// Settings screen active tab.
     pub settings_tab: SettingsTab,
     /// true when the current setup wizard leads into a tournament.
@@ -239,6 +241,7 @@ impl Default for MenuState {
             bat_first: true,
             toss_winner: 0,
             toss_elects_bat: true,
+            coin_heads: true,
             settings_tab: SettingsTab::Audio,
             tournament_mode: false,
         }
@@ -266,6 +269,12 @@ struct MenuBackdrop {
 struct MenuFadeOverlay;
 #[derive(Component)]
 struct MenuCoinLabel;
+#[derive(Component)]
+struct MenuCoinVisual;
+#[derive(Component)]
+struct MenuCoinFace {
+    heads: bool,
+}
 
 pub struct MenusPlugin;
 
@@ -337,13 +346,45 @@ fn update_menu_animations(
     ms: Res<MenuState>,
     trans: Res<MenuTransition>,
     mut coin_q: Query<&mut Text, With<MenuCoinLabel>>,
+    mut coin_visual_q: Query<&mut Transform, With<MenuCoinVisual>>,
+    mut coin_face_q: Query<(&MenuCoinFace, &mut Visibility)>,
     mut fade_q: Query<&mut BackgroundColor, With<MenuFadeOverlay>>,
 ) {
+    let coin_side_heads = if ms.screen == Screen::SetupTossFlip {
+        (anim.0 * 8.0).sin() > 0.0
+    } else {
+        ms.coin_heads
+    };
+
     if ms.screen == Screen::SetupTossFlip {
-        let flip = (anim.0 * 8.0).sin();
-        let coin_side = if flip > 0.0 { "HEADS" } else { "TAILS" };
+        let spin = anim.0 * 6.0;
+        let squash = (anim.0 * 12.0).sin().abs().max(0.14);
+        for mut transform in coin_visual_q.iter_mut() {
+            transform.rotation = Quat::from_rotation_y(spin);
+            transform.scale = Vec3::new(squash, 1.0, 1.0);
+        }
+    } else if matches!(
+        ms.screen,
+        Screen::SetupTossResult | Screen::SetupTossChoice | Screen::SetupTossSummary
+    ) {
+        for mut transform in coin_visual_q.iter_mut() {
+            transform.rotation = Quat::IDENTITY;
+            transform.scale = Vec3::ONE;
+        }
+    }
+
+    for (face, mut vis) in coin_face_q.iter_mut() {
+        *vis = if face.heads == coin_side_heads {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+
+    if ms.screen == Screen::SetupTossFlip {
+        let coin_side = if coin_side_heads { "HEADS" } else { "TAILS" };
         for mut text in coin_q.iter_mut() {
-            **text = format!("Coin: {coin_side}");
+            **text = coin_side.to_string();
         }
     }
 
@@ -970,6 +1011,24 @@ fn spawn_menu_item_rows(
     }
 }
 
+fn screen_footer_hint(ms: &MenuState) -> &'static str {
+    match ms.screen {
+        Screen::Settings => {
+            "Q / E  SWITCH TAB     ↑↓ / W S  NAVIGATE     SPACE  SELECT     ESC  BACK"
+        }
+        Screen::Main => "↑↓ / W S  NAVIGATE     SPACE  SELECT     ESC  BACK",
+        Screen::SetupTeam | Screen::SetupOpp => {
+            "↑↓←→ / W A S D  NAVIGATE     SPACE  SELECT     ESC  BACK"
+        }
+        Screen::SetupOvers => "←→ / A D  NAVIGATE     SPACE  SELECT     ESC  BACK",
+        Screen::SetupStadium => "↑↓ / W S  NAVIGATE     SPACE  SELECT     ESC  BACK",
+        Screen::SetupTossFlip | Screen::SetupTossResult => "ESC  BACK",
+        Screen::SetupTossChoice => "←→ / A D  CHOOSE     SPACE  CONFIRM     ESC  BACK",
+        Screen::SetupTossSummary => "SPACE  CONTINUE     ESC  BACK",
+        Screen::Bracket => "",
+    }
+}
+
 fn spawn_menu_footer_hint(
     parent: &mut ChildSpawnerCommands,
     ms: &MenuState,
@@ -979,18 +1038,7 @@ fn spawn_menu_footer_hint(
     if ms.screen == Screen::Bracket {
         return;
     }
-    let hint = if ms.screen == Screen::Settings {
-        "Q / E  SWITCH TAB     W / S  NAVIGATE     SPACE  SELECT     ESC  BACK"
-    } else if ms.screen == Screen::SetupTossSummary {
-        "PRESS SPACE TO CONTINUE     ESC  BACK"
-    } else if matches!(
-        ms.screen,
-        Screen::SetupTossFlip | Screen::SetupTossResult | Screen::SetupTossChoice
-    ) {
-        "← / →  CHOOSE     SPACE  CONFIRM     ESC  BACK"
-    } else {
-        "W / S  NAVIGATE     SPACE  SELECT     ESC  BACK"
-    };
+    let hint = screen_footer_hint(ms);
     parent.spawn((
         Text::new(hint),
         TextFont {
@@ -1060,7 +1108,17 @@ fn refresh_menu(
             } else {
                 AlignItems::Center
             },
-            justify_content: JustifyContent::Center,
+            justify_content: if matches!(
+                ms.screen,
+                Screen::SetupTossFlip
+                    | Screen::SetupTossResult
+                    | Screen::SetupTossChoice
+                    | Screen::SetupTossSummary
+            ) {
+                JustifyContent::SpaceBetween
+            } else {
+                JustifyContent::Center
+            },
             overflow: Overflow::clip(),
             row_gap: theme::spx(
                 if ms.screen == Screen::Settings {
@@ -1113,10 +1171,251 @@ fn refresh_menu(
 enum SetupCardStyle {
     Team { scale: f32, high_contrast: bool },
     Overs { scale: f32 },
-    Stadium { scale: f32 },
 }
 
-/// Shared selectable card for team, overs and venue pickers.
+/// Metadata for a stadium list row.
+struct StadiumRowMeta<'a> {
+    city: Option<&'a str>,
+    pitch: Option<&'a str>,
+    boundary_m: Option<f32>,
+}
+
+fn spawn_meta_chip(
+    parent: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    scale: f32,
+    label: &str,
+) {
+    parent
+        .spawn((
+            Node {
+                padding: UiRect::axes(theme::spx(10.0, scale), theme::spx(4.0, scale)),
+                border_radius: BorderRadius::all(theme::spx(4.0, scale)),
+                ..default()
+            },
+            BackgroundColor(theme::palette::chip_bg()),
+        ))
+        .with_children(|chip| {
+            chip.spawn((
+                Text::new(label),
+                TextFont {
+                    font: fonts.bold.clone(),
+                    font_size: 10.0 * scale,
+                    ..default()
+                },
+                TextColor(theme::palette::text_muted()),
+            ));
+        });
+}
+
+fn spawn_stadium_row(
+    parent: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    scale: f32,
+    title: &str,
+    meta: StadiumRowMeta<'_>,
+    selected: bool,
+) {
+    let bg = if selected {
+        theme::palette::selection_bg()
+    } else {
+        theme::palette::card_bg()
+    };
+    let border = if selected {
+        theme::palette::selection_border()
+    } else {
+        theme::palette::card_border()
+    };
+    let title_color = if selected {
+        Color::srgb(1.0, 0.95, 0.76)
+    } else {
+        theme::palette::text_primary()
+    };
+
+    parent
+        .spawn((
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexStart,
+                row_gap: theme::spx(6.0, scale),
+                padding: UiRect::all(theme::spx(12.0, scale)),
+                border: UiRect::all(px(if selected { 2 } else { 1 })),
+                border_radius: BorderRadius::all(theme::spx(6.0, scale)),
+                ..default()
+            },
+            BackgroundColor(bg),
+            BorderColor::all(border),
+        ))
+        .with_children(|card| {
+            card.spawn((
+                Text::new(title),
+                TextFont {
+                    font: fonts.bold.clone(),
+                    font_size: 16.0 * scale,
+                    ..default()
+                },
+                TextColor(title_color),
+            ));
+            if let Some(city) = meta.city {
+                card.spawn((
+                    Text::new(city),
+                    TextFont {
+                        font: fonts.regular.clone(),
+                        font_size: 12.0 * scale,
+                        ..default()
+                    },
+                    TextColor(theme::palette::text_muted()),
+                ));
+            }
+            if meta.pitch.is_some() || meta.boundary_m.is_some() {
+                card
+                    .spawn((Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: theme::spx(8.0, scale),
+                        ..default()
+                    },))
+                    .with_children(|chips| {
+                        if let Some(pitch) = meta.pitch {
+                            spawn_meta_chip(chips, fonts, scale, pitch);
+                        }
+                        if let Some(boundary) = meta.boundary_m {
+                            spawn_meta_chip(
+                                chips,
+                                fonts,
+                                scale,
+                                &format!("{boundary:.0}m boundary"),
+                            );
+                        }
+                    });
+            }
+        });
+}
+
+fn spawn_toss_coin(
+    parent: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    scale: f32,
+    heads: bool,
+) {
+    let coin_size = theme::spx(72.0, scale);
+    parent
+        .spawn((
+            MenuCoinVisual,
+            Node {
+                width: coin_size,
+                height: coin_size,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            Transform::default(),
+        ))
+        .with_children(|coin| {
+            for (is_heads, label) in [(true, "H"), (false, "T")] {
+                coin
+                    .spawn((
+                        MenuCoinFace { heads: is_heads },
+                        Node {
+                            position_type: PositionType::Absolute,
+                            width: percent(100),
+                            height: percent(100),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            border: UiRect::all(px(3)),
+                            border_radius: BorderRadius::all(theme::spx(36.0, scale)),
+                            ..default()
+                        },
+                        BackgroundColor(theme::palette::coin_face()),
+                        BorderColor::all(theme::palette::coin_edge()),
+                        if is_heads == heads {
+                            Visibility::Visible
+                        } else {
+                            Visibility::Hidden
+                        },
+                    ))
+                    .with_children(|face| {
+                        face.spawn((
+                            Text::new(label),
+                            TextFont {
+                                font: fonts.display.clone(),
+                                font_size: 28.0 * scale,
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.18, 0.14, 0.06)),
+                        ));
+                    });
+            }
+        });
+    parent.spawn((
+        MenuCoinLabel,
+        Text::new(if heads { "HEADS" } else { "TAILS" }),
+        TextFont {
+            font: fonts.bold.clone(),
+            font_size: 12.0 * scale,
+            ..default()
+        },
+        TextColor(theme::palette::text_muted()),
+        Node {
+            margin: UiRect::top(theme::spx(6.0, scale)),
+            ..default()
+        },
+    ));
+}
+
+fn spawn_toss_side(
+    parent: &mut ChildSpawnerCommands,
+    assets: &AssetServer,
+    fonts: &UiFonts,
+    team: &crate::core::teams::Team,
+    scale: f32,
+) {
+    parent
+        .spawn((Node {
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: theme::spx(8.0, scale),
+            width: theme::spx(120.0, scale),
+            ..default()
+        },))
+        .with_children(|side| {
+            side.spawn((
+                ImageNode::new(crate::render::load_team_crest(
+                    assets,
+                    &team.crest_asset(),
+                )),
+                Node {
+                    width: theme::spx(88.0, scale),
+                    height: theme::spx(88.0, scale),
+                    ..default()
+                },
+            ));
+            side.spawn((
+                Text::new(team.name.to_uppercase()),
+                TextFont {
+                    font: fonts.bold.clone(),
+                    font_size: 13.0 * scale,
+                    ..default()
+                },
+                TextColor(theme::palette::text_primary()),
+                Node {
+                    max_width: theme::spx(120.0, scale),
+                    ..default()
+                },
+            ));
+            side.spawn((
+                Text::new(team.short.to_uppercase()),
+                TextFont {
+                    font: fonts.bold.clone(),
+                    font_size: 18.0 * scale,
+                    ..default()
+                },
+                TextColor(team.primary_color),
+            ));
+        });
+}
+
+/// Shared selectable card for team and overs pickers.
 fn spawn_setup_card(
     parent: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
@@ -1154,18 +1453,6 @@ fn spawn_setup_card(
                 theme::palette::gold()
             } else {
                 theme::palette::card_border()
-            },
-        ),
-        SetupCardStyle::Stadium { .. } => (
-            if selected {
-                theme::palette::selection_bg()
-            } else {
-                Color::srgba(0.06, 0.08, 0.10, 0.82)
-            },
-            if selected {
-                theme::palette::gold()
-            } else {
-                Color::NONE
             },
         ),
     };
@@ -1269,46 +1556,6 @@ fn spawn_setup_card(
                     }
                 });
         }
-        SetupCardStyle::Stadium { scale } => {
-            parent
-                .spawn((
-                    Node {
-                        width: percent(100),
-                        padding: UiRect::all(theme::spx(10.0, scale)),
-                        border: UiRect::left(px(if selected { 4 } else { 0 })),
-                        align_items: AlignItems::FlexStart,
-                        ..default()
-                    },
-                    BackgroundColor(bg),
-                    BorderColor::all(border),
-                ))
-                .with_children(|row| {
-                    row.spawn((
-                        Text::new(label),
-                        TextFont {
-                            font: fonts.bold.clone(),
-                            font_size: 15.0 * scale,
-                            ..default()
-                        },
-                        TextColor(if selected {
-                            Color::WHITE
-                        } else {
-                            theme::palette::text_primary()
-                        }),
-                    ));
-                    if let Some(sub) = sub_label {
-                        row.spawn((
-                            Text::new(sub),
-                            TextFont {
-                                font: fonts.regular.clone(),
-                                font_size: 11.0 * scale,
-                                ..default()
-                            },
-                            TextColor(theme::palette::text_muted()),
-                        ));
-                    }
-                });
-        }
     }
 }
 
@@ -1333,50 +1580,47 @@ fn spawn_toss_crest_row(
         .spawn((Node {
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
-            column_gap: theme::spx(24.0, scale),
+            justify_content: JustifyContent::Center,
+            column_gap: theme::spx(20.0, scale),
+            width: percent(100),
             ..default()
         },))
         .with_children(|versus| {
-            for team in [user, opp] {
-                versus
-                    .spawn((Node {
-                        flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },))
-                    .with_children(|side| {
-                        side.spawn((
-                            ImageNode::new(crate::render::load_team_crest(
-                                assets,
-                                &team.crest_asset(),
-                            )),
-                            Node {
-                                width: theme::spx(64.0, scale),
-                                height: theme::spx(64.0, scale),
-                                ..default()
-                            },
-                        ));
-                        side.spawn((
-                            Text::new(team.short.to_uppercase()),
-                            TextFont {
-                                font: fonts.bold.clone(),
-                                font_size: 16.0 * scale,
-                                ..default()
-                            },
-                            TextColor(team.primary_color),
-                        ));
-                    });
-            }
+            spawn_toss_side(versus, assets, fonts, user, scale);
             versus.spawn((
                 Text::new("VS"),
                 TextFont {
                     font: fonts.display.clone(),
-                    font_size: 22.0 * scale,
+                    font_size: 30.0 * scale,
                     ..default()
                 },
-                TextColor(Color::srgba(0.85, 0.85, 0.85, 0.65)),
+                TextColor(theme::palette::gold()),
+                Node {
+                    margin: UiRect::horizontal(theme::spx(8.0, scale)),
+                    ..default()
+                },
             ));
+            spawn_toss_side(versus, assets, fonts, opp, scale);
         });
+}
+
+fn spawn_toss_panel<F>(parent: &mut ChildSpawnerCommands, scale: f32, build: F)
+where
+    F: FnOnce(&mut ChildSpawnerCommands),
+{
+    parent
+        .spawn((Node {
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::SpaceEvenly,
+            flex_grow: 1.0,
+            align_self: AlignSelf::Stretch,
+            width: percent(100),
+            padding: UiRect::vertical(theme::spx(12.0, scale)),
+            row_gap: theme::spx(14.0, scale),
+            ..default()
+        },))
+        .with_children(build);
 }
 
 fn spawn_setup_visuals(
@@ -1462,191 +1706,178 @@ fn spawn_setup_visuals(
                     let count = wd.stadiums.len() + 1;
                     for i in 0..count {
                         let selected = i == ms.sel;
-                        let (title, detail) = if i >= wd.stadiums.len() {
-                            ("Random Venue".into(), "Surprise pick each match".into())
+                        if i >= wd.stadiums.len() {
+                            spawn_stadium_row(
+                                list,
+                                fonts,
+                                scale,
+                                "Random Venue",
+                                StadiumRowMeta {
+                                    city: Some("Surprise pick each match"),
+                                    pitch: None,
+                                    boundary_m: None,
+                                },
+                                selected,
+                            );
                         } else {
                             let s = &wd.stadiums[i];
-                            (
-                                s.name.clone(),
-                                format!(
-                                    "{}  •  {} pitch  •  {:.0}m boundary",
-                                    s.city,
-                                    s.pitch.label(),
-                                    s.boundary_radius()
-                                ),
-                            )
-                        };
-                        spawn_setup_card(
-                            list,
-                            fonts,
-                            SetupCardStyle::Stadium { scale },
-                            &title,
-                            Some(&detail),
-                            None,
-                            None,
-                            selected,
-                        );
+                            let pitch_chip = format!("{} pitch", s.pitch.label());
+                            spawn_stadium_row(
+                                list,
+                                fonts,
+                                scale,
+                                &s.name,
+                                StadiumRowMeta {
+                                    city: Some(&s.city),
+                                    pitch: Some(&pitch_chip),
+                                    boundary_m: Some(s.boundary_radius()),
+                                },
+                                selected,
+                            );
+                        }
                     }
                 });
         }
         Screen::SetupTossFlip => {
             let user = &wd.teams[ms.team];
             let opp = &wd.teams[ms.opp];
-            parent
-                .spawn((Node {
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    row_gap: theme::spx(10.0, scale),
-                    margin: UiRect::bottom(theme::spx(12.0, scale)),
-                    ..default()
-                },))
-                .with_children(|toss| {
-                    spawn_toss_crest_row(toss, assets, fonts, user, opp, scale);
-                    toss.spawn((
-                        MenuCoinLabel,
-                        Text::new("Coin: HEADS"),
-                        TextFont {
-                            font: fonts.bold.clone(),
-                            font_size: 13.0 * scale,
-                            ..default()
-                        },
-                        TextColor(theme::palette::text_muted()),
-                    ));
-                    toss.spawn((
-                        Text::new("FLIPPING..."),
-                        TextFont {
-                            font: fonts.display.clone(),
-                            font_size: 20.0 * scale,
-                            ..default()
-                        },
-                        TextColor(theme::palette::gold()),
-                    ));
-                });
+            spawn_toss_panel(parent, scale, |toss| {
+                spawn_toss_crest_row(toss, assets, fonts, user, opp, scale);
+                toss
+                    .spawn((Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        row_gap: theme::spx(8.0, scale),
+                        ..default()
+                    },))
+                    .with_children(|coin_block| {
+                        spawn_toss_coin(coin_block, fonts, scale, ms.coin_heads);
+                    });
+                toss.spawn((
+                    Text::new("FLIPPING..."),
+                    TextFont {
+                        font: fonts.display.clone(),
+                        font_size: 22.0 * scale,
+                        ..default()
+                    },
+                    TextColor(theme::palette::gold()),
+                ));
+            });
         }
         Screen::SetupTossResult => {
             let user = &wd.teams[ms.team];
             let opp = &wd.teams[ms.opp];
             let winner = &wd.teams[ms.toss_winner];
-            parent
-                .spawn((Node {
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    row_gap: theme::spx(12.0, scale),
-                    margin: UiRect::bottom(theme::spx(12.0, scale)),
-                    ..default()
-                },))
-                .with_children(|toss| {
-                    spawn_toss_crest_row(toss, assets, fonts, user, opp, scale);
-                    toss.spawn((
-                        Text::new(format!("{} WINS THE TOSS", winner.name.to_uppercase())),
-                        TextFont {
-                            font: fonts.display.clone(),
-                            font_size: 24.0 * scale,
-                            ..default()
-                        },
-                        TextColor(theme::palette::gold()),
-                        TextShadow {
-                            offset: Vec2::new(0.0, 2.0),
-                            color: Color::srgba(0.0, 0.0, 0.0, 0.55),
-                        },
-                    ));
-                });
+            spawn_toss_panel(parent, scale, |toss| {
+                spawn_toss_crest_row(toss, assets, fonts, user, opp, scale);
+                toss
+                    .spawn((Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        row_gap: theme::spx(10.0, scale),
+                        ..default()
+                    },))
+                    .with_children(|coin_block| {
+                        spawn_toss_coin(coin_block, fonts, scale, ms.coin_heads);
+                    });
+                toss.spawn((
+                    Text::new(format!("{} WINS THE TOSS", winner.name.to_uppercase())),
+                    TextFont {
+                        font: fonts.display.clone(),
+                        font_size: 24.0 * scale,
+                        ..default()
+                    },
+                    TextColor(theme::palette::gold()),
+                    TextShadow {
+                        offset: Vec2::new(0.0, 2.0),
+                        color: Color::srgba(0.0, 0.0, 0.0, 0.55),
+                    },
+                ));
+            });
         }
         Screen::SetupTossChoice => {
             let user_won = ms.toss_winner == ms.team;
-            parent
-                .spawn((Node {
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    row_gap: theme::spx(10.0, scale),
-                    margin: UiRect::bottom(theme::spx(12.0, scale)),
-                    ..default()
-                },))
-                .with_children(|choice| {
-                    let winner = &wd.teams[ms.toss_winner];
-                    let prompt = if user_won {
-                        format!("{} WON — ELECT TO", winner.name.to_uppercase())
-                    } else {
-                        format!("{} ELECTED TO", winner.name.to_uppercase())
-                    };
-                    choice.spawn((
-                        Text::new(prompt),
-                        TextFont {
-                            font: fonts.bold.clone(),
-                            font_size: 14.0 * scale,
-                            ..default()
-                        },
-                        TextColor(theme::palette::text_muted()),
-                    ));
-                    choice
-                        .spawn((Node {
-                            flex_direction: FlexDirection::Row,
-                            column_gap: theme::spx(16.0, scale),
-                            ..default()
-                        },))
-                        .with_children(|row| {
-                            for (i, label) in ["BAT", "BOWL"].iter().enumerate() {
-                                let selected = if user_won {
-                                    i == ms.sel
-                                } else {
-                                    i == usize::from(!ms.toss_elects_bat)
-                                };
-                                spawn_setup_card(
-                                    row,
-                                    fonts,
-                                    SetupCardStyle::Overs { scale },
-                                    label,
-                                    Some("FIRST"),
-                                    None,
-                                    None,
-                                    selected,
-                                );
-                            }
-                        });
-                });
+            let user = &wd.teams[ms.team];
+            let opp = &wd.teams[ms.opp];
+            spawn_toss_panel(parent, scale, |choice| {
+                spawn_toss_crest_row(choice, assets, fonts, user, opp, scale);
+                let winner = &wd.teams[ms.toss_winner];
+                let prompt = if user_won {
+                    format!("{} WON — ELECT TO", winner.name.to_uppercase())
+                } else {
+                    format!("{} ELECTED TO", winner.name.to_uppercase())
+                };
+                choice.spawn((
+                    Text::new(prompt),
+                    TextFont {
+                        font: fonts.bold.clone(),
+                        font_size: 15.0 * scale,
+                        ..default()
+                    },
+                    TextColor(theme::palette::text_muted()),
+                ));
+                choice
+                    .spawn((Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: theme::spx(16.0, scale),
+                        ..default()
+                    },))
+                    .with_children(|row| {
+                        for (i, label) in ["BAT", "BOWL"].iter().enumerate() {
+                            let selected = if user_won {
+                                i == ms.sel
+                            } else {
+                                i == usize::from(!ms.toss_elects_bat)
+                            };
+                            spawn_setup_card(
+                                row,
+                                fonts,
+                                SetupCardStyle::Overs { scale },
+                                label,
+                                Some("FIRST"),
+                                None,
+                                None,
+                                selected,
+                            );
+                        }
+                    });
+            });
         }
         Screen::SetupTossSummary => {
             let user = &wd.teams[ms.team];
             let opp = &wd.teams[ms.opp];
             let winner = &wd.teams[ms.toss_winner];
             let choice = if ms.toss_elects_bat { "BAT" } else { "BOWL" };
-            parent
-                .spawn((Node {
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    row_gap: theme::spx(14.0, scale),
-                    margin: UiRect::bottom(theme::spx(12.0, scale)),
-                    ..default()
-                },))
-                .with_children(|summary| {
-                    spawn_toss_crest_row(summary, assets, fonts, user, opp, scale);
-                    summary.spawn((
-                        Text::new(format!(
-                            "{} WON THE TOSS AND ELECTED TO {}",
-                            winner.name.to_uppercase(),
-                            choice
-                        )),
-                        TextFont {
-                            font: fonts.display.clone(),
-                            font_size: 22.0 * scale,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.97, 0.98, 0.94)),
-                        TextShadow {
-                            offset: Vec2::new(0.0, 2.0),
-                            color: Color::srgba(0.0, 0.0, 0.0, 0.55),
-                        },
-                    ));
-                    summary.spawn((
-                        Text::new("PRESS SPACE TO CONTINUE"),
-                        TextFont {
-                            font: fonts.bold.clone(),
-                            font_size: 12.0 * scale,
-                            ..default()
-                        },
-                        TextColor(theme::palette::text_muted()),
-                    ));
-                });
+            spawn_toss_panel(parent, scale, |summary| {
+                spawn_toss_crest_row(summary, assets, fonts, user, opp, scale);
+                summary
+                    .spawn((Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        row_gap: theme::spx(10.0, scale),
+                        ..default()
+                    },))
+                    .with_children(|coin_block| {
+                        spawn_toss_coin(coin_block, fonts, scale, ms.coin_heads);
+                    });
+                summary.spawn((
+                    Text::new(format!(
+                        "{} WON THE TOSS AND ELECTED TO {}",
+                        winner.name.to_uppercase(),
+                        choice
+                    )),
+                    TextFont {
+                        font: fonts.display.clone(),
+                        font_size: 22.0 * scale,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.97, 0.98, 0.94)),
+                    TextShadow {
+                        offset: Vec2::new(0.0, 2.0),
+                        color: Color::srgba(0.0, 0.0, 0.0, 0.55),
+                    },
+                ));
+            });
         }
         _ => {}
     }
@@ -1892,6 +2123,7 @@ fn stadium_menu_sel(stadium_idx: usize, stadium_count: usize) -> usize {
 fn begin_toss(ms: &mut MenuState) {
     let user_wins = rand::random::<bool>();
     ms.toss_winner = if user_wins { ms.team } else { ms.opp };
+    ms.coin_heads = rand::random::<bool>();
     ms.toss_elects_bat = false;
     ms.screen = Screen::SetupTossFlip;
     ms.sel = 0;
@@ -2376,5 +2608,21 @@ mod tests {
         let after = signature_from_world(&world);
 
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn menu_signature_ignores_anim_timer() {
+        let mut world = World::new();
+        insert_signature_resources(&mut world);
+        world.resource_mut::<MenuState>().screen = Screen::SetupTossFlip;
+        let before = signature_from_world(&world);
+
+        world.insert_resource(MenuAnimTime(0.25));
+        let mid_flip = signature_from_world(&world);
+        world.insert_resource(MenuAnimTime(1.75));
+        let late_flip = signature_from_world(&world);
+
+        assert_eq!(before, mid_flip);
+        assert_eq!(before, late_flip);
     }
 }

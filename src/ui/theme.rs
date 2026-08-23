@@ -138,6 +138,12 @@ pub mod palette {
     pub fn chip_bg() -> Color {
         Color::srgba(0.20, 0.23, 0.29, 0.92)
     }
+    pub fn coin_face() -> Color {
+        Color::srgb(0.92, 0.78, 0.28)
+    }
+    pub fn coin_edge() -> Color {
+        Color::srgb(0.62, 0.48, 0.14)
+    }
 
     // ---- Selectable cards (team / overs / venue pickers) ----
     pub fn card_bg() -> Color {
