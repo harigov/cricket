@@ -49,14 +49,18 @@ pub fn stadium_modulation_tint(stadium_tint: Color) -> Color {
     let reference = REFERENCE_OUTFIELD_COLOR.to_srgba();
     let stadium = stadium_tint.to_srgba();
     let mut s = bevy::color::Srgba {
-        red: (reference.red * (stadium.red / legacy.red))
-            .clamp(reference.red * MODULATION_CLAMP_LOW, reference.red * MODULATION_CLAMP_HIGH),
+        red: (reference.red * (stadium.red / legacy.red)).clamp(
+            reference.red * MODULATION_CLAMP_LOW,
+            reference.red * MODULATION_CLAMP_HIGH,
+        ),
         green: (reference.green * (stadium.green / legacy.green)).clamp(
             reference.green * MODULATION_CLAMP_LOW,
             reference.green * MODULATION_CLAMP_HIGH,
         ),
-        blue: (reference.blue * (stadium.blue / legacy.blue))
-            .clamp(reference.blue * MODULATION_CLAMP_LOW, reference.blue * MODULATION_CLAMP_HIGH),
+        blue: (reference.blue * (stadium.blue / legacy.blue)).clamp(
+            reference.blue * MODULATION_CLAMP_LOW,
+            reference.blue * MODULATION_CLAMP_HIGH,
+        ),
         alpha: stadium.alpha,
     };
     // Leave headroom for the brightest mow stripe without clipping to white.

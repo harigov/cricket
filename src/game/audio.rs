@@ -886,10 +886,7 @@ pub fn result_pause_entered(prev_in_result_pause: bool, in_result_pause: bool) -
 }
 
 /// Seconds the opening walk-on should run, derived from the welcome clip table.
-pub fn welcome_intro_duration_secs(
-    voice: CommentaryVoice,
-    durations: &CommentaryDurations,
-) -> f32 {
+pub fn welcome_intro_duration_secs(voice: CommentaryVoice, durations: &CommentaryDurations) -> f32 {
     const MIN: f32 = 2.0;
     const MAX: f32 = 5.0;
     const FALLBACK: f32 = 2.6;
@@ -1114,13 +1111,7 @@ fn try_dispatch_match_intro(
     ) {
         return;
     }
-    request_commentary(
-        commands,
-        ctx,
-        "welcome",
-        None,
-        CommentaryPriority::Welcome,
-    );
+    request_commentary(commands, ctx, "welcome", None, CommentaryPriority::Welcome);
 }
 
 fn commentary_on_match_enter(
@@ -1153,10 +1144,10 @@ fn commentary_update(
             commentary.playing.remaining = 0.0;
         }
     }
-    if *state.get() == crate::state::AppState::InMatch {
-        if let (Some(mut ctx), Some(m)) = (commentary.ctx_mut(), am.as_deref()) {
-            try_dispatch_match_intro(&mut commands, &mut ctx, m);
-        }
+    if *state.get() == crate::state::AppState::InMatch
+        && let (Some(mut ctx), Some(m)) = (commentary.ctx_mut(), am.as_deref())
+    {
+        try_dispatch_match_intro(&mut commands, &mut ctx, m);
     }
     if commentary.history.lifecycle.intro_open
         && commentary.history.lifecycle.welcome_played

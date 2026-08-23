@@ -3,13 +3,13 @@
 
 use crate::core::tournament::{Entrant, Fixture, Stage, Tournament};
 use crate::game::audio::AudioSettings;
+use crate::game::user_bats_first_from_toss;
 use crate::game::*;
 use crate::input::{Action, KeyBindings, PlayerInput, RebindState, key_label};
 use crate::state::AppState;
 use crate::ui::theme::{
     self, MenuTransition, UiFonts, UiPreferences, UiScale, register_ui_font_assets,
 };
-use crate::game::user_bats_first_from_toss;
 use bevy::prelude::*;
 
 const OVERS_CHOICES: [u32; 3] = [5, 10, 20];
@@ -344,7 +344,8 @@ fn tick_menu_anim(time: Res<Time>, mut anim: ResMut<MenuAnimTime>, mut ms: ResMu
                 anim.0 = 0.0;
                 if ms.toss_winner != ms.team {
                     ms.toss_elects_bat = ai_toss_election();
-                    ms.bat_first = user_bats_first_from_toss(ms.team, ms.toss_winner, ms.toss_elects_bat);
+                    ms.bat_first =
+                        user_bats_first_from_toss(ms.team, ms.toss_winner, ms.toss_elects_bat);
                 } else {
                     ms.sel = 0;
                 }
@@ -1261,7 +1262,8 @@ fn refresh_menu(
     };
     let is_main = ms.screen == Screen::Main;
     let scale = ui_scale.0;
-    let signature = menu_content_signature(&ms, &ct, &bindings, &audio, &rebind, &ui_prefs, &ui_scale);
+    let signature =
+        menu_content_signature(&ms, &ct, &bindings, &audio, &rebind, &ui_prefs, &ui_scale);
     let dirty = menu_content_dirty(&built, &signature);
 
     if !dirty {
@@ -1393,12 +1395,7 @@ struct StadiumRowMeta<'a> {
     boundary_m: Option<f32>,
 }
 
-fn spawn_meta_chip(
-    parent: &mut ChildSpawnerCommands,
-    fonts: &UiFonts,
-    scale: f32,
-    label: &str,
-) {
+fn spawn_meta_chip(parent: &mut ChildSpawnerCommands, fonts: &UiFonts, scale: f32, label: &str) {
     parent
         .spawn((
             Node {
@@ -1483,12 +1480,11 @@ fn spawn_stadium_row(
                 ));
             }
             if meta.pitch.is_some() || meta.boundary_m.is_some() {
-                card
-                    .spawn((Node {
-                        flex_direction: FlexDirection::Row,
-                        column_gap: theme::spx(8.0, scale),
-                        ..default()
-                    },))
+                card.spawn((Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: theme::spx(8.0, scale),
+                    ..default()
+                },))
                     .with_children(|chips| {
                         if let Some(pitch) = meta.pitch {
                             spawn_meta_chip(chips, fonts, scale, pitch);
@@ -1506,12 +1502,7 @@ fn spawn_stadium_row(
         });
 }
 
-fn spawn_toss_coin(
-    parent: &mut ChildSpawnerCommands,
-    fonts: &UiFonts,
-    scale: f32,
-    heads: bool,
-) {
+fn spawn_toss_coin(parent: &mut ChildSpawnerCommands, fonts: &UiFonts, scale: f32, heads: bool) {
     let coin_size = theme::spx(72.0, scale);
     parent
         .spawn((
@@ -1527,38 +1518,37 @@ fn spawn_toss_coin(
         ))
         .with_children(|coin| {
             for (is_heads, label) in [(true, "H"), (false, "T")] {
-                coin
-                    .spawn((
-                        MenuCoinFace { heads: is_heads },
-                        Node {
-                            position_type: PositionType::Absolute,
-                            width: percent(100),
-                            height: percent(100),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            border: UiRect::all(px(3)),
-                            border_radius: BorderRadius::all(theme::spx(36.0, scale)),
+                coin.spawn((
+                    MenuCoinFace { heads: is_heads },
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: percent(100),
+                        height: percent(100),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        border: UiRect::all(px(3)),
+                        border_radius: BorderRadius::all(theme::spx(36.0, scale)),
+                        ..default()
+                    },
+                    BackgroundColor(theme::palette::coin_face()),
+                    BorderColor::all(theme::palette::coin_edge()),
+                    if is_heads == heads {
+                        Visibility::Visible
+                    } else {
+                        Visibility::Hidden
+                    },
+                ))
+                .with_children(|face| {
+                    face.spawn((
+                        Text::new(label),
+                        TextFont {
+                            font: fonts.display.clone(),
+                            font_size: 28.0 * scale,
                             ..default()
                         },
-                        BackgroundColor(theme::palette::coin_face()),
-                        BorderColor::all(theme::palette::coin_edge()),
-                        if is_heads == heads {
-                            Visibility::Visible
-                        } else {
-                            Visibility::Hidden
-                        },
-                    ))
-                    .with_children(|face| {
-                        face.spawn((
-                            Text::new(label),
-                            TextFont {
-                                font: fonts.display.clone(),
-                                font_size: 28.0 * scale,
-                                ..default()
-                            },
-                            TextColor(Color::srgb(0.18, 0.14, 0.06)),
-                        ));
-                    });
+                        TextColor(Color::srgb(0.18, 0.14, 0.06)),
+                    ));
+                });
             }
         });
     parent.spawn((
@@ -1594,10 +1584,7 @@ fn spawn_toss_side(
         },))
         .with_children(|side| {
             side.spawn((
-                ImageNode::new(crate::render::load_team_crest(
-                    assets,
-                    &team.crest_asset(),
-                )),
+                ImageNode::new(crate::render::load_team_crest(assets, &team.crest_asset())),
                 Node {
                     width: theme::spx(88.0, scale),
                     height: theme::spx(88.0, scale),
@@ -1975,12 +1962,11 @@ fn spawn_setup_visuals(
                     },
                     TextColor(theme::palette::text_muted()),
                 ));
-                call
-                    .spawn((Node {
-                        flex_direction: FlexDirection::Row,
-                        column_gap: theme::spx(16.0, scale),
-                        ..default()
-                    },))
+                call.spawn((Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: theme::spx(16.0, scale),
+                    ..default()
+                },))
                     .with_children(|row| {
                         for (i, label) in ["HEADS", "TAILS"].iter().enumerate() {
                             spawn_setup_card(
@@ -2002,13 +1988,12 @@ fn spawn_setup_visuals(
             let opp = &wd.teams[ms.opp];
             spawn_toss_panel(parent, scale, |toss| {
                 spawn_toss_crest_row(toss, assets, fonts, user, opp, scale);
-                toss
-                    .spawn((Node {
-                        flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Center,
-                        row_gap: theme::spx(8.0, scale),
-                        ..default()
-                    },))
+                toss.spawn((Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: theme::spx(8.0, scale),
+                    ..default()
+                },))
                     .with_children(|coin_block| {
                         spawn_toss_coin(coin_block, fonts, scale, ms.coin_heads);
                     });
@@ -2030,13 +2015,12 @@ fn spawn_setup_visuals(
             let coin_face = if ms.coin_heads { "HEADS" } else { "TAILS" };
             spawn_toss_panel(parent, scale, |toss| {
                 spawn_toss_crest_row(toss, assets, fonts, user, opp, scale);
-                toss
-                    .spawn((Node {
-                        flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Center,
-                        row_gap: theme::spx(10.0, scale),
-                        ..default()
-                    },))
+                toss.spawn((Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: theme::spx(10.0, scale),
+                    ..default()
+                },))
                     .with_children(|coin_block| {
                         spawn_toss_coin(coin_block, fonts, scale, ms.coin_heads);
                     });
@@ -2321,10 +2305,7 @@ fn handle_setup_team_input(
             }
             ms.screen = Screen::SetupOpp;
             let indices = team_picker_indices(Screen::SetupOpp, ms.team, wd.teams.len());
-            ms.sel = indices
-                .iter()
-                .position(|&i| i == ms.opp)
-                .unwrap_or(0);
+            ms.sel = indices.iter().position(|&i| i == ms.opp).unwrap_or(0);
         }
     }
     if input.pressed(Action::Cancel) {
@@ -2409,8 +2390,7 @@ fn handle_setup_toss_call_input(ms: &mut MenuState, input: &PlayerInput, wd: &Wo
     if input.pressed(Action::Confirm) {
         ms.toss_call_heads = ms.sel == 0;
         ms.coin_heads = rand::random::<bool>();
-        ms.toss_winner =
-            toss_winner_from_call(ms.team, ms.opp, ms.toss_call_heads, ms.coin_heads);
+        ms.toss_winner = toss_winner_from_call(ms.team, ms.opp, ms.toss_call_heads, ms.coin_heads);
         ms.screen = Screen::SetupTossFlip;
     }
     if input.pressed(Action::Cancel) {
@@ -2425,8 +2405,7 @@ fn handle_setup_toss_choice_input(ms: &mut MenuState, input: &PlayerInput, wd: &
         navigate_horizontal_row(input, &mut ms.sel, 2);
         if input.pressed(Action::Confirm) {
             ms.toss_elects_bat = ms.sel == 0;
-            ms.bat_first =
-                user_bats_first_from_toss(ms.team, ms.toss_winner, ms.toss_elects_bat);
+            ms.bat_first = user_bats_first_from_toss(ms.team, ms.toss_winner, ms.toss_elects_bat);
             ms.screen = Screen::SetupTossSummary;
         }
     } else if input.pressed(Action::Confirm) {
@@ -2533,13 +2512,7 @@ fn handle_menu_input(
         }
         Screen::SetupTossChoice => handle_setup_toss_choice_input(&mut ms, &input, &wd),
         Screen::SetupTossSummary => {
-            handle_setup_toss_summary_input(
-                &mut ms,
-                &input,
-                &wd,
-                &mut commands,
-                &mut next_state,
-            )
+            handle_setup_toss_summary_input(&mut ms, &input, &wd, &mut commands, &mut next_state)
         }
         Screen::Bracket => handle_bracket_input(
             &mut ms,
@@ -2566,7 +2539,7 @@ fn navigate_grid(input: &PlayerInput, sel: &mut usize, count: usize, cols: usize
         return;
     }
     let cols = cols.max(1);
-    let rows = (count + cols - 1) / cols;
+    let rows = count.div_ceil(cols);
     let row = *sel / cols;
     let col = *sel % cols;
 
@@ -2681,6 +2654,9 @@ fn start_quick_match(
     } else {
         ms.stadium_idx
     };
+    // Smoke tests pick a venue randomly, which makes it impossible to capture a
+    // named ground on purpose. CRICKET_STADIUM pins one by index.
+    let stadium = forced_stadium_index(wd.stadiums.len()).unwrap_or(stadium);
     commands.insert_resource(MatchSetup {
         teams: [ms.team, ms.opp],
         stadium,
@@ -2690,6 +2666,17 @@ fn start_quick_match(
     });
     info!("Starting quick match");
     next_state.set(AppState::InMatch);
+}
+
+/// Venue override for automated captures: `CRICKET_STADIUM=<index>`.
+/// Out-of-range or unparseable values are ignored.
+fn forced_stadium_index(count: usize) -> Option<usize> {
+    std::env::var("CRICKET_STADIUM")
+        .ok()?
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|idx| *idx < count)
 }
 
 fn launch_tournament_match(

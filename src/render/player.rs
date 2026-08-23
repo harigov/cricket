@@ -229,8 +229,12 @@ fn bone_vec3_m(x: f32, y: f32, z: f32) -> Vec3 {
 
 /// Build a child-of-bone [`Transform`] from metre-space translation/rotation.
 fn equipment_transform_m(translation_m: Vec3, rotation: Quat) -> Transform {
-    Transform::from_translation(bone_vec3_m(translation_m.x, translation_m.y, translation_m.z))
-        .with_rotation(rotation)
+    Transform::from_translation(bone_vec3_m(
+        translation_m.x,
+        translation_m.y,
+        translation_m.z,
+    ))
+    .with_rotation(rotation)
 }
 
 fn equipment_transform_m_scaled(translation_m: Vec3, rotation: Quat, scale: Vec3) -> Transform {
@@ -458,6 +462,16 @@ pub fn disable_figure_frustum_culling(
     }
 }
 
+/// Mesh rows still awaiting a team-kit tint: entity, optional glTF node name
+/// and the PBR material handle imported with the figure.
+type UnstyledKitMesh<'a> = (
+    Entity,
+    Option<&'a Name>,
+    &'a MeshMaterial3d<StandardMaterial>,
+);
+/// Only untinted figure meshes — equipment (bat, pads) is recoloured elsewhere.
+type UnstyledKitMeshFilter = (Without<KitStyled>, With<Mesh3d>, Without<Equipment>);
+
 /// Keep the imported PBR materials and tint them into believable cricket kit:
 /// `Beta_Surface` becomes the long-sleeve jersey/trousers (stronger primary
 /// tint), `Beta_Joints` takes the secondary colour as trim/helmet shade.
@@ -465,10 +479,7 @@ pub fn apply_team_kit_materials(
     mut commands: Commands,
     kits: Query<&TeamKit>,
     parents: Query<&ChildOf>,
-    meshes: Query<
-        (Entity, Option<&Name>, &MeshMaterial3d<StandardMaterial>),
-        (Without<KitStyled>, With<Mesh3d>, Without<Equipment>),
-    >,
+    meshes: Query<UnstyledKitMesh, UnstyledKitMeshFilter>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
@@ -526,7 +537,11 @@ pub fn apply_team_kit_materials(
             0.94
         };
         mat.metallic = 0.0;
-        mat.reflectance = if kind == KitMeshKind::Joints { 0.08 } else { 0.06 };
+        mat.reflectance = if kind == KitMeshKind::Joints {
+            0.08
+        } else {
+            0.06
+        };
         let cloned = materials.add(mat);
         commands
             .entity(entity)
@@ -691,15 +706,9 @@ fn attach_chest_crest(
     spawn_mesh_child(
         spine,
         commands,
-        meshes.add(Rectangle::new(
-            metres_to_bone(0.19),
-            metres_to_bone(0.19),
-        )),
+        meshes.add(Rectangle::new(metres_to_bone(0.19), metres_to_bone(0.19))),
         crest,
-        equipment_transform_m(
-            Vec3::new(0.0, 0.11, 0.12),
-            Quat::from_rotation_x(-0.08),
-        ),
+        equipment_transform_m(Vec3::new(0.0, 0.11, 0.12), Quat::from_rotation_x(-0.08)),
     );
 }
 
@@ -718,10 +727,7 @@ fn attach_bat(
         metres_to_bone(0.60),
         metres_to_bone(0.046),
     ));
-    let handle = meshes.add(Capsule3d::new(
-        metres_to_bone(0.017),
-        metres_to_bone(0.26),
-    ));
+    let handle = meshes.add(Capsule3d::new(metres_to_bone(0.017), metres_to_bone(0.26)));
     let wood = willow_mat(materials);
     let grip_mat = matte(materials, Color::srgb_u8(0x24, 0x28, 0x30), 0.9);
     // Mixamo arm chain runs along local -X; mesh long axis is +Y. Map +Y onto
@@ -754,8 +760,7 @@ fn attach_glove(
     materials: &mut Assets<StandardMaterial>,
     left: bool,
 ) {
-    let glove = meshes
-        .add(Sphere::new(metres_to_bone(0.062)).mesh().ico(2).unwrap());
+    let glove = meshes.add(Sphere::new(metres_to_bone(0.062)).mesh().ico(2).unwrap());
     let mat = matte(materials, Color::srgb_u8(0xE8, 0xE2, 0xD2), 0.85);
     let x = if left { -0.03 } else { 0.03 };
     spawn_mesh_child(
@@ -780,8 +785,7 @@ fn attach_helmet(
 ) {
     let s = primary.to_srgba();
     let shell_col = Color::srgb(s.red * 0.55, s.green * 0.55, s.blue * 0.55);
-    let shell = meshes
-        .add(Sphere::new(metres_to_bone(0.128)).mesh().ico(3).unwrap());
+    let shell = meshes.add(Sphere::new(metres_to_bone(0.128)).mesh().ico(3).unwrap());
     let peak = meshes.add(Cuboid::new(
         metres_to_bone(0.17),
         metres_to_bone(0.028),
@@ -816,12 +820,8 @@ fn attach_cap(
     materials: &mut Assets<StandardMaterial>,
     primary: Color,
 ) {
-    let dome = meshes
-        .add(Sphere::new(metres_to_bone(0.118)).mesh().ico(2).unwrap());
-    let brim = meshes.add(Cylinder::new(
-        metres_to_bone(0.105),
-        metres_to_bone(0.012),
-    ));
+    let dome = meshes.add(Sphere::new(metres_to_bone(0.118)).mesh().ico(2).unwrap());
+    let brim = meshes.add(Cylinder::new(metres_to_bone(0.105), metres_to_bone(0.012)));
     let dome_mat = matte(materials, primary, 0.85);
     commands.entity(head).with_children(|p| {
         p.spawn((
@@ -945,9 +945,6 @@ pub fn strip_skeleton_root_motion(mut bones: Query<(&Bone, &mut Transform)>) {
         }
     }
 }
-
-
-
 
 // ---------------------------------------------------------------------------
 // Hybrid animation controller
@@ -1244,8 +1241,8 @@ fn batter_stance(t: f32, pose: &mut PoseTargets) {
     let bend = 0.88 - bat_tap * 0.14;
     apply_bat_swing_arms(pose, arm_z, arm_x, bend);
     // Pull the top hand across to the shifted handle grip.
-    pose.la = pose.la * ry(0.36);
-    pose.lfa = pose.lfa * ry(0.10);
+    pose.la *= ry(0.36);
+    pose.lfa *= ry(0.10);
 
     // The root already carries the side-on turn (see `batter_stance_quat`), so
     // the spine only adds a small extra shoulder rotation — yawing the spine
@@ -1280,8 +1277,8 @@ fn non_striker_stance(t: f32, pose: &mut PoseTargets) {
     arms_bind_neutral(pose);
     pose.la = pose.la * rx(0.12) * rz(0.08);
     pose.ra = pose.ra * rx(0.14) * rz(-0.06);
-    pose.lfa = pose.lfa * rx(0.22);
-    pose.rfa = pose.rfa * rx(0.24);
+    pose.lfa *= rx(0.22);
+    pose.rfa *= rx(0.24);
     pose.lf = rx(-0.18);
     pose.rf = rx(-0.18);
 }
@@ -1402,11 +1399,23 @@ fn bat_swing(p: f32, pose: &mut PoseTargets) {
         pc,
     );
     let hips_y = kf(
-        &[(0.0, -0.10), (0.28, -0.22), (0.58, 0.32), (0.72, 0.38), (1.0, 0.30)],
+        &[
+            (0.0, -0.10),
+            (0.28, -0.22),
+            (0.58, 0.32),
+            (0.72, 0.38),
+            (1.0, 0.30),
+        ],
         pc,
     );
     let bend = kf(
-        &[(0.0, 0.82), (0.30, 0.62), (0.58, 1.08), (0.72, 0.92), (1.0, 0.48)],
+        &[
+            (0.0, 0.82),
+            (0.30, 0.62),
+            (0.58, 1.08),
+            (0.72, 0.92),
+            (1.0, 0.48),
+        ],
         pc,
     );
     apply_bat_swing_arms(pose, arm_z, arm_x, bend);
@@ -1486,15 +1495,30 @@ fn bat_shot_vertical_drive(p: f32, plane_y: f32, loft: f32, pose: &mut PoseTarge
         pc,
     );
     let bend = kf(
-        &[(0.0, 0.82), (0.30, 0.60), (0.58, 1.05 + loft_k * 0.12), (0.72, 0.90), (1.0, 0.46)],
+        &[
+            (0.0, 0.82),
+            (0.30, 0.60),
+            (0.58, 1.05 + loft_k * 0.12),
+            (0.72, 0.90),
+            (1.0, 0.46),
+        ],
         pc,
     );
     apply_bat_swing_arms(pose, arm_z, arm_x, bend);
     pose.spine = ry(spine_y) * rx(0.22);
     pose.hips = ry(hips_y);
-    pose.lup = rx(kf(&[(0.0, 0.48), (0.40, 0.22), (0.58, 0.18), (1.0, 0.16)], pc));
-    pose.rup = rx(kf(&[(0.0, 0.52), (0.40, 0.62), (0.58, 0.68), (1.0, 0.72)], pc));
-    pose.ll = rx(kf(&[(0.0, -0.64), (0.40, -0.38), (0.58, -0.48), (1.0, -0.42)], pc));
+    pose.lup = rx(kf(
+        &[(0.0, 0.48), (0.40, 0.22), (0.58, 0.18), (1.0, 0.16)],
+        pc,
+    ));
+    pose.rup = rx(kf(
+        &[(0.0, 0.52), (0.40, 0.62), (0.58, 0.68), (1.0, 0.72)],
+        pc,
+    ));
+    pose.ll = rx(kf(
+        &[(0.0, -0.64), (0.40, -0.38), (0.58, -0.48), (1.0, -0.42)],
+        pc,
+    ));
     pose.rl = rx(kf(&[(0.0, -0.68), (0.58, -0.58), (1.0, -0.52)], pc));
 }
 
@@ -1502,11 +1526,23 @@ fn bat_shot_vertical_drive(p: f32, plane_y: f32, loft: f32, pose: &mut PoseTarge
 fn bat_shot_flick(p: f32, pose: &mut PoseTargets) {
     let pc = p.clamp(0.0, 1.0);
     let arm_z = kf(
-        &[(0.0, 0.22), (0.22, 0.62), (0.45, -0.35), (0.62, -1.05), (1.0, -1.28)],
+        &[
+            (0.0, 0.22),
+            (0.22, 0.62),
+            (0.45, -0.35),
+            (0.62, -1.05),
+            (1.0, -1.28),
+        ],
         pc,
     );
     let arm_x = kf(
-        &[(0.0, 0.52), (0.22, 0.48), (0.45, 0.72), (0.62, 0.95), (1.0, 0.55)],
+        &[
+            (0.0, 0.52),
+            (0.22, 0.48),
+            (0.45, 0.72),
+            (0.62, 0.95),
+            (1.0, 0.55),
+        ],
         pc,
     );
     let wrist = kf(&[(0.0, 0.0), (0.40, 0.55), (0.62, 0.85), (1.0, 0.35)], pc);
@@ -1515,7 +1551,10 @@ fn bat_shot_flick(p: f32, pose: &mut PoseTargets) {
     pose.la = pose.la * rz(arm_z * 0.55) * rx(arm_x * 0.88);
     pose.rfa = rx(0.72 + wrist);
     pose.lfa = rx(0.68 + wrist * 0.85);
-    pose.spine = ry(kf(&[(0.0, 0.18), (0.45, 0.38), (0.62, 0.48), (1.0, 0.32)], pc)) * rx(0.18);
+    pose.spine = ry(kf(
+        &[(0.0, 0.18), (0.45, 0.38), (0.62, 0.48), (1.0, 0.32)],
+        pc,
+    )) * rx(0.18);
     pose.hips = ry(kf(&[(0.0, 0.08), (0.45, 0.28), (1.0, 0.22)], pc));
     pose.lup = rx(kf(&[(0.0, 0.50), (0.58, 0.44), (1.0, 0.40)], pc));
     pose.rup = rx(kf(&[(0.0, 0.54), (0.58, 0.58), (1.0, 0.56)], pc));
@@ -1558,7 +1597,10 @@ fn bat_shot_cross_bat(p: f32, shot: ShotKind, pose: &mut PoseTargets) {
     arms_bind_neutral(pose);
     pose.ra = pose.ra * rz(arm_z) * rx(arm_x);
     pose.la = pose.la * rz(arm_z * 0.72) * rx(arm_x * 0.82);
-    pose.rfa = rx(kf(&[(0.0, 0.65), (0.52, 0.35), (0.68, 0.18), (1.0, 0.08)], pc));
+    pose.rfa = rx(kf(
+        &[(0.0, 0.65), (0.52, 0.35), (0.68, 0.18), (1.0, 0.08)],
+        pc,
+    ));
     pose.lfa = rx(kf(&[(0.0, 0.62), (0.52, 0.32), (1.0, 0.06)], pc));
     pose.spine = ry(kf(
         &[
@@ -1568,15 +1610,35 @@ fn bat_shot_cross_bat(p: f32, shot: ShotKind, pose: &mut PoseTargets) {
             (1.0, plane_y * 0.55 + shoulder * 0.15),
         ],
         pc,
-    )) * rx(kf(&[(0.0, 0.12), (0.35, -0.08), (0.62, 0.18), (1.0, 0.10)], pc));
-    pose.hips = ry(kf(
-        &[(0.0, -0.05), (0.35, plane_y * 0.35), (0.62, plane_y * 0.55), (1.0, plane_y * 0.42)],
+    )) * rx(kf(
+        &[(0.0, 0.12), (0.35, -0.08), (0.62, 0.18), (1.0, 0.10)],
         pc,
     ));
-    pose.lup = rx(kf(&[(0.0, 0.42), (0.35, 0.28), (0.62, 0.22), (1.0, 0.26)], pc));
-    pose.rup = rx(kf(&[(0.0, 0.55), (0.35, 0.72), (0.62, 0.78), (1.0, 0.68)], pc));
-    pose.ll = rx(kf(&[(0.0, -0.58), (0.35, -0.42), (0.62, -0.35), (1.0, -0.38)], pc));
-    pose.rl = rx(kf(&[(0.0, -0.72), (0.35, -0.82), (0.62, -0.75), (1.0, -0.62)], pc));
+    pose.hips = ry(kf(
+        &[
+            (0.0, -0.05),
+            (0.35, plane_y * 0.35),
+            (0.62, plane_y * 0.55),
+            (1.0, plane_y * 0.42),
+        ],
+        pc,
+    ));
+    pose.lup = rx(kf(
+        &[(0.0, 0.42), (0.35, 0.28), (0.62, 0.22), (1.0, 0.26)],
+        pc,
+    ));
+    pose.rup = rx(kf(
+        &[(0.0, 0.55), (0.35, 0.72), (0.62, 0.78), (1.0, 0.68)],
+        pc,
+    ));
+    pose.ll = rx(kf(
+        &[(0.0, -0.58), (0.35, -0.42), (0.62, -0.35), (1.0, -0.38)],
+        pc,
+    ));
+    pose.rl = rx(kf(
+        &[(0.0, -0.72), (0.35, -0.82), (0.62, -0.75), (1.0, -0.62)],
+        pc,
+    ));
 }
 
 /// Front-knee sweep — bat swings low and across; knee stays above the turf.
@@ -1594,21 +1656,36 @@ fn bat_shot_sweep(p: f32, aerial: bool, pose: &mut PoseTargets) {
         pc,
     );
     let arm_x = kf(
-        &[(0.0, 0.62), (0.25, 0.72), (0.48, 0.95), (0.65, 0.78), (1.0, 0.52)],
+        &[
+            (0.0, 0.62),
+            (0.25, 0.72),
+            (0.48, 0.95),
+            (0.65, 0.78),
+            (1.0, 0.52),
+        ],
         pc,
     );
     arms_bind_neutral(pose);
     pose.ra = pose.ra * rz(arm_z) * rx(arm_x);
     pose.la = pose.la * rz(arm_z * 0.65) * rx(arm_x * 0.90);
-    pose.rfa = rx(kf(&[(0.0, 0.88), (0.48, 0.55), (0.65, 0.38), (1.0, 0.22)], pc));
+    pose.rfa = rx(kf(
+        &[(0.0, 0.88), (0.48, 0.55), (0.65, 0.38), (1.0, 0.22)],
+        pc,
+    ));
     pose.lfa = rx(kf(&[(0.0, 0.85), (0.48, 0.52), (1.0, 0.20)], pc));
     pose.spine = ry(kf(&[(0.0, 0.32), (0.48, 0.52), (1.0, 0.38)], pc))
         * rx(kf(&[(0.0, 0.28), (0.48, 0.55), (1.0, 0.42)], pc));
     pose.hips = ry(kf(&[(0.0, 0.12), (0.48, 0.35), (1.0, 0.28)], pc));
     // Front knee drops toward the turf; foot-only safety clamp ignores the knee.
-    pose.lup = rx(kf(&[(0.0, 0.55), (0.35, 0.95), (0.55, 1.12), (1.0, 0.88)], pc));
+    pose.lup = rx(kf(
+        &[(0.0, 0.55), (0.35, 0.95), (0.55, 1.12), (1.0, 0.88)],
+        pc,
+    ));
     pose.rup = rx(kf(&[(0.0, 0.48), (0.35, 0.38), (1.0, 0.42)], pc));
-    pose.ll = rx(kf(&[(0.0, -0.62), (0.35, -0.95), (0.55, -1.05), (1.0, -0.82)], pc));
+    pose.ll = rx(kf(
+        &[(0.0, -0.62), (0.35, -0.95), (0.55, -1.05), (1.0, -0.82)],
+        pc,
+    ));
     pose.rl = rx(kf(&[(0.0, -0.68), (0.35, -0.55), (1.0, -0.48)], pc));
     pose.lf = rx(kf(&[(0.0, -0.18), (0.55, -0.32), (1.0, -0.22)], pc));
 }
@@ -1620,10 +1697,7 @@ fn bat_shot_defensive(p: f32, backfoot: bool, pose: &mut PoseTargets) {
         &[(0.0, 0.12), (0.30, -0.05), (0.55, -0.10), (1.0, 0.02)],
         pc,
     );
-    let arm_x = kf(
-        &[(0.0, 0.48), (0.30, 0.54), (0.55, 0.50), (1.0, 0.44)],
-        pc,
-    );
+    let arm_x = kf(&[(0.0, 0.48), (0.30, 0.54), (0.55, 0.50), (1.0, 0.44)], pc);
     arms_bind_neutral(pose);
     pose.ra = pose.ra * rz(arm_z * 0.55) * rx(arm_x);
     pose.la = pose.la * rz(arm_z * 0.40) * rx(arm_x * 0.92);
@@ -1672,15 +1746,32 @@ fn bat_shot_slog(p: f32, pose: &mut PoseTargets) {
     arms_bind_neutral(pose);
     pose.ra = pose.ra * rz(arm_z) * rx(arm_x);
     pose.la = pose.la * rz(arm_z * 0.68) * rx(arm_x * 0.80);
-    pose.rfa = rx(kf(&[(0.0, 0.70), (0.50, 0.28), (0.68, 0.12), (1.0, 0.05)], pc));
+    pose.rfa = rx(kf(
+        &[(0.0, 0.70), (0.50, 0.28), (0.68, 0.12), (1.0, 0.05)],
+        pc,
+    ));
     pose.lfa = rx(kf(&[(0.0, 0.68), (0.50, 0.25), (1.0, 0.04)], pc));
-    pose.spine = ry(kf(&[(0.0, 0.22), (0.50, 0.55), (0.68, 0.62), (1.0, 0.48)], pc))
-        * rx(kf(&[(0.0, 0.10), (0.50, 0.22), (1.0, 0.08)], pc));
-    pose.hips = ry(kf(&[(0.0, 0.05), (0.50, 0.42), (0.68, 0.48), (1.0, 0.35)], pc));
-    pose.lup = rx(kf(&[(0.0, 0.45), (0.40, 0.15), (0.55, -0.05), (1.0, 0.08)], pc));
-    pose.rup = rx(kf(&[(0.0, 0.55), (0.40, 0.72), (0.68, 0.82), (1.0, 0.68)], pc));
+    pose.spine = ry(kf(
+        &[(0.0, 0.22), (0.50, 0.55), (0.68, 0.62), (1.0, 0.48)],
+        pc,
+    )) * rx(kf(&[(0.0, 0.10), (0.50, 0.22), (1.0, 0.08)], pc));
+    pose.hips = ry(kf(
+        &[(0.0, 0.05), (0.50, 0.42), (0.68, 0.48), (1.0, 0.35)],
+        pc,
+    ));
+    pose.lup = rx(kf(
+        &[(0.0, 0.45), (0.40, 0.15), (0.55, -0.05), (1.0, 0.08)],
+        pc,
+    ));
+    pose.rup = rx(kf(
+        &[(0.0, 0.55), (0.40, 0.72), (0.68, 0.82), (1.0, 0.68)],
+        pc,
+    ));
     pose.ll = rx(kf(&[(0.0, -0.58), (0.55, -0.28), (1.0, -0.22)], pc));
-    pose.rl = rx(kf(&[(0.0, -0.72), (0.40, -0.88), (0.68, -0.78), (1.0, -0.58)], pc));
+    pose.rl = rx(kf(
+        &[(0.0, -0.72), (0.40, -0.88), (0.68, -0.78), (1.0, -0.58)],
+        pc,
+    ));
 }
 
 /// Quick underarm-ish return throw with wrist snap.
@@ -1830,7 +1921,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// The colour fallback in `kit_mesh_kind` classifies willow and white gear
     /// as jersey material, so equipment must be excluded from the recolour pass
     /// by marker, not by colour. Regression: the bat rendered in team colours.
@@ -1986,7 +2076,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn batter_stance_quat_turns_the_body_side_on() {
         let bowler_end = Vec2::new(-crate::core::geometry::PITCH_HALF_LEN, 0.0);
@@ -2008,10 +2097,6 @@ mod tests {
             "chest should face the off side (+Z), got {forward:?}"
         );
     }
-
-
-
-
 
     #[test]
     fn bat_shot_strokes_differ_from_generic_swing() {

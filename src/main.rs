@@ -18,7 +18,8 @@ use game::*;
 use render::camera_rig::CameraRig;
 use render::sky::{create_sky_texture, sky_texture_for_time};
 use render::{
-    DayEnvironmentLight, FloodlightFixture, FloodlightMaterials, NightEnvironmentLight, SkyTextures,
+    DayEnvironmentLight, FloodlightFixture, FloodlightMaterials, NightEnvironmentLight,
+    SkyTextureCache, SkyTextures,
 };
 use state::{AppState, MatchPaused, RebuildScene};
 /// Gameplay systems only run while the match resources actually exist
@@ -33,9 +34,7 @@ pub(crate) fn gameplay_active(
     am: Option<Res<ActiveMatch>>,
     paused: Option<Res<MatchPaused>>,
 ) -> bool {
-    *state.get() == AppState::InMatch
-        && am.is_some()
-        && !paused.map(|p| p.0).unwrap_or(false)
+    *state.get() == AppState::InMatch && am.is_some() && !paused.map(|p| p.0).unwrap_or(false)
 }
 
 fn register_core_plugins(app: &mut App) {
@@ -133,8 +132,10 @@ fn register_match_systems(app: &mut App) {
 fn main() {
     let mut app = App::new();
     register_core_plugins(&mut app);
-    app.add_systems(Startup, setup_basics)
-        .add_systems(Update, (update_stadium_time, toggle_day_night));
+    app.add_systems(Startup, setup_basics).add_systems(
+        Update,
+        (sync_sky_theme, update_stadium_time, toggle_day_night).chain(),
+    );
     register_match_systems(&mut app);
     app.add_systems(Update, debug_screenshot)
         .add_systems(PreUpdate, autotest_drive.after(input::poll_input))
@@ -195,12 +196,12 @@ struct AutotestScript {
 // between the venue pick and the first ball; the flip and result slides
 // auto-advance, the other three wait for Confirm.
 const QUICK_MATCH_PRESSES: [(f32, input::Action); 13] = [
-    (2.0, input::Action::Confirm),  // Quick Match -> team select
-    (3.5, input::Action::Confirm),  // pick your team
-    (5.0, input::Action::Confirm),  // pick opponent
-    (6.5, input::Action::Confirm),  // overs
-    (8.0, input::Action::Confirm),  // stadium (random)
-    (8.5, input::Action::Confirm),  // toss: call heads/tails
+    (2.0, input::Action::Confirm), // Quick Match -> team select
+    (3.5, input::Action::Confirm), // pick your team
+    (5.0, input::Action::Confirm), // pick opponent
+    (6.5, input::Action::Confirm), // overs
+    (8.0, input::Action::Confirm), // stadium (random)
+    (8.5, input::Action::Confirm), // toss: call heads/tails
     // The toss slides auto-advance on Time<Virtual>, whose delta Bevy clamps
     // to 0.25 s. An unfocused window updates about once a second, so the 3.5 s
     // of slides can take ~14 s of wall clock here. Spread the remaining
@@ -284,10 +285,12 @@ impl AutotestMode {
                 switches_to_night: true,
                 swings: true,
             },
+            // The establishing orbit is short and its exact instant drifts with
+            // frame rate, so this brackets it rather than betting on one moment.
             Self::Stadium => AutotestScript {
                 presses: QUICK_MATCH_PRESSES,
-                milestones: &[32.0],
-                end_time: 36.0,
+                milestones: &[30.0, 32.0, 34.0, 38.0],
+                end_time: 42.0,
                 switches_to_night: false,
                 swings: false,
             },
@@ -305,7 +308,7 @@ impl AutotestMode {
                     (2.0, input::Action::Confirm), // Quick Match -> team select
                     (3.0, input::Action::Right),   // across one column
                     (3.6, input::Action::Right),
-                    (4.2, input::Action::Next), // down one row
+                    (4.2, input::Action::Next),    // down one row
                     (5.2, input::Action::Confirm), // lock team -> opponent grid
                     (6.2, input::Action::Right),
                     (6.8, input::Action::Next),
@@ -325,12 +328,12 @@ impl AutotestMode {
             // each one so the setup screens can be reviewed as images.
             Self::Setup => AutotestScript {
                 presses: [
-                    (2.0, input::Action::Confirm), // Quick Match -> team
-                    (3.0, input::Action::Confirm), // team -> opponent
-                    (4.0, input::Action::Confirm), // opponent -> overs
-                    (5.0, input::Action::Confirm), // overs -> stadium
-                    (8.0, input::Action::Confirm), // stadium -> toss call
-                    (8.5, input::Action::Confirm), // toss call -> flip
+                    (2.0, input::Action::Confirm),  // Quick Match -> team
+                    (3.0, input::Action::Confirm),  // team -> opponent
+                    (4.0, input::Action::Confirm),  // opponent -> overs
+                    (5.0, input::Action::Confirm),  // overs -> stadium
+                    (8.0, input::Action::Confirm),  // stadium -> toss call
+                    (8.5, input::Action::Confirm),  // toss call -> flip
                     (14.0, input::Action::Confirm), // toss choice
                     (99.0, input::Action::Confirm),
                     (99.5, input::Action::Confirm),
@@ -351,12 +354,12 @@ impl AutotestMode {
                     (5.0, input::Action::Confirm),
                     (6.5, input::Action::Confirm),
                     (8.0, input::Action::Confirm),
-                    (8.5, input::Action::Confirm),  // toss: call heads/tails
+                    (8.5, input::Action::Confirm), // toss: call heads/tails
                     (22.0, input::Action::Confirm), // toss: elect to bat
                     (25.0, input::Action::Confirm), // toss summary -> match
                     (28.0, input::Action::Confirm), // spare
-                    (34.0, input::Action::Cancel),  // Esc: open pause overlay
-                    (38.0, input::Action::Next),    // move down the pause list
+                    (34.0, input::Action::Cancel), // Esc: open pause overlay
+                    (38.0, input::Action::Next),   // move down the pause list
                     (200.0, input::Action::Confirm),
                     (200.0, input::Action::Confirm),
                 ],
@@ -376,6 +379,33 @@ impl AutotestMode {
     }
 }
 
+/// `CRICKET_AUTOTEST_SCALE` dilates every scripted instant (default 1.0).
+/// Values below 1 are ignored so a typo cannot make the script unrunnable.
+fn autotest_time_scale() -> f32 {
+    std::env::var("CRICKET_AUTOTEST_SCALE")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|s| *s >= 1.0)
+        .unwrap_or(1.0)
+}
+
+/// `CRICKET_AUTOTEST_HOLD` keeps the app alive for extra scripted seconds after
+/// the last milestone. Screenshots are written by the render world a frame or
+/// two later, which a software rasteriser can take tens of seconds to reach.
+fn autotest_hold() -> f32 {
+    std::env::var("CRICKET_AUTOTEST_HOLD")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|h| *h >= 0.0)
+        .unwrap_or(0.0)
+}
+
+/// `CRICKET_SHOT_PREFIX` renames milestone captures so successive runs do not
+/// overwrite each other. Defaults to the historic `/tmp/opencode/auto-`.
+fn shot_prefix() -> String {
+    std::env::var("CRICKET_SHOT_PREFIX").unwrap_or_else(|_| "/tmp/opencode/auto-".to_string())
+}
+
 fn autotest_drive(
     time: Res<Time<bevy::time::Real>>,
     mut input: ResMut<input::PlayerInput>,
@@ -392,8 +422,12 @@ fn autotest_drive(
         return;
     };
     let script = mode.script();
+    // The scripts are timed against a GPU running at display rate. Under a
+    // software rasteriser (Xvfb + lavapipe, used for headless captures) menu
+    // transitions need several times as long, so every instant can be dilated.
+    let scale = autotest_time_scale();
     *t += time.delta_secs();
-    let now = *t;
+    let now = *t / scale;
 
     for (i, (when, action)) in script.presses.iter().enumerate() {
         let step = i as u32 + 1;
@@ -424,11 +458,11 @@ fn autotest_drive(
     for (i, when) in script.milestones.iter().enumerate() {
         let step = 100 + i as u32;
         if now >= *when && *last_milestone < step {
-            save_shot(&mut commands, format!("/tmp/opencode/auto-{i}.png"));
+            save_shot(&mut commands, format!("{}{i}.png", shot_prefix()));
             *last_milestone = step;
         }
     }
-    if now >= script.end_time && *last_milestone < 200 {
+    if now >= script.end_time + autotest_hold() && *last_milestone < 200 {
         *last_milestone = 200;
         exit.write(AppExit::Success);
     }
@@ -471,6 +505,28 @@ struct LightingPreset {
     ambient_color: Color,
     ambient_brightness: f32,
     clear_color: Color,
+}
+
+/// Blend the preset's haze toward the theme's own horizon.
+///
+/// Not all the way: the preset carries the exposure-tuned density that keeps
+/// distant geometry readable, and the horizon colour alone is too saturated to
+/// sit in front of the stands.
+fn theme_fog_color(
+    theme: crate::core::stadiums::StadiumEnvironment,
+    night: bool,
+    preset: &LightingPreset,
+) -> Color {
+    const THEME_WEIGHT: f32 = 0.65;
+    let horizon = render::sky::sky_horizon_color(theme, night);
+    let base = preset.fog_color.to_linear();
+    let mix = |a: f32, b: f32| a + (b - a) * THEME_WEIGHT;
+    Color::linear_rgba(
+        mix(base.red, horizon[0]),
+        mix(base.green, horizon[1]),
+        mix(base.blue, horizon[2]),
+        1.0,
+    )
 }
 
 fn lighting_preset(time: StadiumTime) -> LightingPreset {
@@ -520,7 +576,9 @@ fn setup_basics(
     commands.insert_resource(SkyTextures {
         day: day_tex.clone(),
         night: night_tex.clone(),
+        theme: render::sky::DEFAULT_SKY_THEME,
     });
+    commands.init_resource::<SkyTextureCache>();
     let sky_mat = materials.add(StandardMaterial {
         base_color_texture: Some(day_tex),
         unlit: true,
@@ -606,6 +664,39 @@ fn setup_basics(
     let _ = materials.add(Color::WHITE);
 }
 
+/// Repaint the shared sky dome in the current ground's palette.
+///
+/// The dome is spawned at startup, long before a stadium is chosen, so the
+/// theme has to arrive later. `SkyTextures` changing is what tells
+/// `update_stadium_time` to swap the material over.
+fn sync_sky_theme(
+    setup: Option<Res<game::MatchSetup>>,
+    world_data: Option<Res<game::WorldData>>,
+    state: Res<State<AppState>>,
+    mut cache: ResMut<SkyTextureCache>,
+    mut sky_textures: ResMut<SkyTextures>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let wanted = match (state.get(), setup.as_ref(), world_data.as_ref()) {
+        (AppState::InMatch, Some(setup), Some(wd)) => wd
+            .stadiums
+            .get(setup.stadium)
+            .map(|s| s.environment)
+            .unwrap_or(render::sky::DEFAULT_SKY_THEME),
+        // Menus sit under the generic sky.
+        _ => render::sky::DEFAULT_SKY_THEME,
+    };
+    if sky_textures.theme == wanted {
+        return;
+    }
+    let (day, night) = cache.get_or_paint(wanted, &mut images);
+    *sky_textures = SkyTextures {
+        day,
+        night,
+        theme: wanted,
+    };
+}
+
 fn update_stadium_time(
     time: Res<StadiumTime>,
     sky_textures: Res<SkyTextures>,
@@ -632,7 +723,7 @@ fn update_stadium_time(
     >,
     fixture_mats: Option<Res<FloodlightMaterials>>,
 ) {
-    if !time.is_changed() {
+    if !time.is_changed() && !sky_textures.is_changed() {
         return;
     }
     let is_night = *time == StadiumTime::Night;
@@ -655,7 +746,10 @@ fn update_stadium_time(
         };
     }
     if let Ok(mut fog) = fog_q.single_mut() {
-        fog.color = preset.fog_color;
+        // Distance haze is the air of the ground you are standing in, so it has
+        // to follow the theme. A fixed blue washed desert dust and tropical
+        // glare toward an English overcast.
+        fog.color = theme_fog_color(sky_textures.theme, is_night, &preset);
         fog.falloff = distance_fog_falloff(*time);
     }
     *ambient = GlobalAmbientLight {

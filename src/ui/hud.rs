@@ -4,8 +4,8 @@
 use crate::core::{footwork_from_move_y, select_shot};
 use crate::game::*;
 use crate::input::{Action, KeyBindings, PlayerInput, action_label};
-use crate::ui::theme::{UiFonts, palette, register_ui_font_assets};
 use crate::state::AppState;
+use crate::ui::theme::{UiFonts, palette, register_ui_font_assets};
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -740,12 +740,7 @@ fn spawn_shot_preview(parent: &mut ChildSpawnerCommands, fonts: &UiFonts) {
         .with_children(|p| {
             p.spawn((
                 ShotPreviewText,
-                label_text(
-                    "Straight Drive",
-                    fonts.bold.clone(),
-                    13.0,
-                    palette::gold(),
-                ),
+                label_text("Straight Drive", fonts.bold.clone(), 13.0, palette::gold()),
                 text_shadow(),
             ));
         });
@@ -903,34 +898,22 @@ fn update_prompt(
     let confirm = action_label(Action::Confirm, &bindings, input.gamepad_connected);
     let loft = action_label(Action::Loft, &bindings, input.gamepad_connected);
     let prompt = match &phase.0 {
-        PhaseEnum::ReadyToBall { .. } => match am.as_deref().map(|m| (m.user_bowling(), m.user_batting())) {
-            Some((true, _)) => Some((
-                "BOWLING",
-                format!("PRESS {confirm} TO START RUN-UP"),
-            )),
-            Some((false, true)) => Some((
-                "BATTING",
-                format!("PRESS {confirm} WHEN READY"),
-            )),
-            _ => None,
-        },
+        PhaseEnum::ReadyToBall { .. } => {
+            match am.as_deref().map(|m| (m.user_bowling(), m.user_batting())) {
+                Some((true, _)) => Some(("BOWLING", format!("PRESS {confirm} TO START RUN-UP"))),
+                Some((false, true)) => Some(("BATTING", format!("PRESS {confirm} WHEN READY"))),
+                _ => None,
+            }
+        }
         PhaseEnum::AimLength { lock, .. } => match lock {
-            None => Some((
-                "BOWLING",
-                format!("PRESS {confirm} TO LOCK LENGTH"),
-            )),
-            Some(_) => Some((
-                "BOWLING",
-                format!("PRESS {confirm} TO LOCK LINE"),
-            )),
+            None => Some(("BOWLING", format!("PRESS {confirm} TO LOCK LENGTH"))),
+            Some(_) => Some(("BOWLING", format!("PRESS {confirm} TO LOCK LINE"))),
         },
         PhaseEnum::BallLive => {
             if am.as_deref().map(|m| m.user_batting()).unwrap_or(false) {
                 Some((
                     "BATTING",
-                    format!(
-                        "{confirm} SHOT  •  {loft} LOFT  •  W/S FOOT  •  A/D AIM"
-                    ),
+                    format!("{confirm} SHOT  •  {loft} LOFT  •  W/S FOOT  •  A/D AIM"),
                 ))
             } else {
                 None
@@ -949,10 +932,7 @@ fn update_prompt(
             "INNINGS BREAK",
             format!("PRESS {confirm} TO BEGIN THE CHASE"),
         )),
-        PhaseEnum::MatchOver => Some((
-            "MATCH RESULT",
-            format!("PRESS {confirm} TO CONTINUE"),
-        )),
+        PhaseEnum::MatchOver => Some(("MATCH RESULT", format!("PRESS {confirm} TO CONTINUE"))),
         _ => None,
     };
 
@@ -1132,6 +1112,13 @@ fn update_broadcast_chip(
     }
 }
 
+/// Visibility plus children — the pair both shot-direction panels write.
+type VisibleChildren<'a> = (&'a mut Visibility, &'a Children);
+/// The shot-direction root, proven disjoint from the legend root.
+type ShotDirOnly = (With<ShotDirRoot>, Without<ShotLegendRoot>);
+/// The legend root, proven disjoint from the shot-direction root.
+type ShotLegendOnly = (With<ShotLegendRoot>, Without<ShotDirRoot>);
+
 fn update_shot_direction(
     phase: Res<Phase>,
     am: Option<Res<ActiveMatch>>,
@@ -1139,8 +1126,8 @@ fn update_shot_direction(
     bindings: Res<KeyBindings>,
     // Disjoint filters: both write Visibility, so Bevy needs proof the sets
     // cannot overlap (B0001).
-    mut root_q: Query<(&mut Visibility, &Children), (With<ShotDirRoot>, Without<ShotLegendRoot>)>,
-    mut legend_q: Query<(&mut Visibility, &Children), (With<ShotLegendRoot>, Without<ShotDirRoot>)>,
+    mut root_q: Query<VisibleChildren, ShotDirOnly>,
+    mut legend_q: Query<VisibleChildren, ShotLegendOnly>,
     mut legend_text_q: Query<&mut Text, With<ShotLegendText>>,
     mut arrow_q: Query<&mut Node>,
 ) {

@@ -137,11 +137,7 @@ pub fn select_shot(footwork: Footwork, aim_x: f32, loft: bool) -> ShotKind {
         }
         Footwork::Back => {
             if leg {
-                if loft {
-                    ShotKind::Hook
-                } else {
-                    ShotKind::Pull
-                }
+                if loft { ShotKind::Hook } else { ShotKind::Pull }
             } else if off {
                 if loft {
                     ShotKind::LateCut

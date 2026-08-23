@@ -307,9 +307,6 @@ mod tests {
             brain_on_chase_arrival(COLLECTION_RADIUS + 0.1, Brain::Chase),
             Brain::Chase
         );
-        assert_eq!(
-            brain_on_chase_arrival(0.5, Brain::AtPost),
-            Brain::AtPost
-        );
+        assert_eq!(brain_on_chase_arrival(0.5, Brain::AtPost), Brain::AtPost);
     }
 }

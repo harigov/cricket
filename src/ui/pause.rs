@@ -98,7 +98,10 @@ impl Plugin for PausePlugin {
         theme::register_ui_font_assets(app);
         app.init_resource::<PauseMenuState>()
             .add_systems(OnEnter(AppState::InMatch), reset_pause_menu)
-            .add_systems(OnExit(AppState::InMatch), (despawn_pause_ui, reset_pause_flag))
+            .add_systems(
+                OnExit(AppState::InMatch),
+                (despawn_pause_ui, reset_pause_flag),
+            )
             .add_systems(
                 Update,
                 (
@@ -505,7 +508,9 @@ fn handle_settings_input(
                     1 => audio.master = (audio.master + delta).clamp(0.0, 1.0),
                     2 => audio.sfx = (audio.sfx + delta).clamp(0.0, 1.0),
                     3 => audio.music = (audio.music + delta).clamp(0.0, 1.0),
-                    4 => audio.commentary_volume = (audio.commentary_volume + delta).clamp(0.0, 1.0),
+                    4 => {
+                        audio.commentary_volume = (audio.commentary_volume + delta).clamp(0.0, 1.0)
+                    }
                     _ => {}
                 }
             } else if menu.sel == 5 && (input.pressed(Action::Right) || input.pressed(Action::Left))
@@ -658,7 +663,11 @@ mod tests {
 
     #[test]
     fn settings_item_count_matches_pause_lines_rows() {
-        for tab in [SettingsTab::Audio, SettingsTab::Controls, SettingsTab::Camera] {
+        for tab in [
+            SettingsTab::Audio,
+            SettingsTab::Controls,
+            SettingsTab::Camera,
+        ] {
             let lines = sample_pause_lines(tab);
             assert_eq!(lines.len(), settings_item_count(tab), "tab {tab:?}");
         }

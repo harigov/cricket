@@ -362,8 +362,11 @@ mod tests {
 
         // Height of the optical axis where the striker stands, and the bottom
         // of the frame there (half the vertical FOV below the axis).
-        let to_striker = Vec2::new(geometry::BATSMAN_POS.x - pos.x, geometry::BATSMAN_POS.y - pos.z)
-            .length();
+        let to_striker = Vec2::new(
+            geometry::BATSMAN_POS.x - pos.x,
+            geometry::BATSMAN_POS.y - pos.z,
+        )
+        .length();
         let axis_y = pos.y - to_striker * depression.tan();
         let frame_bottom = axis_y - to_striker * (fov.to_radians() * 0.5).tan();
 
@@ -493,7 +496,7 @@ mod tests {
         const STRIKER_HEAD_Y: f32 = 1.8;
 
         assert!(
-            axis_y >= 0.0 && axis_y <= 3.0,
+            (0.0..=3.0).contains(&axis_y),
             "optical axis should land on the batsman at striker distance, not below ground: \
              axis_y={axis_y} at {to_striker} m"
         );
@@ -510,4 +513,3 @@ mod tests {
         );
     }
 }
-

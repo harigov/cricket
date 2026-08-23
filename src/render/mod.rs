@@ -1,10 +1,12 @@
 pub mod camera_rig;
 pub mod crowd;
+pub mod environment;
 pub mod outfield_grass;
 pub mod player;
 pub mod ring_geometry;
 pub mod sky;
 pub mod stadium;
+pub mod stand_geometry;
 
 /// Day lighting group toggled by stadium time.
 #[derive(Component)]
@@ -18,11 +20,47 @@ pub struct NightEnvironmentLight;
 #[derive(Component)]
 pub struct FloodlightFixture;
 
-/// Cached procedural sky textures (generated once at startup).
+/// Sky textures currently hanging on the shared dome.
+///
+/// Painting 2 M texels of fractal noise is not something to do per frame, so
+/// the dome keeps one day/night pair and [`SkyTextureCache`] holds every pair
+/// painted so far. `theme` records which stadium's air is on the dome.
 #[derive(Resource)]
 pub struct SkyTextures {
     pub day: Handle<Image>,
     pub night: Handle<Image>,
+    pub theme: crate::core::stadiums::StadiumEnvironment,
+}
+
+/// Day/night sky textures painted so far, keyed by theme.
+///
+/// A tournament revisits grounds, and repainting a sky the player has already
+/// seen would stall the frame that builds the stadium.
+#[derive(Resource, Default)]
+pub struct SkyTextureCache {
+    by_theme: std::collections::HashMap<
+        crate::core::stadiums::StadiumEnvironment,
+        (Handle<Image>, Handle<Image>),
+    >,
+}
+
+impl SkyTextureCache {
+    /// Day and night handles for `theme`, painting them on first request.
+    pub fn get_or_paint(
+        &mut self,
+        theme: crate::core::stadiums::StadiumEnvironment,
+        images: &mut Assets<Image>,
+    ) -> (Handle<Image>, Handle<Image>) {
+        self.by_theme
+            .entry(theme)
+            .or_insert_with(|| {
+                (
+                    images.add(sky::create_themed_sky_texture(theme, false)),
+                    images.add(sky::create_themed_sky_texture(theme, true)),
+                )
+            })
+            .clone()
+    }
 }
 
 /// Day/night emissive materials for floodlight fixtures.
@@ -114,6 +152,96 @@ pub fn load_xbot_scene(assets: &AssetServer) -> Handle<Scene> {
     assets.load(GltfAssetLabel::Scene(0).from_asset(path))
 }
 
+/// Scene root whose imported glTF materials need correcting for this renderer.
+///
+/// Two things are wrong with the kits as shipped. They are exported from Unity
+/// with `metallicFactor` left at the glTF default of 1.0, and a fully metallic
+/// surface has no diffuse albedo — it only mirrors its surroundings. And where
+/// a model carries no texture, its `baseColorFactor` was authored as the colour
+/// the artist wanted to *see*, not as an albedo; under this scene's exposure
+/// that arrives several stops hot. Together they turned the pines and rocks
+/// into pale cutouts of the sky.
+#[derive(Component)]
+pub struct ImportedProp;
+
+/// Mesh already visited by [`retune_imported_prop_materials`].
+#[derive(Component)]
+pub struct PropMaterialFixed;
+
+/// Imported materials already corrected.
+///
+/// glTF materials are shared by every instance of a model, so this has to be
+/// keyed by the material and not by the mesh that led us to it: with a hundred
+/// pines on screen, a per-mesh guard still re-corrects the one shared foliage
+/// material a hundred times, and the albedo compounds to black.
+#[derive(Resource, Default)]
+pub struct RetunedPropMaterials(std::collections::HashSet<AssetId<StandardMaterial>>);
+
+/// A prop mesh not yet de-metallised: entity plus its imported material.
+type UnfixedPropMesh<'a> = (Entity, &'a MeshMaterial3d<StandardMaterial>);
+/// Only mesh entities we have not already visited.
+type UnfixedPropMeshFilter = (With<Mesh3d>, Without<PropMaterialFixed>);
+
+/// How much of flat ground's sun a standing prop actually catches.
+///
+/// `day_albedo` inverts the response of ground facing the sky. A tree or a rock
+/// presents mostly vertical faces to a sun 56° up, so correcting it by the full
+/// ground response takes the foliage down to near-black. Four tenths is about
+/// what the visible faces of an upright convex prop average.
+const PROP_SUN_FRACTION: f32 = 0.4;
+
+/// Correct imported kit materials, once per mesh.
+///
+/// glTF materials are shared per asset, so the first instance of a palm fixes
+/// the material for every other palm; the marker just stops us rescanning.
+pub fn retune_imported_prop_materials(
+    mut commands: Commands,
+    props: Query<(), With<ImportedProp>>,
+    parents: Query<&ChildOf>,
+    meshes: Query<UnfixedPropMesh, UnfixedPropMeshFilter>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut done: ResMut<RetunedPropMaterials>,
+) {
+    for (entity, mat_handle) in &meshes {
+        let mut current = parents.get(entity).ok().map(ChildOf::parent);
+        let mut is_prop = false;
+        for _ in 0..24 {
+            let Some(parent) = current else { break };
+            if props.contains(parent) {
+                is_prop = true;
+                break;
+            }
+            current = parents.get(parent).ok().map(ChildOf::parent);
+        }
+        if !is_prop {
+            continue;
+        }
+        commands.entity(entity).insert(PropMaterialFixed);
+        if !done.0.insert(mat_handle.0.id()) {
+            continue;
+        }
+        if let Some(material) = materials.get_mut(&mat_handle.0) {
+            if material.metallic > 0.5 {
+                material.metallic = 0.0;
+                // The same export pins roughness at 1.0, which kills every
+                // highlight. Bark, stone and foliage all sit below that.
+                material.perceptual_roughness = material.perceptual_roughness.min(0.85);
+                material.reflectance = 0.18;
+            }
+            // Only the untextured kits carry their colour in the factor. Where
+            // a texture supplies it (the city blocks, the crowd characters) the
+            // factor is plain white and remapping it would just dim the map.
+            if material.base_color_texture.is_none() {
+                let srgb = material.base_color.to_srgba();
+                let albedo = environment::day_albedo([srgb.red, srgb.green, srgb.blue]);
+                let k = 1.0 / PROP_SUN_FRACTION;
+                material.base_color =
+                    Color::linear_rgba(albedo[0] * k, albedo[1] * k, albedo[2] * k, srgb.alpha);
+            }
+        }
+    }
+}
+
 /// Renderer-side systems shared across states.
 pub struct RenderPlugin;
 
@@ -130,6 +258,7 @@ impl Plugin for RenderPlugin {
         );
         // Shared mocap locomotion graph (idle/run) for every figure.
         player::build_locomotion_clips(app);
+        app.init_resource::<RetunedPropMaterials>();
         app.add_systems(Startup, crowd::init_crowd_palette)
             .add_systems(
                 Update,
@@ -139,6 +268,7 @@ impl Plugin for RenderPlugin {
                     player::apply_team_kit_materials,
                     crowd::apply_crowd_materials,
                     player::attach_animation_players,
+                    retune_imported_prop_materials,
                 ),
             )
             .add_systems(

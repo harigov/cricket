@@ -1,12 +1,23 @@
 //! Procedural day/night sky textures (generated once at startup).
+//!
+//! Each [`StadiumEnvironment`] gets its own palette: the air over a desert
+//! plateau is not the air over an alpine valley, and the sky is the largest
+//! single surface on screen, so it carries most of the theme.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 
+use crate::core::stadiums::StadiumEnvironment;
+
 const SKY_W: u32 = 2048;
 const SKY_H: u32 = 1024;
+
+/// Palette used before a stadium is picked (menus and the shared startup dome).
+/// Coastal is the closest of the five to the single palette this used to have,
+/// so the menu backdrop is unchanged in character.
+pub const DEFAULT_SKY_THEME: StadiumEnvironment = StadiumEnvironment::Coastal;
 
 /// Per-texel hash threshold for discrete stars (`h > STAR_THRESHOLD`).
 const STAR_THRESHOLD: f32 = 0.9991;
@@ -59,21 +70,104 @@ pub fn sky_fbm(u: f32, v: f32, seed: u32) -> f32 {
     sum
 }
 
-/// Sample procedural sky colour at normalised UV `(u, v)` where `v=0` is horizon
-/// and `v=1` is zenith.
-pub fn sample_sky_color(u: f32, v: f32, night: bool) -> [f32; 3] {
-    if night {
-        sample_night_sky(u, v)
-    } else {
-        sample_day_sky(u, v)
+/// Day and night gradients plus weather density for one stadium theme.
+struct SkyPalette {
+    day_horizon: [f32; 3],
+    day_zenith: [f32; 3],
+    /// Exponent on altitude: higher keeps the deep zenith blue overhead and
+    /// squeezes the pale horizon band into a thinner strip.
+    day_curve: f32,
+    /// Peak brightening from the cloud layer (0 = cloudless).
+    cloud: f32,
+    /// Amplitude of the broad low-altitude haze wash.
+    haze: f32,
+    night_horizon: [f32; 3],
+    night_zenith: [f32; 3],
+}
+
+fn sky_palette(theme: StadiumEnvironment) -> SkyPalette {
+    match theme {
+        // City air: warm, dirty horizon and a sodium-lit night dome.
+        StadiumEnvironment::Metropolis => SkyPalette {
+            day_horizon: [0.80, 0.78, 0.74],
+            day_zenith: [0.22, 0.41, 0.74],
+            day_curve: 1.02,
+            cloud: 0.26,
+            haze: 0.06,
+            night_horizon: [0.11, 0.09, 0.12],
+            night_zenith: [0.02, 0.03, 0.07],
+        },
+        // Thin high-altitude air: little haze, near-navy overhead.
+        StadiumEnvironment::Alpine => SkyPalette {
+            day_horizon: [0.66, 0.78, 0.93],
+            day_zenith: [0.09, 0.27, 0.70],
+            day_curve: 1.34,
+            cloud: 0.14,
+            haze: 0.02,
+            night_horizon: [0.03, 0.05, 0.13],
+            night_zenith: [0.01, 0.01, 0.05],
+        },
+        // Humid tropical light: bright, slightly green-blue, big soft cloud banks.
+        StadiumEnvironment::Coastal => SkyPalette {
+            day_horizon: [0.80, 0.89, 0.95],
+            day_zenith: [0.15, 0.47, 0.85],
+            day_curve: 1.10,
+            cloud: 0.30,
+            haze: 0.05,
+            night_horizon: [0.03, 0.07, 0.13],
+            night_zenith: [0.01, 0.02, 0.06],
+        },
+        // English summer: flat, milky, overcast-leaning.
+        StadiumEnvironment::Parkland => SkyPalette {
+            day_horizon: [0.78, 0.81, 0.85],
+            day_zenith: [0.34, 0.49, 0.72],
+            day_curve: 1.06,
+            cloud: 0.40,
+            haze: 0.05,
+            night_horizon: [0.04, 0.06, 0.12],
+            night_zenith: [0.01, 0.02, 0.06],
+        },
+        // Dry desert air: dust at the horizon, cloudless deep blue above.
+        StadiumEnvironment::Desert => SkyPalette {
+            day_horizon: [0.87, 0.77, 0.61],
+            day_zenith: [0.10, 0.31, 0.73],
+            day_curve: 1.40,
+            cloud: 0.05,
+            haze: 0.07,
+            night_horizon: [0.06, 0.05, 0.10],
+            night_zenith: [0.01, 0.02, 0.05],
+        },
     }
 }
 
-fn sample_day_sky(u: f32, v: f32) -> [f32; 3] {
-    let t = v.clamp(0.0, 1.0).powf(1.12);
-    // Horizon haze warms toward pale gold; zenith deep saturated blue.
-    let horizon = [0.78_f32, 0.86, 0.96];
-    let zenith = [0.22, 0.46, 0.86];
+/// Colour the sky settles to at the horizon.
+///
+/// The world has to dissolve into the same air the dome does, so the ground
+/// fade and the distance haze on far props both key off this.
+pub fn sky_horizon_color(theme: StadiumEnvironment, night: bool) -> [f32; 3] {
+    let palette = sky_palette(theme);
+    if night {
+        palette.night_horizon
+    } else {
+        palette.day_horizon
+    }
+}
+
+/// Sample procedural sky colour at normalised UV `(u, v)` where `v=0` is horizon
+/// and `v=1` is zenith.
+pub fn sample_sky_color(u: f32, v: f32, night: bool, theme: StadiumEnvironment) -> [f32; 3] {
+    let palette = sky_palette(theme);
+    if night {
+        sample_night_sky(u, v, &palette)
+    } else {
+        sample_day_sky(u, v, &palette)
+    }
+}
+
+fn sample_day_sky(u: f32, v: f32, palette: &SkyPalette) -> [f32; 3] {
+    let t = v.clamp(0.0, 1.0).powf(palette.day_curve);
+    let horizon = palette.day_horizon;
+    let zenith = palette.day_zenith;
     let mut rgb = [
         horizon[0] + (zenith[0] - horizon[0]) * t,
         horizon[1] + (zenith[1] - horizon[1]) * t,
@@ -84,13 +178,13 @@ fn sample_day_sky(u: f32, v: f32) -> [f32; 3] {
     let cloud_mask = (1.0 - (v - 0.42).abs() * 2.2).clamp(0.0, 1.0);
     let n1 = sky_fbm(u + 0.17, v * 0.9 + 0.04, 11);
     let n2 = sky_fbm(u * 1.3 + 0.5, v * 1.1, 29) * 0.45;
-    let clouds = ((n1 + n2) * 0.5).powf(1.6) * cloud_mask * 0.20;
-    rgb[0] += clouds * 0.32;
-    rgb[1] += clouds * 0.26;
-    rgb[2] += clouds * 0.14;
+    let clouds = ((n1 + n2) * 0.5).powf(1.6) * cloud_mask * palette.cloud;
+    rgb[0] += clouds * 0.35;
+    rgb[1] += clouds * 0.28;
+    rgb[2] += clouds * 0.18;
 
     // Subtle horizontal haze variation (not stripes).
-    let haze = sky_value_noise(u, v * 0.35 + 0.1, 1.8, 53) * 0.028;
+    let haze = sky_value_noise(u, v * 0.35 + 0.1, 1.8, 53) * palette.haze;
     rgb[0] += haze;
     rgb[1] += haze * 0.9;
     rgb[2] += haze * 0.65;
@@ -98,10 +192,10 @@ fn sample_day_sky(u: f32, v: f32) -> [f32; 3] {
     rgb.map(|c| c.clamp(0.0, 1.0))
 }
 
-fn sample_night_sky(u: f32, v: f32) -> [f32; 3] {
+fn sample_night_sky(u: f32, v: f32, palette: &SkyPalette) -> [f32; 3] {
     let t = v.clamp(0.0, 1.0).powf(1.08);
-    let horizon = [0.04_f32, 0.06, 0.12];
-    let zenith = [0.01, 0.02, 0.06];
+    let horizon = palette.night_horizon;
+    let zenith = palette.night_zenith;
     let mut rgb = [
         horizon[0] + (zenith[0] - horizon[0]) * t,
         horizon[1] + (zenith[1] - horizon[1]) * t,
@@ -126,14 +220,19 @@ fn sample_night_sky(u: f32, v: f32) -> [f32; 3] {
     rgb.map(|c| c.clamp(0.0, 1.0))
 }
 
-/// Build a complete sky texture image for day (`night = false`) or night.
+/// Build a complete sky texture image for day (`night = false`) or night in the
+/// default palette. Used for the shared dome that exists before a stadium does.
 pub fn create_sky_texture(night: bool) -> Image {
+    create_themed_sky_texture(DEFAULT_SKY_THEME, night)
+}
+
+fn paint_sky_texels(theme: StadiumEnvironment, night: bool) -> Vec<u8> {
     let mut data = Vec::with_capacity((SKY_W * SKY_H * 4) as usize);
     for y in 0..SKY_H {
         let v = (y as f32 + 0.5) / SKY_H as f32;
         for x in 0..SKY_W {
             let u = (x as f32 + 0.5) / SKY_W as f32;
-            let rgb = sample_sky_color(u, v, night);
+            let rgb = sample_sky_color(u, v, night, theme);
             data.extend_from_slice(&[
                 (rgb[0] * 255.0) as u8,
                 (rgb[1] * 255.0) as u8,
@@ -142,6 +241,12 @@ pub fn create_sky_texture(night: bool) -> Image {
             ]);
         }
     }
+    data
+}
+
+/// Build a sky texture image in a stadium theme's own palette.
+pub fn create_themed_sky_texture(theme: StadiumEnvironment, night: bool) -> Image {
+    let data = paint_sky_texels(theme, night);
     let mut img = Image::new(
         Extent3d {
             width: SKY_W,
@@ -179,38 +284,116 @@ pub fn sky_texture_for_time<'a>(
 mod tests {
     use super::*;
 
+    /// Perceived brightness, for palette comparisons.
+    fn luma(rgb: [f32; 3]) -> f32 {
+        rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114
+    }
+
+    /// Coarse sample grid — catches a palette or noise change for a fraction of
+    /// the cost of painting two million texels per theme.
+    fn sky_grid(theme: StadiumEnvironment, night: bool) -> Vec<[f32; 3]> {
+        (0..24)
+            .flat_map(|y| {
+                (0..32)
+                    .map(move |x| sample_sky_color(x as f32 / 32.0, y as f32 / 24.0, night, theme))
+            })
+            .collect()
+    }
+
     #[test]
     fn sky_generation_is_deterministic() {
-        let a = create_sky_texture(false);
-        let b = create_sky_texture(false);
+        // Painted directly rather than through the cache, which would make any
+        // two calls trivially equal.
+        assert_eq!(
+            paint_sky_texels(DEFAULT_SKY_THEME, false),
+            paint_sky_texels(DEFAULT_SKY_THEME, false)
+        );
+        for theme in StadiumEnvironment::ALL {
+            assert_eq!(
+                sky_grid(theme, false),
+                sky_grid(theme, false),
+                "{theme:?} day sky is not reproducible"
+            );
+            assert_eq!(
+                sky_grid(theme, true),
+                sky_grid(theme, true),
+                "{theme:?} night sky is not reproducible"
+            );
+        }
+    }
+
+    #[test]
+    fn themed_cache_serves_the_same_texels() {
+        let a = create_themed_sky_texture(StadiumEnvironment::Desert, false);
+        let b = create_themed_sky_texture(StadiumEnvironment::Desert, false);
         assert_eq!(a.data.as_ref().unwrap(), b.data.as_ref().unwrap());
     }
 
     #[test]
     fn day_and_night_differ() {
-        let day = create_sky_texture(false);
-        let night = create_sky_texture(true);
-        assert_ne!(day.data.as_ref().unwrap(), night.data.as_ref().unwrap());
+        assert_ne!(
+            paint_sky_texels(DEFAULT_SKY_THEME, false),
+            paint_sky_texels(DEFAULT_SKY_THEME, true)
+        );
+        for theme in StadiumEnvironment::ALL {
+            assert_ne!(
+                sky_grid(theme, false),
+                sky_grid(theme, true),
+                "{theme:?} night sky matches its day sky"
+            );
+        }
+    }
+
+    #[test]
+    fn every_theme_has_its_own_day_palette() {
+        let samples = |theme| -> Vec<[f32; 3]> {
+            (0..8)
+                .map(|i| sample_sky_color(0.31, i as f32 / 8.0, false, theme))
+                .collect()
+        };
+        let all: Vec<_> = StadiumEnvironment::ALL.map(samples).into_iter().collect();
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate().skip(i + 1) {
+                assert_ne!(
+                    a,
+                    b,
+                    "{:?} and {:?} share a sky",
+                    StadiumEnvironment::ALL[i],
+                    StadiumEnvironment::ALL[j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn desert_horizon_is_warmer_than_alpine() {
+        let desert = sample_sky_color(0.5, 0.02, false, StadiumEnvironment::Desert);
+        let alpine = sample_sky_color(0.5, 0.02, false, StadiumEnvironment::Alpine);
+        assert!(
+            desert[0] - desert[2] > alpine[0] - alpine[2],
+            "dust haze should push the desert horizon warm: {desert:?} vs {alpine:?}"
+        );
     }
 
     #[test]
     fn night_stars_are_not_full_horizontal_rows() {
-        let img = create_sky_texture(true);
-        let data = img.data.as_ref().unwrap();
-        let w = SKY_W as usize;
-        let mut rows_all_bright = 0usize;
-        for y in (SKY_H as usize / 3)..(SKY_H as usize * 2 / 3) {
-            let bright = (0..w)
-                .filter(|&x| {
-                    let i = (y * w + x) * 4;
-                    data[i] > 240 && data[i + 1] > 240 && data[i + 2] > 240
-                })
-                .count();
-            if bright > w / 2 {
-                rows_all_bright += 1;
+        for theme in StadiumEnvironment::ALL {
+            let data = paint_sky_texels(theme, true);
+            let w = SKY_W as usize;
+            let mut rows_all_bright = 0usize;
+            for y in (SKY_H as usize / 3)..(SKY_H as usize * 2 / 3) {
+                let bright = (0..w)
+                    .filter(|&x| {
+                        let i = (y * w + x) * 4;
+                        data[i] > 240 && data[i + 1] > 240 && data[i + 2] > 240
+                    })
+                    .count();
+                if bright > w / 2 {
+                    rows_all_bright += 1;
+                }
             }
+            assert_eq!(rows_all_bright, 0, "{theme:?} has horizontal star bands");
         }
-        assert_eq!(rows_all_bright, 0, "found horizontal star bands");
     }
 
     fn star_region_cell_count() -> usize {
@@ -255,33 +438,42 @@ mod tests {
         assert!(hash_stars >= 1000, "too few stars: {hash_stars}");
         assert!(hash_stars <= 2200, "too many stars: {hash_stars}");
 
-        // Generated texture should contain one bright texel per hash star (dim stars ~120+).
-        let img = create_sky_texture(true);
-        let data = img.data.as_ref().unwrap();
-        let w = SKY_W as usize;
-        let mut tex_stars = 0usize;
-        for y in 0..SKY_H as usize {
-            for x in 0..w {
-                let i = (y * w + x) * 4;
-                if data[i] > 120 && data[i + 1] > 120 && data[i + 2] > 120 {
-                    tex_stars += 1;
+        // Every theme's night texture should contain one bright texel per hash
+        // star (dim stars ~120+) — no palette may wash them out or invent them.
+        for theme in StadiumEnvironment::ALL {
+            let data = paint_sky_texels(theme, true);
+            let w = SKY_W as usize;
+            let mut tex_stars = 0usize;
+            for y in 0..SKY_H as usize {
+                for x in 0..w {
+                    let i = (y * w + x) * 4;
+                    if data[i] > 120 && data[i + 1] > 120 && data[i + 2] > 120 {
+                        tex_stars += 1;
+                    }
                 }
             }
+            assert!(
+                tex_stars >= hash_stars.saturating_sub(16),
+                "{theme:?} star texels ({tex_stars}) diverged from hash count ({hash_stars})"
+            );
+            assert!(
+                tex_stars <= hash_stars + 16,
+                "{theme:?} night sky is bright enough to read as stars ({tex_stars} texels)"
+            );
         }
-        assert!(
-            tex_stars >= hash_stars.saturating_sub(16),
-            "texture star texels ({tex_stars}) diverged from hash count ({hash_stars})"
-        );
     }
 
     #[test]
     fn day_sky_has_vertical_gradient() {
-        let bottom = sample_sky_color(0.5, 0.05, false);
-        let top = sample_sky_color(0.5, 0.95, false);
-        // Zenith is deeper/darker than the pale horizon.
-        let bottom_luma = bottom[0] * 0.299 + bottom[1] * 0.587 + bottom[2] * 0.114;
-        let top_luma = top[0] * 0.299 + top[1] * 0.587 + top[2] * 0.114;
-        assert!(top_luma < bottom_luma - 0.08);
+        for theme in StadiumEnvironment::ALL {
+            let bottom = sample_sky_color(0.5, 0.05, false, theme);
+            let top = sample_sky_color(0.5, 0.95, false, theme);
+            // Zenith is deeper/darker than the pale horizon.
+            assert!(
+                luma(top) < luma(bottom) - 0.08,
+                "{theme:?} sky is flat: horizon {bottom:?}, zenith {top:?}"
+            );
+        }
     }
 
     #[test]
