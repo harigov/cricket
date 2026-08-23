@@ -41,7 +41,7 @@ pub fn floodlight_angles() -> [f32; 4] {
 
 /// Radius for towers given the outer edge of the seating bowl.
 pub fn floodlight_radius(bowl_outer_radius: f32) -> f32 {
-    bowl_outer_radius + 7.5
+    bowl_outer_radius + 9.5
 }
 
 #[cfg(test)]

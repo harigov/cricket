@@ -22,11 +22,17 @@ pub struct Stumps {
 }
 
 const STUMP_GAP: f32 = 0.114;
-const TIER_COUNT: usize = 5;
+const LOWER_TIER_COUNT: usize = 7;
+const UPPER_TIER_COUNT: usize = 5;
+const TIER_COUNT: usize = LOWER_TIER_COUNT + UPPER_TIER_COUNT;
+const TIER_MAT_COUNT: usize = 8;
 const TIER_SEGMENTS: usize = 96;
-const AISLE_EVERY: usize = 12;
+const FACADE_SEGMENTS: usize = 48;
+const AISLE_EVERY: usize = 8;
 const CROWD_SEGMENTS: usize = 90;
 const CROWD_AISLE_EVERY: usize = 10;
+/// Spectator tiers spread across lower and upper decks (keeps crowd count stable).
+const CROWD_TIERS: [usize; 5] = [1, 3, 5, 8, 10];
 
 pub(crate) struct BowlLayout {
     inner_radius: f32,
@@ -34,29 +40,64 @@ pub(crate) struct BowlLayout {
     tier_rise: f32,
     tread_thickness: f32,
     base_height: f32,
+    upper_deck_setback: f32,
+    upper_deck_rise_gap: f32,
 }
 
 impl BowlLayout {
     pub(crate) fn from_boundary(boundary: f32) -> Self {
         Self {
-            inner_radius: boundary + 3.2,
-            tier_depth: 1.9,
-            tier_rise: 0.74,
-            tread_thickness: 0.52,
-            base_height: 0.42,
+            inner_radius: boundary + 4.8,
+            tier_depth: 2.25,
+            tier_rise: 1.12,
+            tread_thickness: 0.55,
+            base_height: 0.5,
+            upper_deck_setback: 4.2,
+            upper_deck_rise_gap: 2.8,
         }
     }
 
+    fn lower_outer_radius(&self) -> f32 {
+        self.inner_radius + self.tier_depth * LOWER_TIER_COUNT as f32
+    }
+
     pub(crate) fn outer_radius(&self) -> f32 {
-        self.inner_radius + self.tier_depth * TIER_COUNT as f32
+        self.lower_outer_radius()
+            + self.upper_deck_setback
+            + self.tier_depth * UPPER_TIER_COUNT as f32
+    }
+
+    fn upper_inner_radius(&self) -> f32 {
+        self.lower_outer_radius() + self.upper_deck_setback
     }
 
     fn tier_mid_radius(&self, tier: usize) -> f32 {
-        self.inner_radius + (tier as f32 + 0.5) * self.tier_depth
+        if tier < LOWER_TIER_COUNT {
+            self.inner_radius + (tier as f32 + 0.5) * self.tier_depth
+        } else {
+            let upper = tier - LOWER_TIER_COUNT;
+            self.upper_inner_radius() + (upper as f32 + 0.5) * self.tier_depth
+        }
     }
 
     fn tier_height(&self, tier: usize) -> f32 {
-        self.base_height + tier as f32 * self.tier_rise
+        if tier < LOWER_TIER_COUNT {
+            self.base_height + tier as f32 * self.tier_rise
+        } else {
+            let upper = tier - LOWER_TIER_COUNT;
+            self.base_height
+                + LOWER_TIER_COUNT as f32 * self.tier_rise
+                + self.upper_deck_rise_gap
+                + upper as f32 * self.tier_rise
+        }
+    }
+
+    fn stand_top_height(&self) -> f32 {
+        self.tier_height(TIER_COUNT - 1) + self.tread_thickness
+    }
+
+    fn is_upper_deck(&self, tier: usize) -> bool {
+        tier >= LOWER_TIER_COUNT
     }
 }
 
@@ -72,11 +113,16 @@ struct SharedStadiumAssets {
     stump_mat: Handle<StandardMaterial>,
     sight_screen_mat: Handle<StandardMaterial>,
     board_frame_mat: Handle<StandardMaterial>,
-    tier_mats: [Handle<StandardMaterial>; TIER_COUNT],
+    tier_mats: [Handle<StandardMaterial>; TIER_MAT_COUNT],
     riser_mat: Handle<StandardMaterial>,
     rail_mat: Handle<StandardMaterial>,
     column_mat: Handle<StandardMaterial>,
     canopy_mat: Handle<StandardMaterial>,
+    facade_mat: Handle<StandardMaterial>,
+    concourse_mat: Handle<StandardMaterial>,
+    pavilion_mat: Handle<StandardMaterial>,
+    media_box_mat: Handle<StandardMaterial>,
+    roof_truss_mat: Handle<StandardMaterial>,
     tower_mat: Handle<StandardMaterial>,
     lamp_day_mat: Handle<StandardMaterial>,
     lamp_night_mat: Handle<StandardMaterial>,
@@ -101,8 +147,8 @@ fn build_shared_assets(
         )
     };
 
-    let tier_mats: [Handle<StandardMaterial>; TIER_COUNT] = std::array::from_fn(|i| {
-        let shade = 1.0 - i as f32 * 0.08;
+    let tier_mats: [Handle<StandardMaterial>; TIER_MAT_COUNT] = std::array::from_fn(|i| {
+        let shade = 1.0 - i as f32 * 0.07;
         materials.add(mat(tint(shade, 0.04)))
     });
 
@@ -122,7 +168,12 @@ fn build_shared_assets(
         riser_mat: materials.add(mat(tint(0.62, 0.02))),
         rail_mat: materials.add(mat(tint(0.48, 0.03))),
         column_mat: materials.add(mat(tint(0.55, 0.06))),
-        canopy_mat: materials.add(mat(tint(0.42, 0.05))),
+        canopy_mat: materials.add(mat(tint(0.38, 0.05))),
+        facade_mat: materials.add(mat(Color::srgb_u8(0x6A, 0x6E, 0x74))),
+        concourse_mat: materials.add(mat(Color::srgb_u8(0x8A, 0x8E, 0x92))),
+        pavilion_mat: materials.add(mat(Color::srgb_u8(0x5C, 0x60, 0x68))),
+        media_box_mat: materials.add(mat(Color::srgb_u8(0x2A, 0x32, 0x3C))),
+        roof_truss_mat: materials.add(mat(Color::srgb_u8(0x3C, 0x40, 0x48))),
         tower_mat: materials.add(mat(Color::srgb_u8(0x48, 0x4C, 0x52))),
         lamp_day_mat: materials.add(StandardMaterial {
             base_color: Color::srgb_u8(0xC8, 0xCE, 0xD4),
@@ -328,7 +379,7 @@ fn spawn_sight_screens(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'
 }
 
 fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) {
-    // ---- Continuous raked seating bowl ----
+    // ---- Multi-deck raked seating bowl (lower bowl + set-back upper deck) ----
     let bowl = &ctx.bowl;
     let arc_w = 2.0 * PI * bowl.inner_radius / TIER_SEGMENTS as f32 * 1.02;
     let tread_arc = arc_w;
@@ -337,7 +388,7 @@ fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<
     for tier in 0..TIER_COUNT {
         let mid_r = bowl.tier_mid_radius(tier);
         let h = bowl.tier_height(tier);
-        let mat = ctx.shared.tier_mats[tier].clone();
+        let mat = ctx.shared.tier_mats[tier % TIER_MAT_COUNT].clone();
 
         for seg in 0..TIER_SEGMENTS {
             if seg % AISLE_EVERY == 0 {
@@ -354,7 +405,15 @@ fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<
 
         // Riser face at inner edge of each tier (except ground).
         if tier > 0 {
-            let inner_r = bowl.inner_radius + tier as f32 * bowl.tier_depth - 0.08;
+            let inner_r = if bowl.is_upper_deck(tier) && tier == LOWER_TIER_COUNT {
+                bowl.upper_inner_radius() - 0.08
+            } else if bowl.is_upper_deck(tier) {
+                bowl.upper_inner_radius()
+                    + (tier - LOWER_TIER_COUNT) as f32 * bowl.tier_depth
+                    - 0.08
+            } else {
+                bowl.inner_radius + tier as f32 * bowl.tier_depth - 0.08
+            };
             for seg in 0..TIER_SEGMENTS {
                 if seg % AISLE_EVERY == 0 {
                     continue;
@@ -367,14 +426,14 @@ fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<
                     ring_segment_transform(mid, inner_r, h - riser_h * 0.5).with_scale(Vec3::new(
                         tread_arc * 0.98,
                         riser_h,
-                        0.14,
+                        0.16,
                     )),
                 ));
             }
         }
 
-        // Guard rails on upper tiers.
-        if tier >= 2 {
+        // Guard rails on mid and upper tiers.
+        if tier >= 2 && (tier % 2 == 0 || tier >= LOWER_TIER_COUNT) {
             let rail_r = mid_r - tread_radial * 0.38;
             for seg in 0..TIER_SEGMENTS {
                 if seg % AISLE_EVERY == 0 {
@@ -384,30 +443,101 @@ fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<
                 p.spawn((
                     Mesh3d(ctx.shared.unit_cuboid.clone()),
                     MeshMaterial3d(ctx.shared.rail_mat.clone()),
-                    ring_segment_transform(mid, rail_r, h + bowl.tread_thickness + 0.12)
-                        .with_scale(Vec3::new(tread_arc * 0.95, 0.16, 0.10)),
+                    ring_segment_transform(mid, rail_r, h + bowl.tread_thickness + 0.14)
+                        .with_scale(Vec3::new(tread_arc * 0.95, 0.18, 0.12)),
                 ));
             }
         }
     }
 
-    // Support columns at aisle junctions.
-    let outer = bowl.outer_radius();
-    for seg in (0..TIER_SEGMENTS).step_by(AISLE_EVERY) {
-        let a = seg as f32 / TIER_SEGMENTS as f32 * TAU;
-        let col_r = bowl.inner_radius + bowl.tier_depth * 2.5;
-        let col_h = bowl.tier_height(TIER_COUNT - 1) + bowl.tread_thickness + 1.8;
+    // Concourse ring between lower bowl and upper deck (vomitory level).
+    let concourse_r = bowl.lower_outer_radius() + bowl.upper_deck_setback * 0.42;
+    let concourse_h =
+        bowl.base_height + LOWER_TIER_COUNT as f32 * bowl.tier_rise + bowl.upper_deck_rise_gap * 0.35;
+    let concourse_arc = 2.0 * PI * concourse_r / TIER_SEGMENTS as f32 * 1.04;
+    for seg in 0..TIER_SEGMENTS {
+        if seg % AISLE_EVERY == 0 {
+            continue;
+        }
+        let mid = (seg as f32 + 0.5) / TIER_SEGMENTS as f32 * TAU;
         p.spawn((
-            Mesh3d(ctx.shared.column_mesh.clone()),
-            MeshMaterial3d(ctx.shared.column_mat.clone()),
-            Transform::from_translation(ring_position(a, col_r, col_h * 0.5))
-                .with_scale(Vec3::new(1.0, col_h, 1.0)),
+            Mesh3d(ctx.shared.unit_cuboid.clone()),
+            MeshMaterial3d(ctx.shared.concourse_mat.clone()),
+            ring_segment_transform(mid, concourse_r, concourse_h)
+                .with_scale(Vec3::new(concourse_arc, 0.28, bowl.upper_deck_setback * 0.88)),
         ));
     }
 
-    // Modest canopy ring at the top of the bowl.
-    let canopy_r = outer + 1.2;
-    let canopy_h = bowl.tier_height(TIER_COUNT - 1) + bowl.tread_thickness + 2.6;
+    // Concrete facade bulk behind the lower bowl (visible architectural mass).
+    let facade_r = bowl.lower_outer_radius() + 2.6;
+    let facade_h = bowl.base_height + LOWER_TIER_COUNT as f32 * bowl.tier_rise * 0.55;
+    let facade_arc = 2.0 * PI * facade_r / FACADE_SEGMENTS as f32 * 1.05;
+    for seg in 0..FACADE_SEGMENTS {
+        if seg % (AISLE_EVERY / 2) == 0 {
+            continue;
+        }
+        let mid = (seg as f32 + 0.5) / FACADE_SEGMENTS as f32 * TAU;
+        p.spawn((
+            Mesh3d(ctx.shared.unit_cuboid.clone()),
+            MeshMaterial3d(ctx.shared.facade_mat.clone()),
+            ring_segment_transform(mid, facade_r, facade_h * 0.5).with_scale(Vec3::new(
+                facade_arc,
+                facade_h,
+                3.8,
+            )),
+        ));
+    }
+
+    // Upper-deck rear facade (taller wall set back from the pitch).
+    let upper_facade_r = bowl.outer_radius() + 1.8;
+    let upper_facade_base =
+        bowl.base_height + LOWER_TIER_COUNT as f32 * bowl.tier_rise + bowl.upper_deck_rise_gap;
+    let upper_facade_h = UPPER_TIER_COUNT as f32 * bowl.tier_rise + 4.5;
+    let upper_facade_arc = 2.0 * PI * upper_facade_r / FACADE_SEGMENTS as f32 * 1.04;
+    for seg in 0..FACADE_SEGMENTS {
+        if seg % (AISLE_EVERY / 2) == 0 {
+            continue;
+        }
+        let mid = (seg as f32 + 0.5) / FACADE_SEGMENTS as f32 * TAU;
+        p.spawn((
+            Mesh3d(ctx.shared.unit_cuboid.clone()),
+            MeshMaterial3d(ctx.shared.facade_mat.clone()),
+            ring_segment_transform(mid, upper_facade_r, upper_facade_base + upper_facade_h * 0.5)
+                .with_scale(Vec3::new(upper_facade_arc, upper_facade_h, 4.2)),
+        ));
+    }
+
+    // Support columns at aisle junctions (lower + upper deck).
+    for seg in (0..TIER_SEGMENTS).step_by(AISLE_EVERY) {
+        let a = seg as f32 / TIER_SEGMENTS as f32 * TAU;
+        let col_r = bowl.inner_radius + bowl.tier_depth * 3.5;
+        let lower_col_h = bowl.base_height + LOWER_TIER_COUNT as f32 * bowl.tier_rise + 1.2;
+        p.spawn((
+            Mesh3d(ctx.shared.column_mesh.clone()),
+            MeshMaterial3d(ctx.shared.column_mat.clone()),
+            Transform::from_translation(ring_position(a, col_r, lower_col_h * 0.5))
+                .with_scale(Vec3::new(1.0, lower_col_h, 1.0)),
+        ));
+        let upper_col_r = bowl.upper_inner_radius() + bowl.tier_depth * 2.0;
+        let upper_col_base =
+            bowl.base_height + LOWER_TIER_COUNT as f32 * bowl.tier_rise + bowl.upper_deck_rise_gap;
+        let upper_col_h = UPPER_TIER_COUNT as f32 * bowl.tier_rise + 2.4;
+        p.spawn((
+            Mesh3d(ctx.shared.column_mesh.clone()),
+            MeshMaterial3d(ctx.shared.column_mat.clone()),
+            Transform::from_translation(ring_position(
+                a,
+                upper_col_r,
+                upper_col_base + upper_col_h * 0.5,
+            ))
+            .with_scale(Vec3::new(1.15, upper_col_h, 1.15)),
+        ));
+    }
+
+    // Roof canopy over upper deck with supporting trusses.
+    let canopy_r = bowl.outer_radius() + 2.4;
+    let canopy_h = bowl.stand_top_height() + 2.2;
+    let canopy_arc = 2.0 * PI * canopy_r / TIER_SEGMENTS as f32 * 1.06;
     for seg in 0..TIER_SEGMENTS {
         if seg % AISLE_EVERY == 0 {
             continue;
@@ -417,22 +547,103 @@ fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<
             Mesh3d(ctx.shared.unit_cuboid.clone()),
             MeshMaterial3d(ctx.shared.canopy_mat.clone()),
             ring_segment_transform(mid, canopy_r, canopy_h).with_scale(Vec3::new(
-                tread_arc * 1.05,
-                0.22,
-                2.4,
+                canopy_arc,
+                0.32,
+                4.8,
             )),
         ));
     }
+    // Truss ribs under the canopy at aisle spokes.
+    for seg in (0..TIER_SEGMENTS).step_by(AISLE_EVERY) {
+        let a = seg as f32 / TIER_SEGMENTS as f32 * TAU;
+        let truss_r = bowl.outer_radius() + 1.0;
+        let truss_len = canopy_r - truss_r;
+        let truss_mid_r = (truss_r + canopy_r) * 0.5;
+        let truss_base = bowl.stand_top_height() + 0.4;
+        let truss_h = canopy_h - truss_base;
+        p.spawn((
+            Mesh3d(ctx.shared.unit_cuboid.clone()),
+            MeshMaterial3d(ctx.shared.roof_truss_mat.clone()),
+            ring_segment_transform(a, truss_mid_r, truss_base + truss_h * 0.5)
+                .with_scale(Vec3::new(0.42, truss_h, truss_len)),
+        ));
+    }
+
+    spawn_pavilions_and_media_box(p, ctx);
+}
+
+fn spawn_pavilions_and_media_box(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) {
+    let bowl = &ctx.bowl;
+    let top = bowl.stand_top_height();
+
+    // Pavilion blocks rising above the stand line at four quadrants + two ends.
+    let pavilion_angles: [f32; 6] = [
+        0.0,
+        PI * 0.5,
+        PI,
+        PI * 1.5,
+        PI * 0.25,
+        PI * 1.25,
+    ];
+    for (i, &angle) in pavilion_angles.iter().enumerate() {
+        let r = bowl.outer_radius() + 3.5 + (i % 2) as f32 * 1.2;
+        let h = top + 4.5 + (i % 3) as f32 * 2.8;
+        let width = 8.5 + (i % 2) as f32 * 3.0;
+        let depth = 6.0 + (i % 3) as f32 * 1.5;
+        p.spawn((
+            Mesh3d(ctx.shared.unit_cuboid.clone()),
+            MeshMaterial3d(ctx.shared.pavilion_mat.clone()),
+            ring_segment_transform(angle, r, h * 0.5).with_scale(Vec3::new(width, h, depth)),
+        ));
+        // Small roof cap on each pavilion.
+        p.spawn((
+            Mesh3d(ctx.shared.unit_cuboid.clone()),
+            MeshMaterial3d(ctx.shared.canopy_mat.clone()),
+            ring_segment_transform(angle, r, h + 0.6).with_scale(Vec3::new(width * 1.08, 0.35, depth * 1.1)),
+        ));
+    }
+
+    // Media / commentary box on the main-stand side (behind bowler's end, -X).
+    let media_angle = PI;
+    let media_r = bowl.outer_radius() + 5.2;
+    let media_h = top + 6.8;
+    p.spawn((
+        Mesh3d(ctx.shared.unit_cuboid.clone()),
+        MeshMaterial3d(ctx.shared.media_box_mat.clone()),
+        ring_segment_transform(media_angle, media_r, media_h * 0.5)
+            .with_scale(Vec3::new(22.0, media_h, 5.5)),
+    ));
+    // Glazed front strip.
+    p.spawn((
+        Mesh3d(ctx.shared.unit_cuboid.clone()),
+        MeshMaterial3d(ctx.shared.board_frame_mat.clone()),
+        ring_segment_transform(media_angle, media_r - 2.2, media_h * 0.55)
+            .with_scale(Vec3::new(20.0, media_h * 0.45, 0.28)),
+    ));
 }
 
 fn spawn_floodlights(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) {
-    // ---- Floodlight towers (visible fixtures + night spotlights) ----
+    // ---- Floodlight towers integrated with stand perimeter ----
     let outer = ctx.bowl.outer_radius();
+    let stand_top = ctx.bowl.stand_top_height();
     let tower_r = floodlight_radius(outer);
-    let tower_h = 30.0;
+    let tower_h = stand_top + 22.0;
     for angle in floodlight_angles() {
         let base = ring_position(angle, tower_r, 0.0);
         let top = ring_position(angle, tower_r, tower_h);
+
+        // Pylon rises from stand roofline with a short tie-back truss to the bowl.
+        let tie_r = outer + 1.5;
+        let tie_top = ring_position(angle, tie_r, stand_top + 1.8);
+        p.spawn((
+            Mesh3d(ctx.shared.tower_truss_mesh.clone()),
+            MeshMaterial3d(ctx.shared.roof_truss_mat.clone()),
+            Transform::from_translation(
+                (top + tie_top) * 0.5 + Vec3::Y * (tower_h - stand_top) * 0.15,
+            )
+            .with_scale(Vec3::new(2.8, 1.0, 1.0))
+            .with_rotation(ring_segment_transform(angle, tower_r, tower_h).rotation),
+        ));
 
         p.spawn((
             Mesh3d(ctx.shared.tower_pole_mesh.clone()),
@@ -443,11 +654,11 @@ fn spawn_floodlights(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>
         p.spawn((
             Mesh3d(ctx.shared.tower_truss_mesh.clone()),
             MeshMaterial3d(ctx.shared.tower_mat.clone()),
-            Transform::from_translation(Vec3::new(top.x, tower_h - 0.8, top.z))
-                .with_scale(Vec3::new(3.6, 1.0, 1.0))
+            Transform::from_translation(Vec3::new(top.x, tower_h - 1.0, top.z))
+                .with_scale(Vec3::new(4.2, 1.0, 1.0))
                 .with_rotation(ring_segment_transform(angle, tower_r, tower_h).rotation),
         ));
-        for offset in [-1.35_f32, 1.35_f32] {
+        for offset in [-1.6_f32, 0.0, 1.6] {
             let tangent = ring_tangent(angle);
             let lamp_pos = top + tangent * offset;
             p.spawn((
@@ -456,24 +667,23 @@ fn spawn_floodlights(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>
                 MeshMaterial3d(ctx.shared.lamp_day_mat.clone()),
                 Transform::from_translation(lamp_pos)
                     .with_rotation(ring_segment_transform(angle, tower_r, tower_h).rotation)
-                    .with_scale(Vec3::new(1.4, 1.0, 1.0)),
+                    .with_scale(Vec3::new(1.5, 1.0, 1.0)),
             ));
         }
         // SpotLight aimed at pitch centre — hidden by day via NightEnvironmentLight.
-        // Four towers × broad beams: televised floodlit readability without flat wash.
         p.spawn((
             NightEnvironmentLight,
             SpotLight {
                 color: Color::srgb(1.0, 0.97, 0.90),
-                intensity: 9_500_000.0,
-                range: 145.0,
-                radius: 2.4,
+                intensity: 10_500_000.0,
+                range: 165.0,
+                radius: 2.6,
                 shadows_enabled: true,
-                outer_angle: 0.82,
-                inner_angle: 0.52,
+                outer_angle: 0.85,
+                inner_angle: 0.54,
                 ..default()
             },
-            Transform::from_translation(Vec3::new(top.x, tower_h - 1.2, top.z))
+            Transform::from_translation(Vec3::new(top.x, tower_h - 1.4, top.z))
                 .looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
             Visibility::Hidden,
         ));
@@ -500,7 +710,7 @@ fn spawn_crowd(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) -> u
         if crowd_segment_skipped(seg) {
             continue;
         }
-        for tier in 0..TIER_COUNT {
+        for &tier in &CROWD_TIERS {
             // Stagger each tier's seat ring so figures don't stack in radial columns.
             let tier_phase =
                 ((tier * 19 + 7) % CROWD_SEGMENTS) as f32 / CROWD_SEGMENTS as f32 * TAU;
@@ -734,7 +944,7 @@ pub fn expected_crowd_count() -> usize {
         if crowd_segment_skipped(seg) {
             continue;
         }
-        for tier in 0..TIER_COUNT {
+        for &tier in &CROWD_TIERS {
             count += crowd_seats_at(seg, tier);
         }
     }
@@ -1019,6 +1229,16 @@ mod tests {
     #[test]
     fn bowl_outer_exceeds_boundary() {
         let bowl = BowlLayout::from_boundary(65.0);
-        assert!(bowl.outer_radius() > 65.0 + 5.0);
+        // Lower + upper deck extends well beyond the rope.
+        assert!(bowl.outer_radius() > 65.0 + 25.0);
+        assert!(bowl.stand_top_height() > 14.0);
+    }
+
+    #[test]
+    fn upper_deck_set_back_from_lower() {
+        let bowl = BowlLayout::from_boundary(65.0);
+        let lower_top = bowl.tier_mid_radius(LOWER_TIER_COUNT - 1);
+        let upper_bottom = bowl.tier_mid_radius(LOWER_TIER_COUNT);
+        assert!(upper_bottom > lower_top + 2.0);
     }
 }
