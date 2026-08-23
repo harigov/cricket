@@ -6,6 +6,7 @@ pub mod player;
 pub mod ring_geometry;
 pub mod sky;
 pub mod stadium;
+pub mod stand_geometry;
 
 /// Day lighting group toggled by stadium time.
 #[derive(Component)]
