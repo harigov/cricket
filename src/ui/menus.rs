@@ -9,9 +9,25 @@ use crate::state::AppState;
 use crate::ui::theme::{
     self, MenuTransition, UiFonts, UiPreferences, UiScale, register_ui_font_assets,
 };
+use crate::game::user_bats_first_from_toss;
 use bevy::prelude::*;
 
 const OVERS_CHOICES: [u32; 3] = [5, 10, 20];
+
+/// Fixed menu panel size (scaled via [`theme::spx`]).
+pub const MENU_PANEL_WIDTH: f32 = 720.0;
+pub const MENU_PANEL_HEIGHT: f32 = 560.0;
+pub const MENU_MAIN_LEFT_PCT: f32 = 7.0;
+
+/// Team picker grid: card width, gap and columns shared by layout and navigation.
+pub const TEAM_CARD_WIDTH: f32 = 140.0;
+pub const TEAM_GRID_GAP: f32 = 10.0;
+pub const TEAM_GRID_COLUMNS: usize = 4;
+pub const TEAM_GRID_WIDTH: f32 =
+    TEAM_CARD_WIDTH * TEAM_GRID_COLUMNS as f32 + TEAM_GRID_GAP * (TEAM_GRID_COLUMNS as f32 - 1.0);
+
+const TOSS_FLIP_DURATION: f32 = 2.0;
+const TOSS_RESULT_PAUSE: f32 = 1.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -53,7 +69,10 @@ pub enum Screen {
     SetupOpp,
     SetupOvers,
     SetupStadium,
-    SetupBatFirst,
+    SetupTossFlip,
+    SetupTossResult,
+    SetupTossChoice,
+    SetupTossSummary,
     Settings,
     Bracket,
 }
@@ -68,12 +87,23 @@ pub struct MenuState {
     /// Index into stadiums; usize::MAX means "random each match".
     pub stadium_idx: usize,
     pub bat_first: bool,
+    /// WorldData team index that won the toss.
+    pub toss_winner: usize,
+    /// What the toss winner elected (bat first).
+    pub toss_elects_bat: bool,
     /// Settings screen active tab.
     pub settings_tab: SettingsTab,
-    /// Toss coin-flip animation timer (SetupBatFirst).
-    pub toss_anim: f32,
     /// true when the current setup wizard leads into a tournament.
     pub tournament_mode: bool,
+}
+
+/// Animation timers that must not trigger full menu rebuilds each frame.
+#[derive(Resource, Default)]
+struct MenuAnimTime(pub f32);
+
+#[derive(Resource, Default)]
+struct MenuRebuildState {
+    built: bool,
 }
 
 impl Default for MenuState {
@@ -86,8 +116,9 @@ impl Default for MenuState {
             overs_idx: 2,
             stadium_idx: usize::MAX,
             bat_first: true,
+            toss_winner: 0,
+            toss_elects_bat: true,
             settings_tab: SettingsTab::Audio,
-            toss_anim: 0.0,
             tournament_mode: false,
         }
     }
@@ -110,6 +141,10 @@ struct MenuBackdrop {
     main: Handle<Image>,
     secondary: Handle<Image>,
 }
+#[derive(Component)]
+struct MenuFadeOverlay;
+#[derive(Component)]
+struct MenuCoinLabel;
 
 pub struct MenusPlugin;
 
@@ -121,6 +156,8 @@ impl Plugin for MenusPlugin {
         bevy::asset::embedded_asset!(app, "../../assets/ui/menu-stadium.png");
         register_ui_font_assets(app);
         app.init_resource::<MenuState>()
+            .init_resource::<MenuAnimTime>()
+            .init_resource::<MenuRebuildState>()
             .init_resource::<CurrentTournament>()
             .init_resource::<ActiveFixture>()
             .add_systems(OnEnter(AppState::Menu), spawn_menu_root)
@@ -129,7 +166,8 @@ impl Plugin for MenusPlugin {
                 Update,
                 (
                     sync_ui_scale,
-                    tick_toss_anim,
+                    tick_menu_anim,
+                    update_menu_animations,
                     refresh_menu,
                     handle_menu_input,
                     handle_match_exit,
@@ -143,11 +181,58 @@ fn sync_ui_scale(prefs: Res<UiPreferences>, mut scale: ResMut<UiScale>) {
     scale.0 = prefs.ui_scale.clamp(0.75, 1.5);
 }
 
-fn tick_toss_anim(time: Res<Time>, mut ms: ResMut<MenuState>) {
-    if ms.screen == Screen::SetupBatFirst {
-        ms.toss_anim += time.delta_secs();
+fn tick_menu_anim(time: Res<Time>, mut anim: ResMut<MenuAnimTime>, mut ms: ResMut<MenuState>) {
+    match ms.screen {
+        Screen::SetupTossFlip => {
+            anim.0 += time.delta_secs();
+            if anim.0 >= TOSS_FLIP_DURATION {
+                ms.screen = Screen::SetupTossResult;
+                anim.0 = 0.0;
+            }
+        }
+        Screen::SetupTossResult => {
+            anim.0 += time.delta_secs();
+            if anim.0 >= TOSS_RESULT_PAUSE {
+                ms.screen = Screen::SetupTossChoice;
+                anim.0 = 0.0;
+                if ms.toss_winner != ms.team {
+                    ms.toss_elects_bat = ai_toss_election();
+                    ms.bat_first = user_bats_first_from_toss(ms.team, ms.toss_winner, ms.toss_elects_bat);
+                } else {
+                    ms.sel = 0;
+                }
+            }
+        }
+        _ => anim.0 = 0.0,
+    }
+}
+
+fn ai_toss_election() -> bool {
+    rand::random::<f32>() < 0.58
+}
+
+fn update_menu_animations(
+    anim: Res<MenuAnimTime>,
+    ms: Res<MenuState>,
+    trans: Res<MenuTransition>,
+    mut coin_q: Query<&mut Text, With<MenuCoinLabel>>,
+    mut fade_q: Query<&mut BackgroundColor, With<MenuFadeOverlay>>,
+) {
+    if ms.screen == Screen::SetupTossFlip {
+        let flip = (anim.0 * 8.0).sin();
+        let coin_side = if flip > 0.0 { "HEADS" } else { "TAILS" };
+        for mut text in coin_q.iter_mut() {
+            **text = format!("Coin: {coin_side}");
+        }
+    }
+
+    let fade = if trans.active {
+        (trans.t / 0.28).min(1.0)
     } else {
-        ms.toss_anim = 0.0;
+        0.0
+    };
+    for mut bg in fade_q.iter_mut() {
+        bg.0 = Color::srgba(0.02, 0.05, 0.04, fade * 0.55);
     }
 }
 
@@ -160,7 +245,12 @@ fn trigger_screen_transition(trans: &mut MenuTransition, _screen: Screen) {
 // UI construction (immediate-mode style rebuild each frame)
 // ---------------------------------------------------------------------------
 
-fn spawn_menu_root(mut commands: Commands, assets: Res<AssetServer>) {
+fn spawn_menu_root(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut built: ResMut<MenuRebuildState>,
+) {
+    built.built = false;
     info!("MENU ROOT SPAWNED");
     commands
         .spawn((
@@ -215,10 +305,24 @@ fn spawn_menu_root(mut commands: Commands, assets: Res<AssetServer>) {
                     flex_direction: FlexDirection::Column,
                     border: UiRect::all(px(1)),
                     border_radius: BorderRadius::all(px(8)),
+                    overflow: Overflow::clip(),
                     ..default()
                 },
                 BackgroundColor(Color::srgba(0.015, 0.035, 0.028, 0.90)),
                 BorderColor::all(Color::srgba(0.72, 0.82, 0.56, 0.28)),
+            ));
+            p.spawn((
+                MenuFadeOverlay,
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: percent(100),
+                    height: percent(100),
+                    left: px(0),
+                    top: px(0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.02, 0.05, 0.04, 0.0)),
+                ZIndex(20),
             ));
         });
 }
@@ -236,7 +340,8 @@ fn screen_title(ms: &MenuState) -> &'static str {
         Screen::SetupOpp => "SELECT OPPONENT",
         Screen::SetupOvers => "MATCH LENGTH",
         Screen::SetupStadium => "SELECT STADIUM",
-        Screen::SetupBatFirst => "TOSS",
+        Screen::SetupTossFlip | Screen::SetupTossResult | Screen::SetupTossChoice => "TOSS",
+        Screen::SetupTossSummary => "MATCH PREVIEW",
         Screen::Settings => "SETTINGS",
         Screen::Bracket => "TOURNAMENT BRACKET",
     }
@@ -249,7 +354,10 @@ fn screen_kicker(ms: &MenuState) -> &'static str {
         Screen::SetupOpp => "MATCH SETUP  /  02",
         Screen::SetupOvers => "MATCH SETUP  /  03",
         Screen::SetupStadium => "MATCH SETUP  /  04",
-        Screen::SetupBatFirst => "MATCH SETUP  /  05",
+        Screen::SetupTossFlip
+        | Screen::SetupTossResult
+        | Screen::SetupTossChoice
+        | Screen::SetupTossSummary => "MATCH SETUP  /  05",
         Screen::Settings => "AUDIO & CONTROLS",
         Screen::Bracket => "KNOCKOUT CHAMPIONSHIP",
     }
@@ -283,7 +391,10 @@ fn screen_items(
             .map(|s| format!("{} — {} [{}]", s.name, s.city, s.pitch.label()))
             .chain(std::iter::once("Random venue".into()))
             .collect(),
-        Screen::SetupBatFirst => vec!["We will BAT first".into(), "We will BOWL first".into()],
+        Screen::SetupTossFlip
+        | Screen::SetupTossResult
+        | Screen::SetupTossChoice
+        | Screen::SetupTossSummary => Vec::new(),
         Screen::Settings => settings_lines(ms.settings_tab, bindings, audio, rebind, ui),
         Screen::Bracket => bracket_lines(ct),
     }
@@ -429,23 +540,29 @@ fn bracket_lines(ct: &CurrentTournament) -> Vec<String> {
 // Per-frame UI refresh
 // ---------------------------------------------------------------------------
 
-fn apply_menu_root_layout(root_node: &mut Node, is_main: bool) {
+fn apply_menu_root_layout(root_node: &mut Node, is_main: bool, scale: f32) {
+    let w = MENU_PANEL_WIDTH * scale;
+    let h = MENU_PANEL_HEIGHT * scale;
+    root_node.position_type = PositionType::Absolute;
+    root_node.width = px(w);
+    root_node.height = px(h);
+    root_node.min_width = px(w);
+    root_node.min_height = px(h);
+    root_node.max_width = px(w);
+    root_node.max_height = px(h);
+    root_node.top = percent(50);
+    root_node.margin = UiRect::new(px(0.0), px(-h * 0.5), px(0.0), px(0.0));
     if is_main {
-        root_node.left = percent(7);
-        root_node.top = percent(17);
-        root_node.width = px(470);
-        root_node.max_height = percent(72);
-        root_node.padding = UiRect::axes(px(34), px(30));
+        root_node.left = percent(MENU_MAIN_LEFT_PCT);
+        root_node.padding = UiRect::axes(px(34.0 * scale), px(30.0 * scale));
         root_node.align_items = AlignItems::Stretch;
-        root_node.row_gap = px(9);
+        root_node.row_gap = px(9.0 * scale);
     } else {
-        root_node.left = percent(16);
-        root_node.top = percent(6);
-        root_node.width = percent(68);
-        root_node.max_height = percent(88);
-        root_node.padding = UiRect::axes(px(30), px(20));
+        root_node.left = percent(50);
+        root_node.margin = UiRect::new(px(-w * 0.5), px(-h * 0.5), px(0.0), px(0.0));
+        root_node.padding = UiRect::axes(px(30.0 * scale), px(20.0 * scale));
         root_node.align_items = AlignItems::Center;
-        root_node.row_gap = px(6);
+        root_node.row_gap = px(6.0 * scale);
     }
 }
 
@@ -578,7 +695,13 @@ fn spawn_menu_item_rows(
         {
             continue;
         }
-        if ms.screen == Screen::SetupBatFirst && i < 2 {
+        if matches!(
+            ms.screen,
+            Screen::SetupTossFlip
+                | Screen::SetupTossResult
+                | Screen::SetupTossChoice
+                | Screen::SetupTossSummary
+        ) {
             continue;
         }
         let selectable = !matches!(ms.screen, Screen::Bracket);
@@ -737,6 +860,13 @@ fn spawn_menu_footer_hint(
     }
     let hint = if ms.screen == Screen::Settings {
         "Q / E  SWITCH TAB     W / S  NAVIGATE     SPACE  SELECT     ESC  BACK"
+    } else if ms.screen == Screen::SetupTossSummary {
+        "PRESS SPACE TO CONTINUE     ESC  BACK"
+    } else if matches!(
+        ms.screen,
+        Screen::SetupTossFlip | Screen::SetupTossResult | Screen::SetupTossChoice
+    ) {
+        "← / →  CHOOSE     SPACE  CONFIRM     ESC  BACK"
     } else {
         "W / S  NAVIGATE     SPACE  SELECT     ESC  BACK"
     };
@@ -755,37 +885,40 @@ fn spawn_menu_footer_hint(
     ));
 }
 
-fn spawn_menu_transition_overlay(parent: &mut ChildSpawnerCommands, fade: f32) {
-    if fade <= 0.0 {
-        return;
-    }
-    parent.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            width: percent(100),
-            height: percent(100),
-            left: px(0),
-            top: px(0),
-            ..default()
-        },
-        BackgroundColor(Color::srgba(0.02, 0.05, 0.04, fade * 0.55)),
-    ));
+fn menu_content_dirty(
+    built: &MenuRebuildState,
+    ms: &Res<MenuState>,
+    ct: &Res<CurrentTournament>,
+    bindings: &Res<KeyBindings>,
+    audio: &Res<AudioSettings>,
+    rebind: &Res<RebindState>,
+    ui_prefs: &Res<UiPreferences>,
+    ui_scale: &Res<UiScale>,
+) -> bool {
+    !built.built
+        || ms.is_changed()
+        || ct.is_changed()
+        || bindings.is_changed()
+        || audio.is_changed()
+        || rebind.is_changed()
+        || ui_prefs.is_changed()
+        || ui_scale.is_changed()
 }
 
 fn refresh_menu(
     ms: Res<MenuState>,
     wd: Res<WorldData>,
-    mut ct: ResMut<CurrentTournament>,
+    ct: Res<CurrentTournament>,
     bindings: Res<KeyBindings>,
     audio: Res<AudioSettings>,
     rebind: Res<RebindState>,
     ui_prefs: Res<UiPreferences>,
     ui_scale: Res<UiScale>,
-    trans: Res<MenuTransition>,
     assets: Res<AssetServer>,
     mut root_q: Query<(Entity, &mut Node, &UiFonts), With<MenuList>>,
     mut backdrop_q: Query<(&mut ImageNode, &MenuBackdrop)>,
     children_q: Query<&Children>,
+    mut built: ResMut<MenuRebuildState>,
     mut commands: Commands,
 ) {
     let Ok((root, mut root_node, fonts)) = root_q.single_mut() else {
@@ -793,34 +926,47 @@ fn refresh_menu(
     };
     let is_main = ms.screen == Screen::Main;
     let scale = ui_scale.0;
-    let fade = if trans.active {
-        (trans.t / 0.28).min(1.0)
-    } else {
-        0.0
-    };
+    let dirty = menu_content_dirty(
+        &built,
+        &ms,
+        &ct,
+        &bindings,
+        &audio,
+        &rebind,
+        &ui_prefs,
+        &ui_scale,
+    );
 
-    if let Ok((mut image, art)) = backdrop_q.single_mut() {
-        image.image = if is_main {
-            art.main.clone()
-        } else {
-            art.secondary.clone()
-        };
+    if ms.is_changed() || ui_scale.is_changed() {
+        if let Ok((mut image, art)) = backdrop_q.single_mut() {
+            image.image = if is_main {
+                art.main.clone()
+            } else {
+                art.secondary.clone()
+            };
+        }
+        apply_menu_root_layout(&mut root_node, is_main, scale);
     }
 
-    apply_menu_root_layout(&mut root_node, is_main);
+    if !dirty {
+        return;
+    }
+
     clear_menu_rows(&mut commands, root, &children_q);
-    auto_advance_bracket_draw(&ms, &mut ct);
 
     commands.entity(root).with_children(|p| {
         spawn_menu_header_block(p, &ms, fonts, is_main);
 
         p.spawn((Node {
             flex_direction: FlexDirection::Column,
+            flex_grow: 1.0,
             align_items: if is_main {
                 AlignItems::Stretch
             } else {
                 AlignItems::Center
             },
+            justify_content: JustifyContent::Center,
+            overflow: Overflow::clip(),
             row_gap: theme::spx(
                 if ms.screen == Screen::Settings {
                     3.0
@@ -829,7 +975,8 @@ fn refresh_menu(
                 },
                 scale,
             ),
-            width: if is_main { percent(100) } else { auto() },
+            width: percent(100),
+            min_height: px(0.0),
             margin: UiRect::vertical(theme::spx(if is_main { 10.0 } else { 4.0 }, scale)),
             ..default()
         },))
@@ -844,7 +991,10 @@ fn refresh_menu(
                         | Screen::SetupOpp
                         | Screen::SetupStadium
                         | Screen::SetupOvers
-                        | Screen::SetupBatFirst
+                        | Screen::SetupTossFlip
+                        | Screen::SetupTossResult
+                        | Screen::SetupTossChoice
+                        | Screen::SetupTossSummary
                 ) {
                     spawn_setup_visuals(items, &ms, &wd, &assets, fonts, scale, &ui_prefs);
                 }
@@ -859,8 +1009,9 @@ fn refresh_menu(
             });
 
         spawn_menu_footer_hint(p, &ms, fonts, scale);
-        spawn_menu_transition_overlay(p, fade);
     });
+
+    built.built = true;
 }
 
 /// Layout variant for [`spawn_setup_card`].
@@ -1067,6 +1218,72 @@ fn spawn_setup_card(
 }
 
 /// Rich setup presentation: team crest cards, stadium info, toss sequence.
+fn team_picker_indices(screen: Screen, user_team: usize, team_count: usize) -> Vec<usize> {
+    if screen == Screen::SetupOpp {
+        (0..team_count).filter(|i| *i != user_team).collect()
+    } else {
+        (0..team_count).collect()
+    }
+}
+
+fn spawn_toss_crest_row(
+    parent: &mut ChildSpawnerCommands,
+    assets: &AssetServer,
+    fonts: &UiFonts,
+    user: &crate::core::teams::Team,
+    opp: &crate::core::teams::Team,
+    scale: f32,
+) {
+    parent
+        .spawn((Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: theme::spx(24.0, scale),
+            ..default()
+        },))
+        .with_children(|versus| {
+            for team in [user, opp] {
+                versus
+                    .spawn((Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },))
+                    .with_children(|side| {
+                        side.spawn((
+                            ImageNode::new(crate::render::load_team_crest(
+                                assets,
+                                &team.crest_asset(),
+                            )),
+                            Node {
+                                width: theme::spx(64.0, scale),
+                                height: theme::spx(64.0, scale),
+                                ..default()
+                            },
+                        ));
+                        side.spawn((
+                            Text::new(team.short.to_uppercase()),
+                            TextFont {
+                                font: fonts.bold.clone(),
+                                font_size: 16.0 * scale,
+                                ..default()
+                            },
+                            TextColor(team.primary_color),
+                        ));
+                    });
+            }
+            versus.spawn((
+                Text::new("VS"),
+                TextFont {
+                    font: fonts.display.clone(),
+                    font_size: 22.0 * scale,
+                    ..default()
+                },
+                TextColor(Color::srgba(0.85, 0.85, 0.85, 0.65)),
+            ));
+        });
+}
+
 fn spawn_setup_visuals(
     parent: &mut ChildSpawnerCommands,
     ms: &MenuState,
@@ -1079,23 +1296,22 @@ fn spawn_setup_visuals(
     let hc = ui_prefs.high_contrast;
     match ms.screen {
         Screen::SetupTeam | Screen::SetupOpp => {
+            let indices = team_picker_indices(ms.screen, ms.team, wd.teams.len());
             parent
                 .spawn((Node {
                     flex_direction: FlexDirection::Row,
                     flex_wrap: FlexWrap::Wrap,
-                    width: theme::spx(620.0, scale),
-                    column_gap: theme::spx(10.0, scale),
-                    row_gap: theme::spx(10.0, scale),
+                    width: theme::spx(TEAM_GRID_WIDTH, scale),
+                    column_gap: theme::spx(TEAM_GRID_GAP, scale),
+                    row_gap: theme::spx(TEAM_GRID_GAP, scale),
                     justify_content: JustifyContent::Center,
                     margin: UiRect::bottom(theme::spx(8.0, scale)),
                     ..default()
                 },))
                 .with_children(|grid| {
-                    for (i, team) in wd.teams.iter().enumerate() {
-                        if ms.screen == Screen::SetupOpp && i == ms.team {
-                            continue;
-                        }
-                        let selected = i == ms.sel;
+                    for (sel_idx, team_idx) in indices.iter().enumerate() {
+                        let team = &wd.teams[*team_idx];
+                        let selected = sel_idx == ms.sel;
                         let crest = crate::render::load_team_crest(assets, &team.crest_asset());
                         spawn_setup_card(
                             grid,
@@ -1142,6 +1358,8 @@ fn spawn_setup_visuals(
                     flex_direction: FlexDirection::Column,
                     row_gap: theme::spx(8.0, scale),
                     width: theme::spx(560.0, scale),
+                    max_height: theme::spx(320.0, scale),
+                    overflow: Overflow::clip(),
                     margin: UiRect::bottom(theme::spx(8.0, scale)),
                     ..default()
                 },))
@@ -1176,10 +1394,9 @@ fn spawn_setup_visuals(
                     }
                 });
         }
-        Screen::SetupBatFirst => {
+        Screen::SetupTossFlip => {
             let user = &wd.teams[ms.team];
             let opp = &wd.teams[ms.opp];
-            let flip = (ms.toss_anim * 8.0).sin();
             parent
                 .spawn((Node {
                     flex_direction: FlexDirection::Column,
@@ -1189,68 +1406,147 @@ fn spawn_setup_visuals(
                     ..default()
                 },))
                 .with_children(|toss| {
+                    spawn_toss_crest_row(toss, assets, fonts, user, opp, scale);
                     toss.spawn((
-                        Text::new("TOSS"),
+                        MenuCoinLabel,
+                        Text::new("Coin: HEADS"),
+                        TextFont {
+                            font: fonts.bold.clone(),
+                            font_size: 13.0 * scale,
+                            ..default()
+                        },
+                        TextColor(theme::palette::text_muted()),
+                    ));
+                    toss.spawn((
+                        Text::new("FLIPPING..."),
                         TextFont {
                             font: fonts.display.clone(),
-                            font_size: 28.0 * scale,
+                            font_size: 20.0 * scale,
                             ..default()
                         },
                         TextColor(theme::palette::gold()),
                     ));
-                    toss.spawn((Node {
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        column_gap: theme::spx(24.0, scale),
-                        ..default()
-                    },))
-                        .with_children(|versus| {
-                            for team in [user, opp] {
-                                versus
-                                    .spawn((Node {
-                                        flex_direction: FlexDirection::Column,
-                                        align_items: AlignItems::Center,
-                                        ..default()
-                                    },))
-                                    .with_children(|side| {
-                                        side.spawn((
-                                            ImageNode::new(crate::render::load_team_crest(
-                                                assets,
-                                                &team.crest_asset(),
-                                            )),
-                                            Node {
-                                                width: theme::spx(64.0, scale),
-                                                height: theme::spx(64.0, scale),
-                                                ..default()
-                                            },
-                                        ));
-                                        side.spawn((
-                                            Text::new(team.short.to_uppercase()),
-                                            TextFont {
-                                                font: fonts.bold.clone(),
-                                                font_size: 16.0 * scale,
-                                                ..default()
-                                            },
-                                            TextColor(team.primary_color),
-                                        ));
-                                    });
-                            }
-                            versus.spawn((
-                                Text::new("VS"),
-                                TextFont {
-                                    font: fonts.display.clone(),
-                                    font_size: 22.0 * scale,
-                                    ..default()
-                                },
-                                TextColor(Color::srgba(0.85, 0.85, 0.85, 0.65)),
-                            ));
-                        });
-                    let coin_side = if flip > 0.0 { "HEADS" } else { "TAILS" };
+                });
+        }
+        Screen::SetupTossResult => {
+            let user = &wd.teams[ms.team];
+            let opp = &wd.teams[ms.opp];
+            let winner = &wd.teams[ms.toss_winner];
+            parent
+                .spawn((Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: theme::spx(12.0, scale),
+                    margin: UiRect::bottom(theme::spx(12.0, scale)),
+                    ..default()
+                },))
+                .with_children(|toss| {
+                    spawn_toss_crest_row(toss, assets, fonts, user, opp, scale);
                     toss.spawn((
-                        Text::new(format!("Coin: {coin_side}")),
+                        Text::new(format!("{} WINS THE TOSS", winner.name.to_uppercase())),
+                        TextFont {
+                            font: fonts.display.clone(),
+                            font_size: 24.0 * scale,
+                            ..default()
+                        },
+                        TextColor(theme::palette::gold()),
+                        TextShadow {
+                            offset: Vec2::new(0.0, 2.0),
+                            color: Color::srgba(0.0, 0.0, 0.0, 0.55),
+                        },
+                    ));
+                });
+        }
+        Screen::SetupTossChoice => {
+            let user_won = ms.toss_winner == ms.team;
+            parent
+                .spawn((Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: theme::spx(10.0, scale),
+                    margin: UiRect::bottom(theme::spx(12.0, scale)),
+                    ..default()
+                },))
+                .with_children(|choice| {
+                    let winner = &wd.teams[ms.toss_winner];
+                    let prompt = if user_won {
+                        format!("{} WON — ELECT TO", winner.name.to_uppercase())
+                    } else {
+                        format!("{} ELECTED TO", winner.name.to_uppercase())
+                    };
+                    choice.spawn((
+                        Text::new(prompt),
                         TextFont {
                             font: fonts.bold.clone(),
-                            font_size: 13.0 * scale,
+                            font_size: 14.0 * scale,
+                            ..default()
+                        },
+                        TextColor(theme::palette::text_muted()),
+                    ));
+                    choice
+                        .spawn((Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: theme::spx(16.0, scale),
+                            ..default()
+                        },))
+                        .with_children(|row| {
+                            for (i, label) in ["BAT", "BOWL"].iter().enumerate() {
+                                let selected = if user_won {
+                                    i == ms.sel
+                                } else {
+                                    i == usize::from(!ms.toss_elects_bat)
+                                };
+                                spawn_setup_card(
+                                    row,
+                                    fonts,
+                                    SetupCardStyle::Overs { scale },
+                                    label,
+                                    Some("FIRST"),
+                                    None,
+                                    None,
+                                    selected,
+                                );
+                            }
+                        });
+                });
+        }
+        Screen::SetupTossSummary => {
+            let user = &wd.teams[ms.team];
+            let opp = &wd.teams[ms.opp];
+            let winner = &wd.teams[ms.toss_winner];
+            let choice = if ms.toss_elects_bat { "BAT" } else { "BOWL" };
+            parent
+                .spawn((Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: theme::spx(14.0, scale),
+                    margin: UiRect::bottom(theme::spx(12.0, scale)),
+                    ..default()
+                },))
+                .with_children(|summary| {
+                    spawn_toss_crest_row(summary, assets, fonts, user, opp, scale);
+                    summary.spawn((
+                        Text::new(format!(
+                            "{} WON THE TOSS AND ELECTED TO {}",
+                            winner.name.to_uppercase(),
+                            choice
+                        )),
+                        TextFont {
+                            font: fonts.display.clone(),
+                            font_size: 22.0 * scale,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.97, 0.98, 0.94)),
+                        TextShadow {
+                            offset: Vec2::new(0.0, 2.0),
+                            color: Color::srgba(0.0, 0.0, 0.0, 0.55),
+                        },
+                    ));
+                    summary.spawn((
+                        Text::new("PRESS SPACE TO CONTINUE"),
+                        TextFont {
+                            font: fonts.bold.clone(),
+                            font_size: 12.0 * scale,
                             ..default()
                         },
                         TextColor(theme::palette::text_muted()),
@@ -1422,7 +1718,7 @@ fn handle_setup_team_input(
     wd: &WorldData,
     ct: &mut CurrentTournament,
 ) {
-    navigate_list(input, &mut ms.sel, wd.teams.len());
+    navigate_grid(input, &mut ms.sel, wd.teams.len(), TEAM_GRID_COLUMNS);
     if input.pressed(Action::Confirm) {
         ms.team = ms.sel;
         if ms.tournament_mode {
@@ -1435,7 +1731,11 @@ fn handle_setup_team_input(
                 ms.opp = (ms.team + 1) % wd.teams.len();
             }
             ms.screen = Screen::SetupOpp;
-            ms.sel = ms.opp;
+            let indices = team_picker_indices(Screen::SetupOpp, ms.team, wd.teams.len());
+            ms.sel = indices
+                .iter()
+                .position(|&i| i == ms.opp)
+                .unwrap_or(0);
         }
     }
     if input.pressed(Action::Cancel) {
@@ -1444,14 +1744,10 @@ fn handle_setup_team_input(
 }
 
 fn handle_setup_opp_input(ms: &mut MenuState, input: &PlayerInput, wd: &WorldData) {
-    navigate_list(input, &mut ms.sel, wd.teams.len() - 1);
-    let effective = if ms.sel >= ms.team {
-        ms.sel + 1
-    } else {
-        ms.sel
-    };
+    let indices = team_picker_indices(Screen::SetupOpp, ms.team, wd.teams.len());
+    navigate_grid(input, &mut ms.sel, indices.len(), TEAM_GRID_COLUMNS);
     if input.pressed(Action::Confirm) {
-        ms.opp = effective;
+        ms.opp = indices[ms.sel];
         ms.screen = Screen::SetupOvers;
         ms.sel = ms.overs_idx;
     }
@@ -1462,7 +1758,7 @@ fn handle_setup_opp_input(ms: &mut MenuState, input: &PlayerInput, wd: &WorldDat
 }
 
 fn handle_setup_overs_input(ms: &mut MenuState, input: &PlayerInput, wd: &WorldData) {
-    navigate_list(input, &mut ms.sel, OVERS_CHOICES.len());
+    navigate_horizontal_row(input, &mut ms.sel, OVERS_CHOICES.len());
     if input.pressed(Action::Confirm) {
         ms.overs_idx = ms.sel;
         ms.screen = Screen::SetupStadium;
@@ -1475,15 +1771,14 @@ fn handle_setup_overs_input(ms: &mut MenuState, input: &PlayerInput, wd: &WorldD
 }
 
 fn handle_setup_stadium_input(ms: &mut MenuState, input: &PlayerInput, wd: &WorldData) {
-    navigate_list(input, &mut ms.sel, wd.stadiums.len() + 1);
+    navigate_vertical_list(input, &mut ms.sel, wd.stadiums.len() + 1);
     if input.pressed(Action::Confirm) {
         ms.stadium_idx = if ms.sel >= wd.stadiums.len() {
             usize::MAX
         } else {
             ms.sel
         };
-        ms.screen = Screen::SetupBatFirst;
-        ms.sel = usize::from(!ms.bat_first);
+        begin_toss(ms);
     }
     if input.pressed(Action::Cancel) {
         ms.screen = Screen::SetupOvers;
@@ -1491,21 +1786,61 @@ fn handle_setup_stadium_input(ms: &mut MenuState, input: &PlayerInput, wd: &Worl
     }
 }
 
-fn handle_setup_bat_first_input(
+fn stadium_menu_sel(stadium_idx: usize, stadium_count: usize) -> usize {
+    if stadium_idx == usize::MAX {
+        stadium_count
+    } else {
+        stadium_idx
+    }
+}
+
+fn begin_toss(ms: &mut MenuState) {
+    let user_wins = rand::random::<bool>();
+    ms.toss_winner = if user_wins { ms.team } else { ms.opp };
+    ms.toss_elects_bat = false;
+    ms.screen = Screen::SetupTossFlip;
+    ms.sel = 0;
+}
+
+fn handle_setup_toss_choice_input(ms: &mut MenuState, input: &PlayerInput, wd: &WorldData) {
+    let user_won = ms.toss_winner == ms.team;
+    if user_won {
+        navigate_horizontal_row(input, &mut ms.sel, 2);
+        if input.pressed(Action::Confirm) {
+            ms.toss_elects_bat = ms.sel == 0;
+            ms.bat_first =
+                user_bats_first_from_toss(ms.team, ms.toss_winner, ms.toss_elects_bat);
+            ms.screen = Screen::SetupTossSummary;
+        }
+    } else if input.pressed(Action::Confirm) {
+        ms.screen = Screen::SetupTossSummary;
+    }
+    if input.pressed(Action::Cancel) {
+        ms.screen = Screen::SetupStadium;
+        ms.sel = stadium_menu_sel(ms.stadium_idx, wd.stadiums.len());
+    }
+}
+
+fn handle_setup_toss_summary_input(
     ms: &mut MenuState,
     input: &PlayerInput,
     wd: &WorldData,
     commands: &mut Commands,
     next_state: &mut NextState<AppState>,
 ) {
-    navigate_list(input, &mut ms.sel, 2);
     if input.pressed(Action::Confirm) {
-        ms.bat_first = ms.sel == 0;
         start_quick_match(ms, wd, commands, next_state);
     }
     if input.pressed(Action::Cancel) {
         ms.screen = Screen::SetupStadium;
-        ms.sel = ms.stadium_idx.min(wd.stadiums.len());
+        ms.sel = stadium_menu_sel(ms.stadium_idx, wd.stadiums.len());
+    }
+}
+
+fn handle_setup_toss_back(ms: &mut MenuState, input: &PlayerInput, wd: &WorldData) {
+    if input.pressed(Action::Cancel) {
+        ms.screen = Screen::SetupStadium;
+        ms.sel = stadium_menu_sel(ms.stadium_idx, wd.stadiums.len());
     }
 }
 
@@ -1518,6 +1853,7 @@ fn handle_bracket_input(
     commands: &mut Commands,
     next_state: &mut NextState<AppState>,
 ) {
+    auto_advance_bracket_draw(ms, ct);
     if input.pressed(Action::Cancel) {
         back_to_main(ms);
         ct.0 = None;
@@ -1574,8 +1910,18 @@ fn handle_menu_input(
         Screen::SetupOpp => handle_setup_opp_input(&mut ms, &input, &wd),
         Screen::SetupOvers => handle_setup_overs_input(&mut ms, &input, &wd),
         Screen::SetupStadium => handle_setup_stadium_input(&mut ms, &input, &wd),
-        Screen::SetupBatFirst => {
-            handle_setup_bat_first_input(&mut ms, &input, &wd, &mut commands, &mut next_state)
+        Screen::SetupTossFlip | Screen::SetupTossResult => {
+            handle_setup_toss_back(&mut ms, &input, &wd);
+        }
+        Screen::SetupTossChoice => handle_setup_toss_choice_input(&mut ms, &input, &wd),
+        Screen::SetupTossSummary => {
+            handle_setup_toss_summary_input(
+                &mut ms,
+                &input,
+                &wd,
+                &mut commands,
+                &mut next_state,
+            )
         }
         Screen::Bracket => handle_bracket_input(
             &mut ms,
@@ -1587,6 +1933,59 @@ fn handle_menu_input(
             &mut next_state,
         ),
     }
+}
+
+fn grid_row_len(count: usize, cols: usize, row: usize) -> usize {
+    let start = row * cols;
+    if start >= count {
+        return 0;
+    }
+    cols.min(count - start)
+}
+
+fn navigate_grid(input: &PlayerInput, sel: &mut usize, count: usize, cols: usize) {
+    if count == 0 {
+        return;
+    }
+    let cols = cols.max(1);
+    let rows = (count + cols - 1) / cols;
+    let row = *sel / cols;
+    let col = *sel % cols;
+
+    if input.pressed(Action::Right) {
+        let len = grid_row_len(count, cols, row);
+        if len > 0 {
+            let new_col = (col + 1) % len;
+            *sel = row * cols + new_col;
+        }
+    }
+    if input.pressed(Action::Left) {
+        let len = grid_row_len(count, cols, row);
+        if len > 0 {
+            let new_col = (col + len - 1) % len;
+            *sel = row * cols + new_col;
+        }
+    }
+    if input.pressed(Action::Next) {
+        let new_row = (row + 1) % rows;
+        let len = grid_row_len(count, cols, new_row);
+        let new_col = col.min(len.saturating_sub(1));
+        *sel = new_row * cols + new_col;
+    }
+    if input.pressed(Action::Prev) {
+        let new_row = (row + rows - 1) % rows;
+        let len = grid_row_len(count, cols, new_row);
+        let new_col = col.min(len.saturating_sub(1));
+        *sel = new_row * cols + new_col;
+    }
+}
+
+fn navigate_horizontal_row(input: &PlayerInput, sel: &mut usize, count: usize) {
+    navigate_grid(input, sel, count, count.max(1));
+}
+
+fn navigate_vertical_list(input: &PlayerInput, sel: &mut usize, count: usize) {
+    navigate_list(input, sel, count);
 }
 
 fn navigate_list(input: &PlayerInput, sel: &mut usize, max: usize) {
@@ -1607,7 +2006,8 @@ fn screen_item_count(ms: &MenuState, wd: &WorldData) -> usize {
         Screen::SetupTeam | Screen::SetupOpp => wd.teams.len(),
         Screen::SetupOvers => OVERS_CHOICES.len(),
         Screen::SetupStadium => wd.stadiums.len() + 1,
-        Screen::SetupBatFirst => 2,
+        Screen::SetupTossChoice => 2,
+        Screen::SetupTossFlip | Screen::SetupTossResult | Screen::SetupTossSummary => 0,
         Screen::Settings => settings_item_count(ms.settings_tab),
         Screen::Bracket => 0,
     }
@@ -1751,4 +2151,60 @@ pub fn handle_match_exit(
 fn cleanup_after_match(commands: &mut Commands, af: &mut ActiveFixture) {
     af.0 = None;
     commands.remove_resource::<ActiveMatch>();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nav_grid(sel: usize, count: usize, cols: usize, action: Action) -> usize {
+        let mut sel = sel;
+        let input = PlayerInput {
+            just_pressed: vec![action],
+            ..Default::default()
+        };
+        navigate_grid(&input, &mut sel, count, cols);
+        sel
+    }
+
+    #[test]
+    fn grid_right_moves_within_row() {
+        assert_eq!(nav_grid(0, 10, TEAM_GRID_COLUMNS, Action::Right), 1);
+        assert_eq!(nav_grid(3, 10, TEAM_GRID_COLUMNS, Action::Right), 0);
+    }
+
+    #[test]
+    fn grid_down_moves_one_row() {
+        assert_eq!(nav_grid(1, 10, TEAM_GRID_COLUMNS, Action::Next), 5);
+        assert_eq!(nav_grid(5, 10, TEAM_GRID_COLUMNS, Action::Prev), 1);
+    }
+
+    #[test]
+    fn grid_wraps_partial_last_row() {
+        assert_eq!(nav_grid(8, 10, TEAM_GRID_COLUMNS, Action::Right), 9);
+        assert_eq!(nav_grid(9, 10, TEAM_GRID_COLUMNS, Action::Right), 8);
+    }
+
+    #[test]
+    fn opposition_picker_indices_skip_user_team() {
+        let indices = team_picker_indices(Screen::SetupOpp, 3, 10);
+        assert_eq!(indices.len(), 9);
+        assert!(!indices.contains(&3));
+        assert_eq!(indices[3], 4);
+    }
+
+    #[test]
+    fn opposition_selection_matches_compacted_index() {
+        let indices = team_picker_indices(Screen::SetupOpp, 3, 10);
+        let sel = 4;
+        assert_eq!(indices[sel], 5);
+    }
+
+    #[test]
+    fn toss_election_maps_to_user_bats_first() {
+        assert!(user_bats_first_from_toss(1, 1, true));
+        assert!(!user_bats_first_from_toss(1, 1, false));
+        assert!(!user_bats_first_from_toss(1, 4, true));
+        assert!(user_bats_first_from_toss(1, 4, false));
+    }
 }
