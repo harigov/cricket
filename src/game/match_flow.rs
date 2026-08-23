@@ -398,7 +398,7 @@ pub fn sys_match_intro(
         }
     }
 
-    scene.cam.mode = CamMode::Broadcast;
+    scene.cam.mode = CamMode::MatchIntro;
 
     if match_intro_should_finish(elapsed, duration, input.pressed(Action::Confirm)) {
         enter_ready(&mut commands, &mut phase.0);
@@ -2028,7 +2028,7 @@ pub fn sys_camera_modes(
             replay.active = false;
         }
         PhaseEnum::MatchIntro { .. } => {
-            rig.mode = CamMode::Broadcast;
+            rig.mode = CamMode::MatchIntro;
             replay.active = false;
         }
         _ => {} // ready/aim/runup set their own mode in sys_ready

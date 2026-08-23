@@ -16,6 +16,12 @@ const BATTING_CAM_BEHIND_BATSMAN_M: f32 = 3.048;
 const BATTING_CAM_LOOK_X: f32 = 2.0;
 /// Aim height, near the strip so the lens tilts down enough to frame the striker.
 const BATTING_CAM_LOOK_Y: f32 = 0.35;
+
+/// Opening walk-on lens: side-on to the square, close enough that the batters
+/// read as people rather than specks (the establishing shot sits ~230 m out).
+const INTRO_CAM_SIDE: f32 = 34.0;
+const INTRO_CAM_HEIGHT: f32 = 11.0;
+const INTRO_CAM_BACK: f32 = 12.0;
 /// Vertical FOV. The 10 ft standoff is short, so framing the striker *and* the
 /// bowler 30 m away needs a wide lens - wider than the establishing shot.
 const BATTING_CAM_FOV_DEG: f32 = 60.0;
@@ -48,6 +54,8 @@ pub enum CamMode {
     BoundaryCam,
     /// Slow-motion side-on replay.
     ReplaySide,
+    /// Cinematic side-on lens for the opening walk-on.
+    MatchIntro,
 }
 
 impl CamMode {
@@ -151,6 +159,11 @@ pub fn mode_view(
             let pos_flat = dir * (boundary_r + 6.0);
             (Vec3::new(pos_flat.x, 2.3, pos_flat.y), b, 28.0)
         }
+        CamMode::MatchIntro => (
+            Vec3::new(INTRO_CAM_BACK, INTRO_CAM_HEIGHT, INTRO_CAM_SIDE),
+            Vec3::new(0.0, 1.2, 0.0),
+            40.0,
+        ),
         CamMode::ReplaySide => {
             // Side-on medium lens following the recorded flight.
             let focus = replay_pos.unwrap_or(Vec3::new(geometry::BATSMAN_POS.x, 1.0, 0.0));
