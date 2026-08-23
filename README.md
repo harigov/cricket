@@ -127,6 +127,24 @@ sudo apt install libxkbcommon-dev libudev-dev
 sudo dnf install libudev-devel
 ```
 
+If your distro ships `libudev.so.1` but no `libudev.pc` (so `cargo build`
+fails in `libudev-sys` with "The system library `libudev` was not found"),
+either install the `-dev` package above or point `PKG_CONFIG_PATH` at a
+small shim:
+
+```bash
+SHIM="$HOME/.local/share/willow-cricket/udev"
+mkdir -p "$SHIM/pkgconfig" "$SHIM/lib"
+ln -sf /usr/lib/x86_64-linux-gnu/libudev.so.1 "$SHIM/lib/libudev.so"
+printf 'Name: libudev\nDescription: shim\nVersion: 252\nLibs: -L%s/lib -ludev\nCflags:\n' "$SHIM" \
+  > "$SHIM/pkgconfig/libudev.pc"
+mkdir -p .cargo && printf '[env]\nPKG_CONFIG_PATH = "%s/pkgconfig"\n' "$SHIM" > .cargo/config.toml
+```
+
+`.cargo/config.toml` is intentionally untracked because the path is
+machine-specific — but without it the build fails, so recreate it on a new
+checkout.
+
 Windows and macOS need no extra system dependencies — `cargo build`
 handles everything.
 
