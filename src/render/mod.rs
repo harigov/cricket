@@ -166,6 +166,15 @@ pub struct ImportedProp;
 #[derive(Component)]
 pub struct PropMaterialFixed;
 
+/// Imported materials already corrected.
+///
+/// glTF materials are shared by every instance of a model, so this has to be
+/// keyed by the material and not by the mesh that led us to it: with a hundred
+/// pines on screen, a per-mesh guard still re-corrects the one shared foliage
+/// material a hundred times, and the albedo compounds to black.
+#[derive(Resource, Default)]
+pub struct RetunedPropMaterials(std::collections::HashSet<AssetId<StandardMaterial>>);
+
 /// A prop mesh not yet de-metallised: entity plus its imported material.
 type UnfixedPropMesh<'a> = (Entity, &'a MeshMaterial3d<StandardMaterial>);
 /// Only mesh entities we have not already visited.
@@ -189,6 +198,7 @@ pub fn retune_imported_prop_materials(
     parents: Query<&ChildOf>,
     meshes: Query<UnfixedPropMesh, UnfixedPropMeshFilter>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut done: ResMut<RetunedPropMaterials>,
 ) {
     for (entity, mat_handle) in &meshes {
         let mut current = parents.get(entity).ok().map(ChildOf::parent);
@@ -202,6 +212,10 @@ pub fn retune_imported_prop_materials(
             current = parents.get(parent).ok().map(ChildOf::parent);
         }
         if !is_prop {
+            continue;
+        }
+        commands.entity(entity).insert(PropMaterialFixed);
+        if !done.0.insert(mat_handle.0.id()) {
             continue;
         }
         if let Some(material) = materials.get_mut(&mat_handle.0) {
@@ -223,7 +237,6 @@ pub fn retune_imported_prop_materials(
                     Color::linear_rgba(albedo[0] * k, albedo[1] * k, albedo[2] * k, srgb.alpha);
             }
         }
-        commands.entity(entity).insert(PropMaterialFixed);
     }
 }
 
@@ -243,6 +256,7 @@ impl Plugin for RenderPlugin {
         );
         // Shared mocap locomotion graph (idle/run) for every figure.
         player::build_locomotion_clips(app);
+        app.init_resource::<RetunedPropMaterials>();
         app.add_systems(
             Update,
             (
