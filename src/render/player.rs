@@ -190,8 +190,8 @@ const SCENE_GROUND_Y: f32 = -FOOT_BIND_Y;
 /// Mixamo hips rest translation in armature space (metres, after glTF scale).
 const HIPS_BIND_TRANSLATION: Vec3 = Vec3::new(0.0, 1.039_914_7, 0.020_760_939);
 
-/// Imported Xbot root faces **-X** in world space when Y rotation is zero.
-pub const MODEL_FORWARD_XZ: Vec2 = Vec2::new(-1.0, 0.0);
+/// Imported Xbot root faces **+Z** in world space when Y rotation is zero.
+pub const MODEL_FORWARD_XZ: Vec2 = Vec2::new(0.0, 1.0);
 
 #[derive(Component)]
 pub struct KitStyled;
@@ -748,7 +748,7 @@ pub fn attach_animation_players(
 }
 
 pub fn yaw_to_face(dir: Vec2) -> f32 {
-    dir.y.atan2(-dir.x)
+    dir.x.atan2(dir.y)
 }
 
 /// Y-axis rotation (radians) for a figure at `from` to face `to` in XZ.
@@ -1187,26 +1187,59 @@ mod tests {
     fn face_target_striker_faces_bowler_end() {
         let bowler_end = Vec2::new(-10.0, 0.0);
         let yaw = face_target(Vec2::new(9.0, -0.15), bowler_end);
-        assert!(yaw.abs() < 0.05, "striker yaw {yaw}");
+        assert!(
+            (yaw + std::f32::consts::FRAC_PI_2).abs() < 0.1,
+            "striker should face bowler's end (-X), got {yaw}"
+        );
     }
 
     #[test]
     fn face_target_bowler_faces_striker() {
         let yaw = face_target(Vec2::new(-18.0, 0.35), Vec2::new(9.0, -0.15));
         assert!(
-            yaw.abs() > 2.9,
-            "bowler should face down the pitch, got {yaw}"
+            (yaw - std::f32::consts::FRAC_PI_2).abs() < 0.1,
+            "bowler should face down the pitch (+X), got {yaw}"
         );
     }
 
     #[test]
-    fn yaw_to_face_minus_x_is_zero() {
-        assert!(yaw_to_face(Vec2::new(-1.0, 0.0)).abs() < 1e-5);
+    fn yaw_to_face_plus_z_is_zero() {
+        assert!(yaw_to_face(Vec2::new(0.0, 1.0)).abs() < 1e-5);
     }
 
     #[test]
     fn model_forward_matches_identity_yaw() {
         assert!(yaw_to_face(MODEL_FORWARD_XZ).abs() < 1e-5);
+    }
+
+    /// `Quat::from_rotation_y(yaw)` applied to [`MODEL_FORWARD_XZ`] must recover `dir`.
+    fn rotate_model_forward(yaw: f32) -> Vec2 {
+        let f = MODEL_FORWARD_XZ;
+        Vec2::new(
+            f.x * yaw.cos() + f.y * yaw.sin(),
+            -f.x * yaw.sin() + f.y * yaw.cos(),
+        )
+    }
+
+    #[test]
+    fn yaw_to_face_round_trips_model_forward() {
+        let dirs = [
+            Vec2::new(1.0, 0.0),
+            Vec2::new(-1.0, 0.0),
+            Vec2::new(0.0, 1.0),
+            Vec2::new(0.0, -1.0),
+            Vec2::new(3.0, 4.0),
+            Vec2::new(-12.0, 5.0),
+        ];
+        for dir in dirs {
+            let yaw = yaw_to_face(dir);
+            let out = rotate_model_forward(yaw);
+            let want = dir.normalize();
+            assert!(
+                (out - want).length() < 1e-5,
+                "dir {dir:?} -> yaw {yaw} -> {out:?}, want {want:?}"
+            );
+        }
     }
 
     #[test]
