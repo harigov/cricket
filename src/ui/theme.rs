@@ -90,6 +90,41 @@ pub fn spx(n: f32, scale: f32) -> Val {
     px(n * scale)
 }
 
+/// Design-pixel height multiplied by UI scale (for scroll math).
+pub fn scaled_px(n: f32, scale: f32) -> f32 {
+    n * scale
+}
+
+/// Scroll offset so the row at `selected` lies fully inside the viewport.
+///
+/// `row_height`, `row_gap` and `viewport_height` must all be in the same
+/// (scaled) pixel space. Returns 0 when the list fits without scrolling.
+pub fn list_scroll_offset(
+    selected: usize,
+    row_height: f32,
+    row_gap: f32,
+    viewport_height: f32,
+    item_count: usize,
+) -> f32 {
+    if item_count == 0 || viewport_height <= 0.0 {
+        return 0.0;
+    }
+    let stride = row_height + row_gap;
+    let content_height =
+        row_height * item_count as f32 + row_gap * item_count.saturating_sub(1) as f32;
+    let max_offset = (content_height - viewport_height).max(0.0);
+    if max_offset <= 0.0 {
+        return 0.0;
+    }
+    let row_top = selected as f32 * stride;
+    let row_bottom = row_top + row_height;
+    let mut offset = row_top.min(max_offset);
+    if row_bottom - offset > viewport_height {
+        offset = (row_bottom - viewport_height).clamp(0.0, max_offset);
+    }
+    offset
+}
+
 /// Willow broadcast palette — used consistently across menus and HUD.
 pub mod palette {
     use bevy::prelude::Color;
@@ -167,6 +202,17 @@ pub mod palette {
     }
     pub fn wicket_red() -> Color {
         Color::srgba(0.92, 0.14, 0.18, 0.94)
+    }
+
+    // ---- Scrollable menu lists ----
+    pub fn scroll_edge_fade() -> Color {
+        Color::srgba(0.015, 0.035, 0.028, 0.90)
+    }
+    pub fn scroll_track() -> Color {
+        Color::srgba(0.10, 0.12, 0.14, 0.55)
+    }
+    pub fn scroll_thumb() -> Color {
+        Color::srgba(0.84, 0.70, 0.29, 0.65)
     }
 }
 
