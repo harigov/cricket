@@ -491,10 +491,11 @@ impl ColorRamp {
 /// Dry beach sand. Shared by the coastal ground and the islands off it so one
 /// material reads the same at both distances.
 ///
-/// The blue channel is held well down: the apron is seen at a grazing angle
-/// from the broadcast lens, where Fresnel lifts the sky's own colour off it,
-/// and sand with any blue left in it goes khaki under that sheen.
-const BEACH_SAND: [f32; 3] = [0.81, 0.74, 0.42];
+/// Warm but only a third saturated: a beach is a pale, slightly bleached tan,
+/// and taking more blue out of it than this — which the earlier passes did to
+/// fight the sky's sheen on the apron — turns the whole coast khaki. The sheen
+/// belongs to the material, and `retint_ground` takes it off there instead.
+const BEACH_SAND: [f32; 3] = [0.83, 0.75, 0.53];
 
 /// Grass, bare rock, then snow above the snow line.
 ///
