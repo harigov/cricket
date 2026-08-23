@@ -155,6 +155,23 @@ fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
+/// Inverse of [`srgb_to_linear`] for tests and debug readback.
+fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn linear_rgb_to_srgb(rgb: [f32; 3]) -> [f32; 3] {
+    [
+        linear_to_srgb(rgb[0]),
+        linear_to_srgb(rgb[1]),
+        linear_to_srgb(rgb[2]),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Deterministic kit placement
 // ---------------------------------------------------------------------------
@@ -325,16 +342,41 @@ fn clamp_radius(pos: Vec3, inner: f32, outer: f32) -> Vec3 {
 /// Landforms are the bulk of the geometry out here, and Bevy exposes no
 /// instancing, so each one is merged into a single mesh and drawn once.
 ///
-/// Colours go in screen-referred and come out as albedo: doing the [`day_albedo`]
-/// conversion here, at the one place vertices are written, is what keeps every
-/// palette in this module readable and stops a colour being converted twice.
+/// Colours go in screen-referred. Lit meshes convert through [`day_albedo`] here,
+/// at the one place vertices are written; unlit meshes store linear screen colour
+/// directly so nothing is inverted twice.
 #[derive(Default)]
 pub(crate) struct ColorMesh {
+    /// When true, vertex colours are final screen values in linear space — no
+    /// [`day_albedo`]. Used for distant backdrop rings whose real key light
+    /// never reaches the faces the camera sees.
+    unlit: bool,
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
     colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
+}
+
+impl ColorMesh {
+    fn unlit() -> Self {
+        Self {
+            unlit: true,
+            ..Default::default()
+        }
+    }
+
+    fn encode_vertex(&self, srgb: [f32; 3]) -> [f32; 3] {
+        if self.unlit {
+            [
+                srgb_to_linear(srgb[0]),
+                srgb_to_linear(srgb[1]),
+                srgb_to_linear(srgb[2]),
+            ]
+        } else {
+            day_albedo(srgb)
+        }
+    }
 }
 
 impl ColorMesh {
@@ -352,7 +394,7 @@ impl ColorMesh {
             self.positions.push(corners[i].to_array());
             self.normals.push(normal);
             self.uvs.push(UVS[i]);
-            let c = day_albedo(colors[i]);
+            let c = self.encode_vertex(colors[i]);
             self.colors.push([c[0], c[1], c[2], 1.0]);
         }
         self.indices
@@ -370,7 +412,7 @@ impl ColorMesh {
             .unwrap_or(Vec3::Y)
             .to_array();
         let base = self.positions.len() as u32;
-        let albedo = day_albedo(rgb);
+        let albedo = self.encode_vertex(rgb);
         for (i, corner) in corners.iter().enumerate() {
             self.positions.push(corner.to_array());
             self.normals.push(normal);
@@ -468,6 +510,7 @@ impl ColorMesh {
 }
 
 /// Height-keyed colour ramp; stops must be ordered by height fraction.
+#[derive(Clone, Copy)]
 pub(crate) struct ColorRamp(&'static [(f32, [f32; 3])]);
 
 impl ColorRamp {
@@ -543,6 +586,55 @@ const ISLAND_RAMP: ColorRamp = ColorRamp(&[
 // Landforms
 // ---------------------------------------------------------------------------
 
+/// Fixed key for baking form onto backdrop rings. High and warm, from roughly
+/// the stadium side — the faces the camera actually sees are inner slopes that
+/// the real sun never lights, so this is a display light, not the scene sun.
+const BACKDROP_LIGHT: Vec3 = Vec3::new(0.34, 0.90, 0.12);
+
+/// How much a backdrop ring dissolves into its horizon colour. `aerial` is the
+/// ring's place in the annulus (0 = nearest, 1 = rim).
+fn backdrop_haze(aerial: f32) -> f32 {
+    0.10 + smoothstep(aerial.clamp(0.0, 1.0)) * 0.38
+}
+
+/// Lambert term for [`BACKDROP_LIGHT`], biased so creases still read in haze.
+fn backdrop_shade(normal: Vec3) -> f32 {
+    let n = normal.try_normalize().unwrap_or(Vec3::Y);
+    let ndotl = n.dot(BACKDROP_LIGHT.normalize()).max(0.0);
+    0.38 + 0.62 * ndotl
+}
+
+/// Screen colour for one vertex on an unlit backdrop ring: ramp, baked form, haze.
+fn backdrop_vertex_color(
+    height: f32,
+    ramp_height: f32,
+    ramp: ColorRamp,
+    horizon: [f32; 3],
+    aerial: f32,
+    normal: Vec3,
+) -> [f32; 3] {
+    let height_frac = height / ramp_height.max(1e-3);
+    let base = ramp.sample(height_frac);
+    let shade = backdrop_shade(normal);
+    let shaded = [base[0] * shade, base[1] * shade, base[2] * shade];
+    // Snow caps keep most of their value — washing them into the sky is what
+    // turned the back range into a grey band.
+    let snow_mask = smoothstep((height_frac - 0.64) / 0.10);
+    let haze = backdrop_haze(aerial) * (1.0 - snow_mask * 0.92);
+    let mut color = lerp_rgb(shaded, horizon, haze);
+    if height_frac > 0.66 {
+        let snow = ramp.sample(height_frac);
+        // Snow keeps most of the ramp value — shade is for rock form, not
+        // flattening caps that have to beat the sky.
+        color = [
+            color[0].max(snow[0] * 0.92),
+            color[1].max(snow[1] * 0.92),
+            color[2].max(snow[2] * 0.92),
+        ];
+    }
+    color
+}
+
 /// Value noise around a ring, wrapping seamlessly at the join.
 fn ring_noise(seg: usize, segments: usize, periods: usize, seed: u32) -> f32 {
     let t = seg as f32 / segments as f32 * periods as f32;
@@ -577,6 +669,10 @@ pub(crate) struct RidgeSpec {
     /// shares one, so the snow line (or the rock banding) is a height in the
     /// world rather than a fraction of each individual ridge.
     pub(crate) ramp_height: f32,
+    /// Screen colour of the sky at the horizon — aerial perspective target.
+    pub(crate) horizon: [f32; 3],
+    /// Place in the annulus (0 = nearest ring, 1 = rim) for haze strength.
+    pub(crate) aerial: f32,
     pub(crate) seed: u32,
     pub(crate) ramp: ColorRamp,
 }
@@ -598,10 +694,12 @@ impl RidgeSpec {
 }
 
 /// Build one ridge ring as a single flat-shaded mesh.
+///
+/// Backdrop rings are unlit: vertex colours carry baked form, the snow line,
+/// and aerial perspective so they read the same regardless of the scene key.
 pub(crate) fn ridge_mesh(spec: &RidgeSpec) -> Mesh {
-    let mut mesh = ColorMesh::default();
+    let mut mesh = ColorMesh::unlit();
     let top_half = spec.half_width * spec.plateau.max(0.02);
-    let colour = |y: f32| spec.ramp.sample(y / spec.ramp_height.max(1e-3));
 
     // Four ground-plane offsets from the crest: outer foot, top edges, inner
     // foot. Walking them in order makes every band wind the same way, so the
@@ -637,6 +735,17 @@ pub(crate) fn ridge_mesh(spec: &RidgeSpec) -> Mesh {
             let b = point(a1, c1, near_off, h1 * near_h);
             let c = point(a1, c1, far_off, h1 * far_h);
             let d = point(a0, c0, far_off, h0 * far_h);
+            let normal = (b - a).cross(d - a).try_normalize().unwrap_or(Vec3::Y);
+            let colour = |y: f32| {
+                backdrop_vertex_color(
+                    y,
+                    spec.ramp_height,
+                    spec.ramp,
+                    spec.horizon,
+                    spec.aerial,
+                    normal,
+                )
+            };
             mesh.quad(
                 [a, b, c, d],
                 [colour(a.y), colour(b.y), colour(c.y), colour(d.y)],
@@ -1177,12 +1286,12 @@ pub(crate) fn theme_landforms(
         // parallax; only the back one carries snow, because they all read the
         // colour ramp against the same summit altitude.
         StadiumEnvironment::Alpine => [
-            (0.26_f32, 78.0_f32, 46.0_f32, 90.0_f32, 2503_u32),
-            (0.55, 96.0, 70.0, 150.0, 2609),
-            (0.74, 84.0, 110.0, ALPINE_SUMMIT, 2711),
+            (0.26_f32, 78.0_f32, 46.0_f32, 90.0_f32, 0.08_f32, 2503_u32),
+            (0.55, 96.0, 70.0, 150.0, 0.42, 2609),
+            (0.74, 84.0, 110.0, ALPINE_SUMMIT, 0.72, 2711),
         ]
         .iter()
-        .map(|&(t, width, min_h, max_h, seed)| {
+        .map(|&(t, width, min_h, max_h, aerial, seed)| {
             (
                 ridge_mesh(&RidgeSpec {
                     segments: 96,
@@ -1193,11 +1302,13 @@ pub(crate) fn theme_landforms(
                     plateau: 0.06,
                     terraces: 0,
                     ramp_height: ALPINE_SUMMIT,
+                    horizon,
+                    aerial,
                     seed,
                     ramp: ALPINE_RAMP,
                 }),
                 Transform::IDENTITY,
-                LandformSurface::Terrain,
+                LandformSurface::Backdrop,
             )
         })
         .collect(),
@@ -1249,11 +1360,13 @@ pub(crate) fn theme_landforms(
                     plateau: 0.45,
                     terraces: 0,
                     ramp_height: 26.0,
+                    horizon,
+                    aerial: 0.78,
                     seed: 4409,
                     ramp: TREELINE_RAMP,
                 }),
                 Transform::IDENTITY,
-                LandformSurface::Terrain,
+                LandformSurface::Backdrop,
             ),
             (
                 church_mesh(),
@@ -1264,11 +1377,13 @@ pub(crate) fn theme_landforms(
         // Flat-topped and terraced, with the rock banding read against a shared
         // altitude so the beds line up between the near and far mesas.
         StadiumEnvironment::Desert => [
-            (0.42_f32, 74.0_f32, 22.0_f32, 52.0_f32, 5303_u32, 4_usize),
-            (0.70, 92.0, 40.0, MESA_CAPROCK, 5407, 5),
+            (
+                0.42_f32, 74.0_f32, 22.0_f32, 52.0_f32, 0.22_f32, 5303_u32, 4_usize,
+            ),
+            (0.70, 92.0, 40.0, MESA_CAPROCK, 0.58, 5407, 5),
         ]
         .iter()
-        .map(|&(t, width, min_h, max_h, seed, terraces)| {
+        .map(|&(t, width, min_h, max_h, aerial, seed, terraces)| {
             (
                 ridge_mesh(&RidgeSpec {
                     segments: 84,
@@ -1279,11 +1394,13 @@ pub(crate) fn theme_landforms(
                     plateau: 0.72,
                     terraces,
                     ramp_height: MESA_CAPROCK,
+                    horizon,
+                    aerial,
                     seed,
                     ramp: MESA_RAMP,
                 }),
                 Transform::IDENTITY,
-                LandformSurface::Terrain,
+                LandformSurface::Backdrop,
             )
         })
         .collect(),
@@ -1293,7 +1410,10 @@ pub(crate) fn theme_landforms(
 /// Which shared material a landform is drawn with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LandformSurface {
+    /// Lit vertex-coloured mesh (islands, skyline, hedges).
     Terrain,
+    /// Unlit backdrop ring with baked screen colour in the mesh.
+    Backdrop,
     Water,
 }
 
@@ -1406,11 +1526,16 @@ fn spawn_landforms(
     if landforms.is_empty() {
         return;
     }
-    // Two shared materials cover every landform; the colour lives in the mesh.
+    // Three shared materials: lit terrain, unlit backdrop rings, lit water.
     let terrain = ctx.materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.95,
         reflectance: 0.16,
+        ..default()
+    });
+    let backdrop = ctx.materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        unlit: true,
         ..default()
     });
     let water = ctx.materials.add(StandardMaterial {
@@ -1426,6 +1551,7 @@ fn spawn_landforms(
     for (mesh, transform, surface) in landforms {
         let material = match surface {
             LandformSurface::Terrain => terrain.clone(),
+            LandformSurface::Backdrop => backdrop.clone(),
             LandformSurface::Water => water.clone(),
         };
         p.spawn((
@@ -1695,6 +1821,7 @@ mod tests {
 
     #[test]
     fn ridge_mesh_is_deterministic_and_bounded() {
+        let horizon = sky_horizon_color(StadiumEnvironment::Alpine, false);
         let spec = RidgeSpec {
             segments: 48,
             crest_radius: 300.0,
@@ -1704,6 +1831,8 @@ mod tests {
             plateau: 0.1,
             terraces: 0,
             ramp_height: 120.0,
+            horizon,
+            aerial: 0.5,
             seed: 17,
             ramp: ALPINE_RAMP,
         };
@@ -1727,13 +1856,11 @@ mod tests {
     #[test]
     fn only_the_high_range_wears_snow() {
         let ranges = theme_landforms(StadiumEnvironment::Alpine, &layout());
-        // Snow is counted by what it comes out as on screen: as an albedo it is
-        // a sixth of that, because the exposure gives most of it back.
         let snow_fraction = |mesh: &Mesh| {
             let colors = mesh_colors(mesh);
             let white = colors
                 .iter()
-                .map(|c| rendered_srgb([c[0], c[1], c[2]]))
+                .map(|c| linear_rgb_to_srgb([c[0], c[1], c[2]]))
                 .filter(|s| s[0] > 0.8 && s[1] > 0.8 && s[2] > 0.8)
                 .count();
             white as f32 / colors.len() as f32
@@ -1752,6 +1879,74 @@ mod tests {
     }
 
     #[test]
+    fn further_backdrop_sits_closer_to_the_horizon() {
+        let horizon = sky_horizon_color(StadiumEnvironment::Desert, false);
+        let mean_horizon_distance = |mesh: &Mesh| {
+            let colors = mesh_colors(mesh);
+            colors
+                .iter()
+                .map(|c| {
+                    let s = linear_rgb_to_srgb([c[0], c[1], c[2]]);
+                    (luma(s) - luma(horizon)).abs()
+                })
+                .sum::<f32>()
+                / colors.len() as f32
+        };
+        let mesas = theme_landforms(StadiumEnvironment::Desert, &layout());
+        let near = mean_horizon_distance(&mesas[0].0);
+        let far = mean_horizon_distance(&mesas[1].0);
+        assert!(
+            far < near,
+            "far {:.3} should hug the horizon more than near {:.3}",
+            far,
+            near
+        );
+    }
+
+    #[test]
+    fn backdrop_vertex_color_bakes_snow_above_rock() {
+        let horizon = sky_horizon_color(StadiumEnvironment::Alpine, false);
+        let rock = backdrop_vertex_color(
+            100.0,
+            ALPINE_SUMMIT,
+            ALPINE_RAMP,
+            horizon,
+            0.5,
+            Vec3::new(-0.4, 0.7, 0.2),
+        );
+        let snow = backdrop_vertex_color(
+            190.0,
+            ALPINE_SUMMIT,
+            ALPINE_RAMP,
+            horizon,
+            0.5,
+            Vec3::new(-0.4, 0.7, 0.2),
+        );
+        assert!(
+            luma(snow) > luma(rock) + 0.15,
+            "rock {rock:?} vs snow {snow:?}"
+        );
+        assert!(
+            snow.iter().all(|c| *c > 1.0),
+            "snow caps should out-run the sky: {snow:?}"
+        );
+        assert!(
+            luma(snow) > luma(horizon) + 0.12,
+            "snow {snow:?} should beat horizon {horizon:?}"
+        );
+    }
+
+    #[test]
+    fn backdrop_haze_increases_with_aerial() {
+        assert!(backdrop_haze(0.0) < backdrop_haze(1.0));
+        assert!(
+            backdrop_haze(1.0) < 0.5,
+            "haze of {} dissolves silhouette",
+            backdrop_haze(1.0)
+        );
+    }
+
+    #[test]
     fn mesa_terraces_flatten_the_tops() {
         let spec = RidgeSpec {
             segments: 96,
@@ -1762,6 +1957,8 @@ mod tests {
             plateau: 0.7,
             terraces: 4,
             ramp_height: 60.0,
+            horizon: sky_horizon_color(StadiumEnvironment::Desert, false),
+            aerial: 0.4,
             seed: 23,
             ramp: MESA_RAMP,
         };
