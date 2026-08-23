@@ -5,8 +5,9 @@ use crate::core::stadiums::Stadium;
 use crate::core::teams::Team;
 use crate::render::outfield_grass::{self, MOW_BAND_COUNT};
 use crate::render::ring_geometry::{
-    floodlight_angles, floodlight_radius, ring_face_center_rotation, ring_position,
-    ring_segment_transform, ring_tangent, stadium_ground_half_extent,
+    floodlight_angles, floodlight_radius, ring_band_specs, ring_boxes_mesh,
+    ring_face_center_rotation, ring_position, ring_segment_transform, ring_tangent,
+    ring_tube_mesh, stadium_ground_disc_mesh, stadium_ground_radius,
 };
 use crate::render::{FloodlightFixture, FloodlightMaterials, NightEnvironmentLight};
 use bevy::gltf::GltfAssetLabel;
@@ -130,6 +131,8 @@ struct SharedStadiumAssets {
     sponsor_mats: Vec<Handle<StandardMaterial>>,
     grass_tex: Handle<Image>,
     grass_mesh: Handle<Mesh>,
+    stump_cylinder_mesh: Handle<Mesh>,
+    stump_bail_mesh: Handle<Mesh>,
 }
 
 fn build_shared_assets(
@@ -173,7 +176,7 @@ fn build_shared_assets(
         facade_mat: materials.add(mat(Color::srgb_u8(0x6A, 0x6E, 0x74))),
         concourse_mat: materials.add(mat(Color::srgb_u8(0x8A, 0x8E, 0x92))),
         apron_mat: materials.add(StandardMaterial {
-            base_color: Color::srgb_u8(0x6E, 0x6C, 0x64),
+            base_color: Color::WHITE,
             perceptual_roughness: 0.94,
             reflectance: 0.28,
             ..default()
@@ -203,6 +206,8 @@ fn build_shared_assets(
         ],
         grass_tex: images.add(crate::render::create_outfield_grass_image()),
         grass_mesh: meshes.add(Plane3d::default().mesh().size(1.0, 1.0).subdivisions(4)),
+        stump_cylinder_mesh: meshes.add(Cylinder::new(0.02, geo::STUMP_HEIGHT)),
+        stump_bail_mesh: meshes.add(Cuboid::new(0.03, 0.02, STUMP_GAP * 2.0)),
     }
 }
 
@@ -217,8 +222,19 @@ struct StadiumBuildCtx<'a> {
     outfield_base: Color,
     batting_crest_mat: Handle<StandardMaterial>,
     fielding_crest_mat: Handle<StandardMaterial>,
-    pitch_mat: StandardMaterial,
-    pitch_worn_mat: StandardMaterial,
+    apron_disc_mesh: Handle<Mesh>,
+    rope_ring_mesh: Handle<Mesh>,
+    pitch_mesh: Handle<Mesh>,
+    pitch_worn_mesh: Handle<Mesh>,
+    crease_line_mesh: Handle<Mesh>,
+    crease_cross_mesh: Handle<Mesh>,
+    pitch_mat: Handle<StandardMaterial>,
+    pitch_worn_mat: Handle<StandardMaterial>,
+    mow_band_mats: Vec<Handle<StandardMaterial>>,
+}
+
+fn track_spawn(spawn_count: &mut usize) {
+    *spawn_count += 1;
 }
 
 fn crowd_segment_skipped(seg: usize) -> bool {
@@ -229,18 +245,25 @@ fn crowd_seats_at(seg: usize, tier: usize) -> usize {
     1 + (seg * 7 + tier * 11).is_multiple_of(3) as usize
 }
 
-fn spawn_stadium_apron(p: &mut ChildSpawnerCommands, ctx: &StadiumBuildCtx<'_>) {
-    // Neutral apron/concourse under and beyond the stands (not mown outfield grass).
-    let half = stadium_ground_half_extent(ctx.bowl.outer_radius());
-    let span = half * 2.0;
+fn spawn_stadium_apron(
+    p: &mut ChildSpawnerCommands,
+    ctx: &StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
+    // Circular apron with radial fade — reads as continuous ground, not a finite slab.
     p.spawn((
-        Mesh3d(ctx.shared.grass_mesh.clone()),
+        Mesh3d(ctx.apron_disc_mesh.clone()),
         MeshMaterial3d(ctx.shared.apron_mat.clone()),
-        Transform::from_translation(Vec3::ZERO).with_scale(Vec3::new(span, 1.0, span)),
+        Transform::from_translation(Vec3::new(0.0, -0.002, 0.0)),
     ));
+    track_spawn(spawn_count);
 }
 
-fn spawn_outfield_bands(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) {
+fn spawn_outfield_bands(
+    p: &mut ChildSpawnerCommands,
+    ctx: &StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
     // Outfield grass bands (shared mesh + texture).
     let r = ctx.stadium.boundary_radius() + 6.0;
     let span = r * 2.05;
@@ -249,93 +272,74 @@ fn spawn_outfield_bands(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<
     for band in 0..MOW_BAND_COUNT {
         let x_min = -half_span + band as f32 * band_width;
         let x_center = x_min + band_width / 2.0;
-        let grass_mat = StandardMaterial {
-            base_color: outfield_grass::tinted_mow_band_color(ctx.outfield_base, band),
-            base_color_texture: Some(ctx.shared.grass_tex.clone()),
-            perceptual_roughness: 0.88,
-            metallic: 0.0,
-            reflectance: 0.42,
-            uv_transform: outfield_grass::strip_uv_transform(span, band_width, x_min),
-            ..default()
-        };
         p.spawn((
             Mesh3d(ctx.shared.grass_mesh.clone()),
-            MeshMaterial3d(ctx.materials.add(grass_mat)),
+            MeshMaterial3d(ctx.mow_band_mats[band as usize].clone()),
             Transform::from_translation(Vec3::new(x_center, 0.01, 0.0))
                 .with_scale(Vec3::new(band_width, 1.0, span)),
         ));
+        track_spawn(spawn_count);
     }
 }
 
-fn spawn_pitch_and_creases(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) {
+fn spawn_pitch_and_creases(
+    p: &mut ChildSpawnerCommands,
+    ctx: &StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
     // Pitch
     p.spawn((
-        Mesh3d(
-            ctx.meshes.add(
-                Plane3d::default()
-                    .mesh()
-                    .size(geo::PITCH_LENGTH + 2.0, geo::PITCH_WIDTH),
-            ),
-        ),
-        MeshMaterial3d(ctx.materials.add(StandardMaterial {
-            base_color: Color::srgb_u8(0xC8, 0xA9, 0x7A),
-            perceptual_roughness: 0.85,
-            ..ctx.pitch_mat.clone()
-        })),
+        Mesh3d(ctx.pitch_mesh.clone()),
+        MeshMaterial3d(ctx.pitch_mat.clone()),
         Transform::from_translation(Vec3::Y * 0.05),
     ));
+    track_spawn(spawn_count);
     p.spawn((
-        Mesh3d(
-            ctx.meshes.add(
-                Plane3d::default()
-                    .mesh()
-                    .size(geo::PITCH_LENGTH + 1.0, geo::PITCH_WIDTH * 0.35),
-            ),
-        ),
-        MeshMaterial3d(ctx.materials.add(ctx.pitch_worn_mat.clone())),
+        Mesh3d(ctx.pitch_worn_mesh.clone()),
+        MeshMaterial3d(ctx.pitch_worn_mat.clone()),
         Transform::from_translation(Vec3::Y * 0.06),
     ));
+    track_spawn(spawn_count);
 
     // Creases
     for sign in [-1.0_f32, 1.0] {
         let x = sign * (geo::PITCH_HALF_LEN - geo::CREASE_DEPTH);
         p.spawn((
-            Mesh3d(
-                ctx.meshes
-                    .add(Plane3d::default().mesh().size(0.06, geo::PITCH_WIDTH)),
-            ),
+            Mesh3d(ctx.crease_line_mesh.clone()),
             MeshMaterial3d(ctx.shared.white_mat.clone()),
             Transform::from_translation(Vec3::new(x, 0.07, 0.0)),
         ));
+        track_spawn(spawn_count);
         for z in [-geo::PITCH_WIDTH / 2.0, geo::PITCH_WIDTH / 2.0] {
             p.spawn((
-                Mesh3d(
-                    ctx.meshes.add(
-                        Plane3d::default()
-                            .mesh()
-                            .size(geo::CREASE_DEPTH * 2.0, 0.06),
-                    ),
-                ),
+                Mesh3d(ctx.crease_cross_mesh.clone()),
                 MeshMaterial3d(ctx.shared.white_mat.clone()),
                 Transform::from_translation(Vec3::new(x - sign * 1.1, 0.07, z)),
             ));
+            track_spawn(spawn_count);
         }
     }
 }
 
-fn spawn_boundary_ring_and_boards(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) {
-    // Boundary rope + sponsor boards (ring-oriented).
+fn spawn_boundary_ring_and_boards(
+    p: &mut ChildSpawnerCommands,
+    ctx: &StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
+    // Boundary rope (single merged ring) + sponsor boards.
+    p.spawn((
+        Mesh3d(ctx.rope_ring_mesh.clone()),
+        MeshMaterial3d(ctx.shared.rope_mat.clone()),
+        Transform::IDENTITY,
+    ));
+    track_spawn(spawn_count);
+
     let br = ctx.stadium.boundary_radius();
     for seg in 0..TIER_SEGMENTS {
         let a0 = seg as f32 / TIER_SEGMENTS as f32 * TAU;
         let a1 = (seg + 1) as f32 / TIER_SEGMENTS as f32 * TAU;
         let mid = (a0 + a1) / 2.0;
         let len = 2.0 * br * (PI / TIER_SEGMENTS as f32);
-        p.spawn((
-            Mesh3d(ctx.shared.rope_mesh.clone()),
-            MeshMaterial3d(ctx.shared.rope_mat.clone()),
-            ring_segment_transform(mid, br, 0.05).with_scale(Vec3::new(len, 1.0, 1.0)),
-        ));
         if seg % 2 == 0 {
             let wall_r = br + 1.2;
             let board_width = len * 1.85;
@@ -348,6 +352,7 @@ fn spawn_boundary_ring_and_boards(p: &mut ChildSpawnerCommands, ctx: &mut Stadiu
                     0.16,
                 )),
             ));
+            track_spawn(spawn_count);
             p.spawn((
                 Mesh3d(ctx.shared.unit_cuboid.clone()),
                 MeshMaterial3d(
@@ -359,6 +364,7 @@ fn spawn_boundary_ring_and_boards(p: &mut ChildSpawnerCommands, ctx: &mut Stadiu
                     0.18,
                 )),
             ));
+            track_spawn(spawn_count);
         }
         if seg % 12 == 6 {
             let crest_r = br + 1.48;
@@ -373,16 +379,22 @@ fn spawn_boundary_ring_and_boards(p: &mut ChildSpawnerCommands, ctx: &mut Stadiu
                 ring_segment_transform(mid, crest_r + 0.03, 1.34)
                     .with_scale(Vec3::new(2.42, 2.42, 0.20)),
             ));
+            track_spawn(spawn_count);
             p.spawn((
                 Mesh3d(ctx.shared.unit_cuboid.clone()),
                 MeshMaterial3d(crest_mat),
                 ring_segment_transform(mid, crest_r, 1.34).with_scale(Vec3::new(2.24, 2.24, 0.23)),
             ));
+            track_spawn(spawn_count);
         }
     }
 }
 
-fn spawn_sight_screens(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) {
+fn spawn_sight_screens(
+    p: &mut ChildSpawnerCommands,
+    ctx: &StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
     // Sight screens
     let br = ctx.stadium.boundary_radius();
     for sign in [-1.0_f32, 1.0] {
@@ -393,10 +405,15 @@ fn spawn_sight_screens(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'
             Transform::from_translation(Vec3::new(x, 1.65, 0.0))
                 .with_scale(Vec3::new(0.12, 3.2, 7.5)),
         ));
+        track_spawn(spawn_count);
     }
 }
 
-fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) {
+fn spawn_tiers_and_roof(
+    p: &mut ChildSpawnerCommands,
+    ctx: &mut StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
     // ---- Multi-deck raked seating bowl (lower bowl + set-back upper deck) ----
     let bowl = &ctx.bowl;
     let arc_w = 2.0 * PI * bowl.inner_radius / TIER_SEGMENTS as f32 * 1.02;
@@ -408,18 +425,21 @@ fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<
         let h = bowl.tier_height(tier);
         let mat = ctx.shared.tier_mats[tier % TIER_MAT_COUNT].clone();
 
-        for seg in 0..TIER_SEGMENTS {
-            if seg % AISLE_EVERY == 0 {
-                continue;
-            }
-            let mid = (seg as f32 + 0.5) / TIER_SEGMENTS as f32 * TAU;
-            p.spawn((
-                Mesh3d(ctx.shared.unit_cuboid.clone()),
-                MeshMaterial3d(mat.clone()),
-                ring_segment_transform(mid, mid_r, h + bowl.tread_thickness * 0.5)
-                    .with_scale(Vec3::new(tread_arc, bowl.tread_thickness, tread_radial)),
-            ));
-        }
+        let tread_specs = ring_band_specs(
+            TIER_SEGMENTS,
+            AISLE_EVERY,
+            mid_r,
+            h + bowl.tread_thickness * 0.5,
+            tread_arc,
+            bowl.tread_thickness,
+            tread_radial,
+        );
+        p.spawn((
+            Mesh3d(ctx.meshes.add(ring_boxes_mesh(&tread_specs))),
+            MeshMaterial3d(mat),
+            Transform::IDENTITY,
+        ));
+        track_spawn(spawn_count);
 
         // Riser face at inner edge of each tier (except ground).
         if tier > 0 {
@@ -432,39 +452,42 @@ fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<
             } else {
                 bowl.inner_radius + tier as f32 * bowl.tier_depth - 0.08
             };
-            for seg in 0..TIER_SEGMENTS {
-                if seg % AISLE_EVERY == 0 {
-                    continue;
-                }
-                let mid = (seg as f32 + 0.5) / TIER_SEGMENTS as f32 * TAU;
-                let riser_h = bowl.tier_rise;
-                p.spawn((
-                    Mesh3d(ctx.shared.unit_cuboid.clone()),
-                    MeshMaterial3d(ctx.shared.riser_mat.clone()),
-                    ring_segment_transform(mid, inner_r, h - riser_h * 0.5).with_scale(Vec3::new(
-                        tread_arc * 0.98,
-                        riser_h,
-                        0.16,
-                    )),
-                ));
-            }
+            let riser_h = bowl.tier_rise;
+            let riser_specs = ring_band_specs(
+                TIER_SEGMENTS,
+                AISLE_EVERY,
+                inner_r,
+                h - riser_h * 0.5,
+                tread_arc * 0.98,
+                riser_h,
+                0.16,
+            );
+            p.spawn((
+                Mesh3d(ctx.meshes.add(ring_boxes_mesh(&riser_specs))),
+                MeshMaterial3d(ctx.shared.riser_mat.clone()),
+                Transform::IDENTITY,
+            ));
+            track_spawn(spawn_count);
         }
 
         // Guard rails on mid and upper tiers.
         if tier >= 2 && (tier % 2 == 0 || tier >= LOWER_TIER_COUNT) {
             let rail_r = mid_r - tread_radial * 0.38;
-            for seg in 0..TIER_SEGMENTS {
-                if seg % AISLE_EVERY == 0 {
-                    continue;
-                }
-                let mid = (seg as f32 + 0.5) / TIER_SEGMENTS as f32 * TAU;
-                p.spawn((
-                    Mesh3d(ctx.shared.unit_cuboid.clone()),
-                    MeshMaterial3d(ctx.shared.rail_mat.clone()),
-                    ring_segment_transform(mid, rail_r, h + bowl.tread_thickness + 0.14)
-                        .with_scale(Vec3::new(tread_arc * 0.95, 0.18, 0.12)),
-                ));
-            }
+            let rail_specs = ring_band_specs(
+                TIER_SEGMENTS,
+                AISLE_EVERY,
+                rail_r,
+                h + bowl.tread_thickness + 0.14,
+                tread_arc * 0.95,
+                0.18,
+                0.12,
+            );
+            p.spawn((
+                Mesh3d(ctx.meshes.add(ring_boxes_mesh(&rail_specs))),
+                MeshMaterial3d(ctx.shared.rail_mat.clone()),
+                Transform::IDENTITY,
+            ));
+            track_spawn(spawn_count);
         }
     }
 
@@ -473,38 +496,41 @@ fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<
     let concourse_h =
         bowl.base_height + LOWER_TIER_COUNT as f32 * bowl.tier_rise + bowl.upper_deck_rise_gap * 0.35;
     let concourse_arc = 2.0 * PI * concourse_r / TIER_SEGMENTS as f32 * 1.04;
-    for seg in 0..TIER_SEGMENTS {
-        if seg % AISLE_EVERY == 0 {
-            continue;
-        }
-        let mid = (seg as f32 + 0.5) / TIER_SEGMENTS as f32 * TAU;
-        p.spawn((
-            Mesh3d(ctx.shared.unit_cuboid.clone()),
-            MeshMaterial3d(ctx.shared.concourse_mat.clone()),
-            ring_segment_transform(mid, concourse_r, concourse_h)
-                .with_scale(Vec3::new(concourse_arc, 0.28, bowl.upper_deck_setback * 0.88)),
-        ));
-    }
+    let concourse_specs = ring_band_specs(
+        TIER_SEGMENTS,
+        AISLE_EVERY,
+        concourse_r,
+        concourse_h,
+        concourse_arc,
+        0.28,
+        bowl.upper_deck_setback * 0.88,
+    );
+    p.spawn((
+        Mesh3d(ctx.meshes.add(ring_boxes_mesh(&concourse_specs))),
+        MeshMaterial3d(ctx.shared.concourse_mat.clone()),
+        Transform::IDENTITY,
+    ));
+    track_spawn(spawn_count);
 
     // Concrete facade bulk behind the lower bowl (visible architectural mass).
     let facade_r = bowl.lower_outer_radius() + 2.6;
     let facade_h = bowl.base_height + LOWER_TIER_COUNT as f32 * bowl.tier_rise * 0.55;
     let facade_arc = 2.0 * PI * facade_r / FACADE_SEGMENTS as f32 * 1.05;
-    for seg in 0..FACADE_SEGMENTS {
-        if seg % (AISLE_EVERY / 2) == 0 {
-            continue;
-        }
-        let mid = (seg as f32 + 0.5) / FACADE_SEGMENTS as f32 * TAU;
-        p.spawn((
-            Mesh3d(ctx.shared.unit_cuboid.clone()),
-            MeshMaterial3d(ctx.shared.facade_mat.clone()),
-            ring_segment_transform(mid, facade_r, facade_h * 0.5).with_scale(Vec3::new(
-                facade_arc,
-                facade_h,
-                3.8,
-            )),
-        ));
-    }
+    let lower_facade_specs = ring_band_specs(
+        FACADE_SEGMENTS,
+        AISLE_EVERY / 2,
+        facade_r,
+        facade_h * 0.5,
+        facade_arc,
+        facade_h,
+        3.8,
+    );
+    p.spawn((
+        Mesh3d(ctx.meshes.add(ring_boxes_mesh(&lower_facade_specs))),
+        MeshMaterial3d(ctx.shared.facade_mat.clone()),
+        Transform::IDENTITY,
+    ));
+    track_spawn(spawn_count);
 
     // Upper-deck rear facade (taller wall set back from the pitch).
     let upper_facade_r = bowl.outer_radius() + 1.8;
@@ -512,18 +538,21 @@ fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<
         bowl.base_height + LOWER_TIER_COUNT as f32 * bowl.tier_rise + bowl.upper_deck_rise_gap;
     let upper_facade_h = UPPER_TIER_COUNT as f32 * bowl.tier_rise + 4.5;
     let upper_facade_arc = 2.0 * PI * upper_facade_r / FACADE_SEGMENTS as f32 * 1.04;
-    for seg in 0..FACADE_SEGMENTS {
-        if seg % (AISLE_EVERY / 2) == 0 {
-            continue;
-        }
-        let mid = (seg as f32 + 0.5) / FACADE_SEGMENTS as f32 * TAU;
-        p.spawn((
-            Mesh3d(ctx.shared.unit_cuboid.clone()),
-            MeshMaterial3d(ctx.shared.facade_mat.clone()),
-            ring_segment_transform(mid, upper_facade_r, upper_facade_base + upper_facade_h * 0.5)
-                .with_scale(Vec3::new(upper_facade_arc, upper_facade_h, 4.2)),
-        ));
-    }
+    let upper_facade_specs = ring_band_specs(
+        FACADE_SEGMENTS,
+        AISLE_EVERY / 2,
+        upper_facade_r,
+        upper_facade_base + upper_facade_h * 0.5,
+        upper_facade_arc,
+        upper_facade_h,
+        4.2,
+    );
+    p.spawn((
+        Mesh3d(ctx.meshes.add(ring_boxes_mesh(&upper_facade_specs))),
+        MeshMaterial3d(ctx.shared.facade_mat.clone()),
+        Transform::IDENTITY,
+    ));
+    track_spawn(spawn_count);
 
     // Support columns at aisle junctions (lower + upper deck).
     for seg in (0..TIER_SEGMENTS).step_by(AISLE_EVERY) {
@@ -536,6 +565,7 @@ fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<
             Transform::from_translation(ring_position(a, col_r, lower_col_h * 0.5))
                 .with_scale(Vec3::new(1.0, lower_col_h, 1.0)),
         ));
+        track_spawn(spawn_count);
         let upper_col_r = bowl.upper_inner_radius() + bowl.tier_depth * 2.0;
         let upper_col_base =
             bowl.base_height + LOWER_TIER_COUNT as f32 * bowl.tier_rise + bowl.upper_deck_rise_gap;
@@ -550,27 +580,28 @@ fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<
             ))
             .with_scale(Vec3::new(1.15, upper_col_h, 1.15)),
         ));
+        track_spawn(spawn_count);
     }
 
     // Roof canopy over upper deck with supporting trusses.
     let canopy_r = bowl.outer_radius() + 2.4;
     let canopy_h = bowl.stand_top_height() + 2.2;
     let canopy_arc = 2.0 * PI * canopy_r / TIER_SEGMENTS as f32 * 1.06;
-    for seg in 0..TIER_SEGMENTS {
-        if seg % AISLE_EVERY == 0 {
-            continue;
-        }
-        let mid = (seg as f32 + 0.5) / TIER_SEGMENTS as f32 * TAU;
-        p.spawn((
-            Mesh3d(ctx.shared.unit_cuboid.clone()),
-            MeshMaterial3d(ctx.shared.canopy_mat.clone()),
-            ring_segment_transform(mid, canopy_r, canopy_h).with_scale(Vec3::new(
-                canopy_arc,
-                0.32,
-                4.8,
-            )),
-        ));
-    }
+    let canopy_specs = ring_band_specs(
+        TIER_SEGMENTS,
+        AISLE_EVERY,
+        canopy_r,
+        canopy_h,
+        canopy_arc,
+        0.32,
+        4.8,
+    );
+    p.spawn((
+        Mesh3d(ctx.meshes.add(ring_boxes_mesh(&canopy_specs))),
+        MeshMaterial3d(ctx.shared.canopy_mat.clone()),
+        Transform::IDENTITY,
+    ));
+    track_spawn(spawn_count);
     // Truss ribs under the canopy at aisle spokes.
     for seg in (0..TIER_SEGMENTS).step_by(AISLE_EVERY) {
         let a = seg as f32 / TIER_SEGMENTS as f32 * TAU;
@@ -585,12 +616,17 @@ fn spawn_tiers_and_roof(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<
             ring_segment_transform(a, truss_mid_r, truss_base + truss_h * 0.5)
                 .with_scale(Vec3::new(0.42, truss_h, truss_len)),
         ));
+        track_spawn(spawn_count);
     }
 
-    spawn_pavilions_and_media_box(p, ctx);
+    spawn_pavilions_and_media_box(p, ctx, spawn_count);
 }
 
-fn spawn_pavilions_and_media_box(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) {
+fn spawn_pavilions_and_media_box(
+    p: &mut ChildSpawnerCommands,
+    ctx: &StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
     let bowl = &ctx.bowl;
     let top = bowl.stand_top_height();
 
@@ -613,12 +649,14 @@ fn spawn_pavilions_and_media_box(p: &mut ChildSpawnerCommands, ctx: &mut Stadium
             MeshMaterial3d(ctx.shared.pavilion_mat.clone()),
             ring_segment_transform(angle, r, h * 0.5).with_scale(Vec3::new(width, h, depth)),
         ));
+        track_spawn(spawn_count);
         // Small roof cap on each pavilion.
         p.spawn((
             Mesh3d(ctx.shared.unit_cuboid.clone()),
             MeshMaterial3d(ctx.shared.canopy_mat.clone()),
             ring_segment_transform(angle, r, h + 0.6).with_scale(Vec3::new(width * 1.08, 0.35, depth * 1.1)),
         ));
+        track_spawn(spawn_count);
     }
 
     // Media / commentary box on the main-stand side (behind bowler's end, -X).
@@ -631,6 +669,7 @@ fn spawn_pavilions_and_media_box(p: &mut ChildSpawnerCommands, ctx: &mut Stadium
         ring_segment_transform(media_angle, media_r, media_h * 0.5)
             .with_scale(Vec3::new(22.0, media_h, 5.5)),
     ));
+    track_spawn(spawn_count);
     // Glazed front strip.
     p.spawn((
         Mesh3d(ctx.shared.unit_cuboid.clone()),
@@ -638,9 +677,14 @@ fn spawn_pavilions_and_media_box(p: &mut ChildSpawnerCommands, ctx: &mut Stadium
         ring_segment_transform(media_angle, media_r - 2.2, media_h * 0.55)
             .with_scale(Vec3::new(20.0, media_h * 0.45, 0.28)),
     ));
+    track_spawn(spawn_count);
 }
 
-fn spawn_floodlights(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) {
+fn spawn_floodlights(
+    p: &mut ChildSpawnerCommands,
+    ctx: &StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
     // ---- Floodlight towers integrated with stand perimeter ----
     let outer = ctx.bowl.outer_radius();
     let stand_top = ctx.bowl.stand_top_height();
@@ -662,6 +706,7 @@ fn spawn_floodlights(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>
             .with_scale(Vec3::new(2.8, 1.0, 1.0))
             .with_rotation(ring_segment_transform(angle, tower_r, tower_h).rotation),
         ));
+        track_spawn(spawn_count);
 
         p.spawn((
             Mesh3d(ctx.shared.tower_pole_mesh.clone()),
@@ -669,6 +714,7 @@ fn spawn_floodlights(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>
             Transform::from_translation(Vec3::new(base.x, tower_h * 0.5, base.z))
                 .with_scale(Vec3::new(1.0, tower_h, 1.0)),
         ));
+        track_spawn(spawn_count);
         p.spawn((
             Mesh3d(ctx.shared.tower_truss_mesh.clone()),
             MeshMaterial3d(ctx.shared.tower_mat.clone()),
@@ -676,6 +722,7 @@ fn spawn_floodlights(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>
                 .with_scale(Vec3::new(4.2, 1.0, 1.0))
                 .with_rotation(ring_segment_transform(angle, tower_r, tower_h).rotation),
         ));
+        track_spawn(spawn_count);
         for offset in [-1.6_f32, 0.0, 1.6] {
             let tangent = ring_tangent(angle);
             let lamp_pos = top + tangent * offset;
@@ -687,6 +734,7 @@ fn spawn_floodlights(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>
                     .with_rotation(ring_segment_transform(angle, tower_r, tower_h).rotation)
                     .with_scale(Vec3::new(1.5, 1.0, 1.0)),
             ));
+            track_spawn(spawn_count);
         }
         // SpotLight aimed at pitch centre — hidden by day via NightEnvironmentLight.
         p.spawn((
@@ -705,10 +753,15 @@ fn spawn_floodlights(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>
                 .looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
             Visibility::Hidden,
         ));
+        track_spawn(spawn_count);
     }
 }
 
-fn spawn_crowd(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) -> usize {
+fn spawn_crowd(
+    p: &mut ChildSpawnerCommands,
+    ctx: &StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) -> usize {
     // ---- Crowd: ~350–550 seated spectators ----
     let crowd_variants = [
         ctx.asset_server
@@ -755,6 +808,7 @@ fn spawn_crowd(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) -> u
                     InheritedVisibility::default(),
                     ViewVisibility::default(),
                 ));
+                track_spawn(spawn_count);
                 crowd_count += 1;
             }
         }
@@ -767,6 +821,7 @@ fn spawn_big_screen_and_dugouts(
     ctx: &mut StadiumBuildCtx<'_>,
     batting_team: &Team,
     fielding_team: &Team,
+    spawn_count: &mut usize,
 ) {
     // Big screen + dugouts + tents (unchanged layout, shared materials).
     let br = ctx.stadium.boundary_radius();
@@ -784,12 +839,14 @@ fn spawn_big_screen_and_dugouts(
         Transform::from_translation(Vec3::new(sx - 1.1, 3.6, 0.0))
             .with_scale(Vec3::new(0.32, 3.8, 8.0)),
     ));
+    track_spawn(spawn_count);
     p.spawn((
         Mesh3d(ctx.shared.unit_cuboid.clone()),
         MeshMaterial3d(screen_face),
         Transform::from_translation(Vec3::new(sx - 0.92, 3.6, 0.0))
             .with_scale(Vec3::new(0.18, 3.2, 7.0)),
     ));
+    track_spawn(spawn_count);
 
     let dugout_roof = ctx.materials.add(mat(Color::srgb_u8(0xE8, 0xE6, 0xDF)));
     for sign_z in [-1.0_f32, 1.0] {
@@ -801,18 +858,21 @@ fn spawn_big_screen_and_dugouts(
                 .with_rotation(Quat::from_rotation_z(-sign_z * 0.08))
                 .with_scale(Vec3::new(6.5, 0.25, 2.6)),
         ));
+        track_spawn(spawn_count);
         p.spawn((
             Mesh3d(ctx.shared.unit_cuboid.clone()),
             MeshMaterial3d(screen_frame.clone()),
             Transform::from_translation(Vec3::new(sx + 11.2, 1.15, dz))
                 .with_scale(Vec3::new(6.5, 2.2, 0.22)),
         ));
+        track_spawn(spawn_count);
         p.spawn((
             Mesh3d(ctx.shared.unit_cuboid.clone()),
             MeshMaterial3d(dugout_roof.clone()),
             Transform::from_translation(Vec3::new(sx + 5.2, 0.55, dz))
                 .with_scale(Vec3::new(0.9, 1.05, 2.3)),
         ));
+        track_spawn(spawn_count);
     }
 
     let tent_mats = [
@@ -830,16 +890,23 @@ fn spawn_big_screen_and_dugouts(
                 .with_rotation(Quat::from_rotation_y(0.18 * i as f32))
                 .with_scale(Vec3::new(3.2, 2.1, 3.2)),
         ));
+        track_spawn(spawn_count);
         p.spawn((
             Mesh3d(ctx.shared.unit_cuboid.clone()),
             MeshMaterial3d(tent_mats[(i + 1) % 3].clone()),
             Transform::from_translation(Vec3::new(tx, 2.55, tz))
                 .with_scale(Vec3::new(1.4, 0.9, 1.4)),
         ));
+        track_spawn(spawn_count);
     }
 }
 
-fn spawn_stumps(commands: &mut Commands, root: Entity, ctx: &mut StadiumBuildCtx<'_>) {
+fn spawn_stumps(
+    commands: &mut Commands,
+    root: Entity,
+    ctx: &StadiumBuildCtx<'_>,
+    spawn_count: &mut usize,
+) {
     for sign in [-1.0_f32, 1.0] {
         let striker_end = sign > 0.0;
         let end_root = commands
@@ -851,21 +918,24 @@ fn spawn_stumps(commands: &mut Commands, root: Entity, ctx: &mut StadiumBuildCtx
                 ViewVisibility::default(),
             ))
             .id();
+        track_spawn(spawn_count);
         for i in -1..=1_i32 {
             commands.entity(end_root).with_children(|p| {
                 p.spawn((
-                    Mesh3d(ctx.meshes.add(Cylinder::new(0.02, geo::STUMP_HEIGHT))),
+                    Mesh3d(ctx.shared.stump_cylinder_mesh.clone()),
                     MeshMaterial3d(ctx.shared.stump_mat.clone()),
                     Transform::from_xyz(0.0, geo::STUMP_HEIGHT / 2.0, i as f32 * STUMP_GAP),
                 ));
+                track_spawn(spawn_count);
             });
         }
         commands.entity(end_root).with_children(|p| {
             p.spawn((
-                Mesh3d(ctx.meshes.add(Cuboid::new(0.03, 0.02, STUMP_GAP * 2.0))),
+                Mesh3d(ctx.shared.stump_bail_mesh.clone()),
                 MeshMaterial3d(ctx.shared.stump_mat.clone()),
                 Transform::from_xyz(0.0, geo::STUMP_HEIGHT + 0.01, 0.0),
             ));
+            track_spawn(spawn_count);
         });
         commands.entity(root).add_child(end_root);
     }
@@ -881,23 +951,66 @@ pub fn build_stadium(
     batting_team: &Team,
     fielding_team: &Team,
 ) -> Entity {
+    let profile = std::env::var("CRICKET_STADIUM_PROFILE").is_ok();
+    let t0 = profile.then(std::time::Instant::now);
+    let mesh0 = meshes.len();
+    let mat0 = materials.len();
+    let mut spawn_count = 0usize;
+
     let shared = build_shared_assets(meshes, materials, images, asset_server, stadium);
     let bowl = BowlLayout::from_boundary(stadium.boundary_radius());
     let outfield_base = stadium.outfield_color;
+    let boundary_r = stadium.boundary_radius();
+
+    let ground_radius = stadium_ground_radius(bowl.outer_radius());
+    let apron_disc_mesh = meshes.add(stadium_ground_disc_mesh(ground_radius, 96));
+    let rope_ring_mesh = meshes.add(ring_tube_mesh(boundary_r, 0.05, TIER_SEGMENTS, 0.04));
+    let pitch_mesh = meshes.add(
+        Plane3d::default()
+            .mesh()
+            .size(geo::PITCH_LENGTH + 2.0, geo::PITCH_WIDTH),
+    );
+    let pitch_worn_mesh = meshes.add(
+        Plane3d::default()
+            .mesh()
+            .size(geo::PITCH_LENGTH + 1.0, geo::PITCH_WIDTH * 0.35),
+    );
+    let crease_line_mesh = meshes.add(Plane3d::default().mesh().size(0.06, geo::PITCH_WIDTH));
+    let crease_cross_mesh =
+        meshes.add(Plane3d::default().mesh().size(geo::CREASE_DEPTH * 2.0, 0.06));
 
     let pitch_img = images.add(create_pitch_image());
-    let pitch_mat = StandardMaterial {
+    let pitch_mat = materials.add(StandardMaterial {
         base_color: Color::srgb_u8(0xC8, 0xA9, 0x7A),
         base_color_texture: Some(pitch_img.clone()),
         perceptual_roughness: 0.92,
         ..Default::default()
-    };
-    let pitch_worn_mat = StandardMaterial {
+    });
+    let pitch_worn_mat = materials.add(StandardMaterial {
         base_color: Color::srgb_u8(0xB8, 0x9A, 0x6E),
         base_color_texture: Some(pitch_img),
         perceptual_roughness: 0.96,
         ..Default::default()
-    };
+    });
+
+    let r = boundary_r + 6.0;
+    let span = r * 2.05;
+    let band_width = span / MOW_BAND_COUNT as f32;
+    let half_span = span / 2.0;
+    let mow_band_mats: Vec<Handle<StandardMaterial>> = (0..MOW_BAND_COUNT)
+        .map(|band| {
+            let x_min = -half_span + band as f32 * band_width;
+            materials.add(StandardMaterial {
+                base_color: outfield_grass::tinted_mow_band_color(outfield_base, band),
+                base_color_texture: Some(shared.grass_tex.clone()),
+                perceptual_roughness: 0.88,
+                metallic: 0.0,
+                reflectance: 0.42,
+                uv_transform: outfield_grass::strip_uv_transform(span, band_width, x_min),
+                ..default()
+            })
+        })
+        .collect();
 
     let batting_crest_mat = materials.add(texture_mat(crate::render::load_team_crest(
         asset_server,
@@ -929,29 +1042,47 @@ pub fn build_stadium(
         outfield_base,
         batting_crest_mat,
         fielding_crest_mat,
+        apron_disc_mesh,
+        rope_ring_mesh,
+        pitch_mesh,
+        pitch_worn_mesh,
+        crease_line_mesh,
+        crease_cross_mesh,
         pitch_mat,
         pitch_worn_mat,
+        mow_band_mats,
     };
 
     commands.entity(root).with_children(|p| {
-        spawn_stadium_apron(p, &ctx);
-        spawn_outfield_bands(p, &mut ctx);
-        spawn_pitch_and_creases(p, &mut ctx);
-        spawn_boundary_ring_and_boards(p, &mut ctx);
-        spawn_sight_screens(p, &mut ctx);
-        spawn_tiers_and_roof(p, &mut ctx);
-        spawn_floodlights(p, &mut ctx);
-        let crowd_count = spawn_crowd(p, &mut ctx);
+        spawn_stadium_apron(p, &ctx, &mut spawn_count);
+        spawn_outfield_bands(p, &ctx, &mut spawn_count);
+        spawn_pitch_and_creases(p, &ctx, &mut spawn_count);
+        spawn_boundary_ring_and_boards(p, &ctx, &mut spawn_count);
+        spawn_sight_screens(p, &ctx, &mut spawn_count);
+        spawn_tiers_and_roof(p, &mut ctx, &mut spawn_count);
+        spawn_floodlights(p, &ctx, &mut spawn_count);
+        let crowd_count = spawn_crowd(p, &ctx, &mut spawn_count);
         info!("Stadium crowd spawned: {crowd_count} spectators");
-        spawn_big_screen_and_dugouts(p, &mut ctx, batting_team, fielding_team);
+        spawn_big_screen_and_dugouts(p, &mut ctx, batting_team, fielding_team, &mut spawn_count);
     });
 
-    spawn_stumps(commands, root, &mut ctx);
+    spawn_stumps(commands, root, &ctx, &mut spawn_count);
 
     commands.insert_resource(FloodlightMaterials {
         day: shared.lamp_day_mat.clone(),
         night: shared.lamp_night_mat.clone(),
     });
+
+    if profile {
+        let elapsed = t0.unwrap().elapsed();
+        info!(
+            "build_stadium profile: {:.1}ms, meshes +{}, materials +{}, entities {}",
+            elapsed.as_secs_f64() * 1000.0,
+            meshes.len() - mesh0,
+            materials.len() - mat0,
+            spawn_count,
+        );
+    }
 
     root
 }
@@ -1236,7 +1367,7 @@ fn big_screen_image(home: &str, away: &str) -> Image {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{stadium_ground_radius, *};
 
     #[test]
     fn crowd_count_in_target_range() {
@@ -1264,10 +1395,10 @@ mod tests {
     #[test]
     fn apron_ground_extends_beyond_bowl() {
         let bowl = BowlLayout::from_boundary(65.0);
-        let half = stadium_ground_half_extent(bowl.outer_radius());
-        assert!(half > bowl.outer_radius());
+        let radius = stadium_ground_radius(bowl.outer_radius());
+        assert!(radius > bowl.outer_radius());
         // Mown outfield must stay inside the apron (no regression to floating bowl).
         let outfield_half = (65.0 + 6.0) * 2.05 / 2.0;
-        assert!(half > outfield_half);
+        assert!(radius > outfield_half);
     }
 }
