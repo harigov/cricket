@@ -89,6 +89,7 @@ fn register_match_systems(app: &mut App) {
             Update,
             (
                 match_flow::record_ball_flight,
+                match_flow::sys_match_intro,
                 match_flow::sys_ready,
                 match_flow::sys_aim,
                 match_flow::sys_runup,
@@ -203,8 +204,8 @@ const QUICK_MATCH_PRESSES: [(f32, input::Action); 12] = [
     // confirms wide enough to cover that rather than hitting exact instants.
     (22.0, input::Action::Confirm), // toss: elect to bat
     (25.0, input::Action::Confirm), // toss summary -> match starts
-    (28.0, input::Action::Confirm), // spare, in case a slide was still up
-    (31.0, input::Action::Confirm), // spare
+    (33.0, input::Action::Confirm), // spare, after intro walk-on
+    (36.0, input::Action::Confirm), // spare
     (99.0, input::Action::Confirm),
     (99.5, input::Action::Confirm),
     (200.0, input::Action::Confirm),
@@ -273,7 +274,7 @@ impl AutotestMode {
             },
             Self::Night => AutotestScript {
                 presses: QUICK_MATCH_PRESSES,
-                milestones: &[1.5, 32.0, 45.0, 58.0],
+                milestones: &[1.5, 26.5, 32.0, 45.0, 58.0],
                 end_time: 62.0,
                 switches_to_night: true,
                 swings: true,
@@ -358,7 +359,7 @@ impl AutotestMode {
             },
             Self::Quick => AutotestScript {
                 presses: QUICK_MATCH_PRESSES,
-                milestones: &[1.5, 32.0, 45.0, 58.0],
+                milestones: &[1.5, 26.5, 32.0, 45.0, 58.0],
                 end_time: 62.0,
                 switches_to_night: false,
                 swings: true,
@@ -403,8 +404,9 @@ fn autotest_drive(
     }
 
     // In-match: swing periodically once play is under way (not stadium captures).
-    // Starts after the toss slides so these presses cannot skip through them.
-    if script.swings && now > 30.0 && now - *last_swing_t >= 3.0 {
+    // Starts after the toss slides and the opening walk-on so Confirm cannot
+    // skip the intro before it is photographed.
+    if script.swings && now > 33.0 && now - *last_swing_t >= 3.0 {
         *last_swing_t = now;
         input.just_pressed.push(input::Action::Confirm);
         info!("AUTOTEST: shot swing @ {:.1}s", now);
@@ -708,7 +710,7 @@ fn enter_match(
     commands.insert_resource(am);
     commands.insert_resource(scene);
     commands.insert_resource(CurrentDelivery(None));
-    commands.insert_resource(Phase(PhaseEnum::ReadyToBall { t: 0.0 }));
+    commands.insert_resource(Phase(PhaseEnum::MatchIntro { t: 0.0 }));
     commands.insert_resource(MatchPaused(false));
 }
 
