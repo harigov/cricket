@@ -690,7 +690,7 @@ fn spawn_floodlights(
     let stand_top = ctx.bowl.stand_top_height();
     let tower_r = floodlight_radius(outer);
     let tower_h = stand_top + 22.0;
-    for angle in floodlight_angles() {
+    for (tower_idx, angle) in floodlight_angles().into_iter().enumerate() {
         let base = ring_position(angle, tower_r, 0.0);
         let top = ring_position(angle, tower_r, tower_h);
 
@@ -744,7 +744,10 @@ fn spawn_floodlights(
                 intensity: 10_500_000.0,
                 range: 165.0,
                 radius: 2.6,
-                shadows_enabled: true,
+                // Only the key tower casts shadows. Switching to night turns
+                // all four on in one frame, and four shadow maps over the whole
+                // bowl was long enough to trip the surface-timeout panic.
+                shadows_enabled: tower_idx == 0,
                 outer_angle: 0.85,
                 inner_angle: 0.54,
                 ..default()
