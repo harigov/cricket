@@ -2201,6 +2201,37 @@ mod tests {
         assert_eq!(tf.translation, bs.pos);
     }
 
+    /// The bowler used to be lerped linearly all the way to the crease, so he
+    /// kept gliding at approach speed through the delivery stride and looked
+    /// like he was sliding on the pitch. The stride must decelerate.
+    #[test]
+    fn bowler_plants_and_decelerates_through_the_delivery_stride() {
+        let sample = |a: f32, b: f32| (bowler_runup_x(b) - bowler_runup_x(a)).abs() / (b - a);
+
+        // Mid-approach speed vs speed at the very end of the delivery stride.
+        let approach = sample(0.45, 0.55);
+        let stride_end = sample(0.9, 1.0);
+        assert!(
+            stride_end < approach * 0.5,
+            "delivery stride should slow to well under approach speed              (approach={approach:.2} m/p, stride_end={stride_end:.2} m/p)"
+        );
+
+        // And the approach itself should build speed rather than be uniform.
+        let early = sample(0.05, 0.15);
+        assert!(
+            early < approach,
+            "run-up should accelerate into the crease (early={early:.2}, approach={approach:.2})"
+        );
+
+        // Monotonic forward travel: never drift backwards down the pitch.
+        let mut prev = bowler_runup_x(0.0);
+        for i in 1..=100 {
+            let x = bowler_runup_x(i as f32 / 100.0);
+            assert!(x >= prev - 1e-4, "bowler moved backwards at p={i}");
+            prev = x;
+        }
+    }
+
     /// Regression: `cleanup_after_match` can remove `ActiveMatch` mid-`Update`
     /// when deferred commands flush at a camera sync point. Gameplay systems
     /// must tolerate the missing resource and match-exit must run last.
