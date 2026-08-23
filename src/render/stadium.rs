@@ -996,7 +996,7 @@ pub fn build_stadium(
         spawn_sight_screens(p, &ctx, &mut spawn_count);
         spawn_tiers_and_roof(p, &mut ctx, &mut spawn_count);
         spawn_floodlights(p, &ctx, &mut spawn_count);
-        let crowd_count = crowd::spawn_crowd(p, &ctx, &mut spawn_count);
+        let crowd_count = crowd::spawn_crowd(p, &mut ctx, &mut spawn_count);
         info!("Stadium crowd spawned: {crowd_count} spectators");
         environment::spawn_environment(p, &mut ctx, &mut spawn_count);
         spawn_big_screen_and_dugouts(p, &mut ctx, batting_team, fielding_team, &mut spawn_count);

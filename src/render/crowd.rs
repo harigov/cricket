@@ -439,7 +439,7 @@ fn spawn_detailed_crowd(
 
 fn spawn_merged_crowd_band(
     p: &mut ChildSpawnerCommands,
-    ctx: &StadiumBuildCtx<'_>,
+    ctx: &mut StadiumBuildCtx<'_>,
     layout: &CrowdLayout,
     band: CrowdBand,
     batting_color: Color,
@@ -456,9 +456,8 @@ fn spawn_merged_crowd_band(
         return;
     };
 
-    let (meshes, materials) = crowd_asset_stores_mut(ctx);
-    let merged_mesh = meshes.add(mesh);
-    let merged_mat = materials.add(StandardMaterial {
+    let merged_mesh = ctx.meshes.add(mesh);
+    let merged_mat = ctx.materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.96,
         reflectance: 0.08,
@@ -471,20 +470,6 @@ fn spawn_merged_crowd_band(
         Transform::default(),
     ));
     track_spawn(spawn_count);
-}
-
-fn crowd_asset_stores_mut<'a>(
-    ctx: &'a StadiumBuildCtx<'a>,
-) -> (&'a mut Assets<Mesh>, &'a mut Assets<StandardMaterial>) {
-    // SAFETY: `StadiumBuildCtx` is built with unique `&mut Assets` references for
-    // one stadium build pass. Crowd spawning runs synchronously inside that pass,
-    // so there is no concurrent aliasing of either store.
-    unsafe {
-        let meshes = &mut *(ctx.meshes as *const Assets<Mesh> as *mut Assets<Mesh>);
-        let materials = &mut *(ctx.materials as *const Assets<StandardMaterial>
-            as *mut Assets<StandardMaterial>);
-        (meshes, materials)
-    }
 }
 
 fn build_merged_crowd_mesh(
@@ -631,7 +616,7 @@ fn append_colored_box(
 
 pub(crate) fn spawn_crowd(
     p: &mut ChildSpawnerCommands,
-    ctx: &StadiumBuildCtx<'_>,
+    ctx: &mut StadiumBuildCtx<'_>,
     spawn_count: &mut usize,
 ) -> usize {
     let (batting_color, fielding_color) = crowd_fallback_team_colors(ctx);
@@ -642,7 +627,7 @@ pub(crate) fn spawn_crowd(
 /// without changing crowd layout maths.
 pub(crate) fn spawn_crowd_with_team_colors(
     p: &mut ChildSpawnerCommands,
-    ctx: &StadiumBuildCtx<'_>,
+    ctx: &mut StadiumBuildCtx<'_>,
     spawn_count: &mut usize,
     batting_color: Color,
     fielding_color: Color,
