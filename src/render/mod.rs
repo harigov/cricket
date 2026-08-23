@@ -150,17 +150,19 @@ pub fn load_xbot_scene(assets: &AssetServer) -> Handle<Scene> {
     assets.load(GltfAssetLabel::Scene(0).from_asset(path))
 }
 
-/// Scene root whose imported glTF materials need de-metallising.
+/// Scene root whose imported glTF materials need correcting for this renderer.
 ///
-/// Kenney's kits are exported from Unity with `metallicFactor` left at the
-/// glTF default of 1.0. A fully metallic surface has no diffuse albedo — it
-/// only mirrors its surroundings — so the pines, rocks and palms came back as
-/// pale cutouts of the sky (a teal leaf tone reflecting as cyan) rather than
-/// as foliage. Nothing in these kits is metal.
+/// Two things are wrong with the kits as shipped. They are exported from Unity
+/// with `metallicFactor` left at the glTF default of 1.0, and a fully metallic
+/// surface has no diffuse albedo — it only mirrors its surroundings. And where
+/// a model carries no texture, its `baseColorFactor` was authored as the colour
+/// the artist wanted to *see*, not as an albedo; under this scene's exposure
+/// that arrives several stops hot. Together they turned the pines and rocks
+/// into pale cutouts of the sky.
 #[derive(Component)]
 pub struct ImportedProp;
 
-/// Mesh already visited by [`demetallise_imported_props`].
+/// Mesh already visited by [`retune_imported_prop_materials`].
 #[derive(Component)]
 pub struct PropMaterialFixed;
 
@@ -169,11 +171,11 @@ type UnfixedPropMesh<'a> = (Entity, &'a MeshMaterial3d<StandardMaterial>);
 /// Only mesh entities we have not already visited.
 type UnfixedPropMeshFilter = (With<Mesh3d>, Without<PropMaterialFixed>);
 
-/// Rewrite metallic imported materials to dielectric, once per mesh.
+/// Correct imported kit materials, once per mesh.
 ///
 /// glTF materials are shared per asset, so the first instance of a palm fixes
 /// the material for every other palm; the marker just stops us rescanning.
-pub fn demetallise_imported_props(
+pub fn retune_imported_prop_materials(
     mut commands: Commands,
     props: Query<(), With<ImportedProp>>,
     parents: Query<&ChildOf>,
@@ -194,14 +196,23 @@ pub fn demetallise_imported_props(
         if !is_prop {
             continue;
         }
-        if let Some(material) = materials.get_mut(&mat_handle.0)
-            && material.metallic > 0.5
-        {
-            material.metallic = 0.0;
-            // The same export pins roughness at 1.0, which kills every
-            // highlight. Bark, stone and foliage all sit below that.
-            material.perceptual_roughness = material.perceptual_roughness.min(0.85);
-            material.reflectance = 0.18;
+        if let Some(material) = materials.get_mut(&mat_handle.0) {
+            if material.metallic > 0.5 {
+                material.metallic = 0.0;
+                // The same export pins roughness at 1.0, which kills every
+                // highlight. Bark, stone and foliage all sit below that.
+                material.perceptual_roughness = material.perceptual_roughness.min(0.85);
+                material.reflectance = 0.18;
+            }
+            // Only the untextured kits carry their colour in the factor. Where
+            // a texture supplies it (the city blocks, the crowd characters) the
+            // factor is plain white and remapping it would just dim the map.
+            if material.base_color_texture.is_none() {
+                let srgb = material.base_color.to_srgba();
+                let albedo = environment::day_albedo([srgb.red, srgb.green, srgb.blue]);
+                material.base_color =
+                    Color::linear_rgba(albedo[0], albedo[1], albedo[2], srgb.alpha);
+            }
         }
         commands.entity(entity).insert(PropMaterialFixed);
     }
@@ -231,7 +242,7 @@ impl Plugin for RenderPlugin {
                 player::apply_team_kit_materials,
                 player::attach_animation_players,
                 player::animate_figures,
-                demetallise_imported_props,
+                retune_imported_prop_materials,
             ),
         )
         .add_systems(PostUpdate, player::strip_skeleton_root_motion);

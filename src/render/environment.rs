@@ -136,7 +136,7 @@ const DAY_FLAT_RESPONSE: [f32; 3] = [10.38, 9.19, 7.29];
 /// (0.35 renders as 0.35); the brightest values are pulled back a little (0.80
 /// renders as ≈0.69), so where a surface really is brighter than the sky the
 /// palette is authored past white on purpose — see [`ALPINE_RAMP`].
-pub(crate) fn day_albedo(srgb: [f32; 3]) -> [f32; 3] {
+pub fn day_albedo(srgb: [f32; 3]) -> [f32; 3] {
     [
         srgb_to_linear(srgb[0]) / DAY_FLAT_RESPONSE[0],
         srgb_to_linear(srgb[1]) / DAY_FLAT_RESPONSE[1],
