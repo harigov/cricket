@@ -6,7 +6,7 @@ use crate::core::teams::Team;
 use crate::render::outfield_grass::{self, MOW_BAND_COUNT};
 use crate::render::ring_geometry::{
     floodlight_angles, floodlight_radius, ring_face_center_rotation, ring_position,
-    ring_segment_transform, ring_tangent,
+    ring_segment_transform, ring_tangent, stadium_ground_half_extent,
 };
 use crate::render::{FloodlightFixture, FloodlightMaterials, NightEnvironmentLight};
 use bevy::gltf::GltfAssetLabel;
@@ -120,6 +120,7 @@ struct SharedStadiumAssets {
     canopy_mat: Handle<StandardMaterial>,
     facade_mat: Handle<StandardMaterial>,
     concourse_mat: Handle<StandardMaterial>,
+    apron_mat: Handle<StandardMaterial>,
     pavilion_mat: Handle<StandardMaterial>,
     media_box_mat: Handle<StandardMaterial>,
     roof_truss_mat: Handle<StandardMaterial>,
@@ -171,6 +172,12 @@ fn build_shared_assets(
         canopy_mat: materials.add(mat(tint(0.38, 0.05))),
         facade_mat: materials.add(mat(Color::srgb_u8(0x6A, 0x6E, 0x74))),
         concourse_mat: materials.add(mat(Color::srgb_u8(0x8A, 0x8E, 0x92))),
+        apron_mat: materials.add(StandardMaterial {
+            base_color: Color::srgb_u8(0x6E, 0x6C, 0x64),
+            perceptual_roughness: 0.94,
+            reflectance: 0.28,
+            ..default()
+        }),
         pavilion_mat: materials.add(mat(Color::srgb_u8(0x5C, 0x60, 0x68))),
         media_box_mat: materials.add(mat(Color::srgb_u8(0x2A, 0x32, 0x3C))),
         roof_truss_mat: materials.add(mat(Color::srgb_u8(0x3C, 0x40, 0x48))),
@@ -220,6 +227,17 @@ fn crowd_segment_skipped(seg: usize) -> bool {
 
 fn crowd_seats_at(seg: usize, tier: usize) -> usize {
     1 + (seg * 7 + tier * 11).is_multiple_of(3) as usize
+}
+
+fn spawn_stadium_apron(p: &mut ChildSpawnerCommands, ctx: &StadiumBuildCtx<'_>) {
+    // Neutral apron/concourse under and beyond the stands (not mown outfield grass).
+    let half = stadium_ground_half_extent(ctx.bowl.outer_radius());
+    let span = half * 2.0;
+    p.spawn((
+        Mesh3d(ctx.shared.grass_mesh.clone()),
+        MeshMaterial3d(ctx.shared.apron_mat.clone()),
+        Transform::from_translation(Vec3::ZERO).with_scale(Vec3::new(span, 1.0, span)),
+    ));
 }
 
 fn spawn_outfield_bands(p: &mut ChildSpawnerCommands, ctx: &mut StadiumBuildCtx<'_>) {
@@ -916,6 +934,7 @@ pub fn build_stadium(
     };
 
     commands.entity(root).with_children(|p| {
+        spawn_stadium_apron(p, &ctx);
         spawn_outfield_bands(p, &mut ctx);
         spawn_pitch_and_creases(p, &mut ctx);
         spawn_boundary_ring_and_boards(p, &mut ctx);
@@ -1240,5 +1259,15 @@ mod tests {
         let lower_top = bowl.tier_mid_radius(LOWER_TIER_COUNT - 1);
         let upper_bottom = bowl.tier_mid_radius(LOWER_TIER_COUNT);
         assert!(upper_bottom > lower_top + 2.0);
+    }
+
+    #[test]
+    fn apron_ground_extends_beyond_bowl() {
+        let bowl = BowlLayout::from_boundary(65.0);
+        let half = stadium_ground_half_extent(bowl.outer_radius());
+        assert!(half > bowl.outer_radius());
+        // Mown outfield must stay inside the apron (no regression to floating bowl).
+        let outfield_half = (65.0 + 6.0) * 2.05 / 2.0;
+        assert!(half > outfield_half);
     }
 }

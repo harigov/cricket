@@ -44,6 +44,12 @@ pub fn floodlight_radius(bowl_outer_radius: f32) -> f32 {
     bowl_outer_radius + 9.5
 }
 
+/// Half-width of the square stadium apron (centred on the pitch).
+/// Keeps surrounds ground in sync with bowl scale — extends past floodlight towers.
+pub fn stadium_ground_half_extent(bowl_outer_radius: f32) -> f32 {
+    floodlight_radius(bowl_outer_radius) + 8.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +103,19 @@ mod tests {
     fn floodlight_radius_outside_bowl() {
         let bowl = 80.0;
         assert!(floodlight_radius(bowl) > bowl);
+    }
+
+    #[test]
+    fn ground_extent_beyond_bowl_outer() {
+        let bowl_outer = 101.0;
+        let half = stadium_ground_half_extent(bowl_outer);
+        assert!(
+            half > bowl_outer,
+            "apron must extend past bowl outer ({bowl_outer}), got half {half}"
+        );
+        assert!(
+            half > floodlight_radius(bowl_outer),
+            "apron must extend past floodlights"
+        );
     }
 }
