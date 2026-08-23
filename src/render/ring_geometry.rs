@@ -365,6 +365,6 @@ mod tests {
         let specs = ring_band_specs(8, 0, 50.0, 1.0, 2.0, 0.5, 1.0);
         let mesh = ring_boxes_mesh(&specs);
         let positions = mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap();
-        assert!(positions.len() > 0);
+        assert!(!positions.is_empty());
     }
 }

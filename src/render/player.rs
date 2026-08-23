@@ -448,6 +448,16 @@ pub fn disable_figure_frustum_culling(
     }
 }
 
+/// Mesh rows still awaiting a team-kit tint: entity, optional glTF node name
+/// and the PBR material handle imported with the figure.
+type UnstyledKitMesh<'a> = (
+    Entity,
+    Option<&'a Name>,
+    &'a MeshMaterial3d<StandardMaterial>,
+);
+/// Only untinted figure meshes — equipment (bat, pads) is recoloured elsewhere.
+type UnstyledKitMeshFilter = (Without<KitStyled>, With<Mesh3d>, Without<Equipment>);
+
 /// Keep the imported PBR materials and tint them into believable cricket kit:
 /// `Beta_Surface` becomes the long-sleeve jersey/trousers (stronger primary
 /// tint), `Beta_Joints` takes the secondary colour as trim/helmet shade.
@@ -455,10 +465,7 @@ pub fn apply_team_kit_materials(
     mut commands: Commands,
     kits: Query<&TeamKit>,
     parents: Query<&ChildOf>,
-    meshes: Query<
-        (Entity, Option<&Name>, &MeshMaterial3d<StandardMaterial>),
-        (Without<KitStyled>, With<Mesh3d>, Without<Equipment>),
-    >,
+    meshes: Query<UnstyledKitMesh, UnstyledKitMeshFilter>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {

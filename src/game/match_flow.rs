@@ -916,61 +916,62 @@ pub fn sys_shot_input(
                 offset, shot.rel.t_arrive, shot.rel.t, shot.attempt.loft, shot.attempt.dir_x
             );
         }
-    } else if let (Some(am), Some(wd)) = (shot.am.as_ref(), shot.wd.as_ref()) {
-        if !shot.attempt.ai_scheduled && shot.rel.t > shot.rel.t_arrive - 0.45 {
-            // AI batter: line/length aware decision
-            shot.attempt.ai_scheduled = true;
-            if plan.wide {
-                return;
-            }
-            let batsman = am.striker(wd);
-            let q = plan.quality_vs_batsman();
-            let skill = batsman.batting as f32 / 100.0;
-            // Fuller / good-length balls are easier to time; short balls harder
-            let length_factor = if plan.length_from_stumps < 4.5 {
-                0.04
+    } else if let (Some(am), Some(wd)) = (shot.am.as_ref(), shot.wd.as_ref())
+        && !shot.attempt.ai_scheduled
+        && shot.rel.t > shot.rel.t_arrive - 0.45
+    {
+        // AI batter: line/length aware decision
+        shot.attempt.ai_scheduled = true;
+        if plan.wide {
+            return;
+        }
+        let batsman = am.striker(wd);
+        let q = plan.quality_vs_batsman();
+        let skill = batsman.batting as f32 / 100.0;
+        // Fuller / good-length balls are easier to time; short balls harder
+        let length_factor = if plan.length_from_stumps < 4.5 {
+            0.04
+        } else if plan.length_from_stumps > 11.0 {
+            0.025
+        } else {
+            0.0
+        };
+        let sigma =
+            (0.045 + (1.0 - q) * 0.10 - (skill - 0.7) * 0.04 + length_factor).clamp(0.028, 0.30);
+        let agg = chase_pressure(
+            am.state.innings.target,
+            am.state.innings.runs,
+            am.state.innings.legal_balls,
+            am.state.overs,
+        );
+        // Defend good balls more often unless chasing hard
+        let defend_bias = if q > 0.75 && agg < 0.6 { 0.18 } else { 0.0 };
+        let swing_prob = (0.58 + agg * 0.38 - q * 0.32 - defend_bias).clamp(0.18, 0.96);
+        if coin(swing_prob) {
+            shot.attempt.pressed = true;
+            shot.attempt.offset = Some((gauss() * sigma).clamp(-0.5, 0.5));
+            // Direction mapped to line & length
+            let mut preferred = 0.0f32;
+            if plan.line_z > 0.45 {
+                preferred = 0.55; // wide off -> square through off
+            } else if plan.line_z < -0.30 {
+                preferred = -0.55; // leg stump -> flick / pull leg side
+            } else if plan.length_from_stumps < 4.5 {
+                preferred = 0.10; // yorker -> straight
             } else if plan.length_from_stumps > 11.0 {
-                0.025
-            } else {
-                0.0
-            };
-            let sigma = (0.045 + (1.0 - q) * 0.10 - (skill - 0.7) * 0.04 + length_factor)
-                .clamp(0.028, 0.30);
-            let agg = chase_pressure(
-                am.state.innings.target,
-                am.state.innings.runs,
-                am.state.innings.legal_balls,
-                am.state.overs,
-            );
-            // Defend good balls more often unless chasing hard
-            let defend_bias = if q > 0.75 && agg < 0.6 { 0.18 } else { 0.0 };
-            let swing_prob = (0.58 + agg * 0.38 - q * 0.32 - defend_bias).clamp(0.18, 0.96);
-            if coin(swing_prob) {
-                shot.attempt.pressed = true;
-                shot.attempt.offset = Some((gauss() * sigma).clamp(-0.5, 0.5));
-                // Direction mapped to line & length
-                let mut preferred = 0.0f32;
-                if plan.line_z > 0.45 {
-                    preferred = 0.55; // wide off -> square through off
-                } else if plan.line_z < -0.30 {
-                    preferred = -0.55; // leg stump -> flick / pull leg side
-                } else if plan.length_from_stumps < 4.5 {
-                    preferred = 0.10; // yorker -> straight
-                } else if plan.length_from_stumps > 11.0 {
-                    preferred = -0.40; // bouncer -> pull leg side
-                    // short balls lofted more often
-                    shot.attempt.loft = coin((0.35 + agg * 0.45).clamp(0.1, 0.85));
-                }
-                if plan.length_from_stumps <= 11.0 && plan.length_from_stumps >= 4.5 {
-                    // good length: loft only when chasing or bad ball
-                    shot.attempt.loft = coin((agg * 0.45 * (1.25 - q)).clamp(0.05, 0.88));
-                } else if shot.attempt.loft {
-                    // already set for short balls; keep
-                }
-                // Add variation around preferred
-                let spread = 0.32 + (1.0 - skill) * 0.18;
-                shot.attempt.dir_x = (preferred + (unit() * 2.0 - 1.0) * spread).clamp(-1.0, 1.0);
+                preferred = -0.40; // bouncer -> pull leg side
+                // short balls lofted more often
+                shot.attempt.loft = coin((0.35 + agg * 0.45).clamp(0.1, 0.85));
             }
+            if plan.length_from_stumps <= 11.0 && plan.length_from_stumps >= 4.5 {
+                // good length: loft only when chasing or bad ball
+                shot.attempt.loft = coin((agg * 0.45 * (1.25 - q)).clamp(0.05, 0.88));
+            } else if shot.attempt.loft {
+                // already set for short balls; keep
+            }
+            // Add variation around preferred
+            let spread = 0.32 + (1.0 - skill) * 0.18;
+            shot.attempt.dir_x = (preferred + (unit() * 2.0 - 1.0) * spread).clamp(-1.0, 1.0);
         }
     }
 }
@@ -1023,7 +1024,7 @@ pub fn sys_contact_watch(mut watch: ContactWatchParams) {
     let PhaseEnum::BallLive = watch.phase.0 else {
         return;
     };
-    let (Some(mut am), Some(wd), Some(layout)) =
+    let (Some(am), Some(wd), Some(layout)) =
         (watch.am.as_mut(), watch.wd.as_ref(), watch.layout.as_ref())
     else {
         return;
@@ -1056,7 +1057,7 @@ pub fn sys_contact_watch(mut watch: ContactWatchParams) {
         &mut watch.commands,
         &mut watch.recent,
         &mut watch.phase.0,
-        &mut am,
+        am,
         &plan,
         &watch.attempt,
         &mut bs,
@@ -1493,7 +1494,7 @@ pub fn sys_pending_watch(time: Res<Time>, _rel: Res<ReleaseInfo>, mut watch: Pen
     let PhaseEnum::BallLive = watch.phase.0 else {
         return;
     };
-    let Some(mut am) = watch.am.as_mut() else {
+    let Some(am) = watch.am.as_mut() else {
         return;
     };
     let Some(p) = watch.pending.0.as_mut() else {
@@ -1512,7 +1513,7 @@ pub fn sys_pending_watch(time: Res<Time>, _rel: Res<ReleaseInfo>, mut watch: Pen
             &mut watch.commands,
             &mut watch.recent,
             &mut watch.phase,
-            &mut am,
+            am,
             &mut watch.pending,
             &mut watch.ball_q,
             o,
@@ -1536,7 +1537,7 @@ pub fn sys_pending_watch(time: Res<Time>, _rel: Res<ReleaseInfo>, mut watch: Pen
                         &mut watch.commands,
                         &mut watch.recent,
                         &mut watch.phase,
-                        &mut am,
+                        am,
                         &mut watch.pending,
                         &mut watch.ball_q,
                         o,
@@ -1555,7 +1556,7 @@ pub fn sys_pending_watch(time: Res<Time>, _rel: Res<ReleaseInfo>, mut watch: Pen
             &mut watch.commands,
             &mut watch.recent,
             &mut watch.phase,
-            &mut am,
+            am,
             &mut watch.pending,
             &mut watch.ball_q,
             o,

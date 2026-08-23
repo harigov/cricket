@@ -1144,10 +1144,10 @@ fn commentary_update(
             commentary.playing.remaining = 0.0;
         }
     }
-    if *state.get() == crate::state::AppState::InMatch {
-        if let (Some(mut ctx), Some(m)) = (commentary.ctx_mut(), am.as_deref()) {
-            try_dispatch_match_intro(&mut commands, &mut ctx, m);
-        }
+    if *state.get() == crate::state::AppState::InMatch
+        && let (Some(mut ctx), Some(m)) = (commentary.ctx_mut(), am.as_deref())
+    {
+        try_dispatch_match_intro(&mut commands, &mut ctx, m);
     }
     if commentary.history.lifecycle.intro_open
         && commentary.history.lifecycle.welcome_played

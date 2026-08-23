@@ -2460,7 +2460,7 @@ fn navigate_grid(input: &PlayerInput, sel: &mut usize, count: usize, cols: usize
         return;
     }
     let cols = cols.max(1);
-    let rows = (count + cols - 1) / cols;
+    let rows = count.div_ceil(cols);
     let row = *sel / cols;
     let col = *sel % cols;
 
