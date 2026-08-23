@@ -3,6 +3,10 @@ use std::f32::consts::{PI, TAU};
 use crate::core::geometry as geo;
 use crate::core::stadiums::Stadium;
 use crate::core::teams::Team;
+use crate::render::crowd::{
+    self, CROWD_VARIANTS, outfit_for, posture_y_offset, spectator_seed, variant_index_for_seat,
+    yaw_jitter_for_seat,
+};
 use crate::render::outfield_grass::{self, MOW_BAND_COUNT};
 use crate::render::ring_geometry::{
     floodlight_angles, floodlight_radius, ring_band_specs, ring_boxes_mesh,
@@ -243,6 +247,35 @@ fn crowd_segment_skipped(seg: usize) -> bool {
 
 fn crowd_seats_at(seg: usize, tier: usize) -> usize {
     1 + (seg * 7 + tier * 11).is_multiple_of(3) as usize
+}
+
+/// Mid-angle on the crowd seat ring for a segment/tier (shared by spawner and gap test).
+fn crowd_seat_mid_angle(seg: usize, tier: usize) -> f32 {
+    let tier_phase = ((tier * 19 + 7) % CROWD_SEGMENTS) as f32 / CROWD_SEGMENTS as f32 * TAU;
+    let seg_jitter = ((seg * 3 + tier * 13) % 5) as f32 - 2.0;
+    (seg as f32 + 0.5 + seg_jitter * 0.18) / CROWD_SEGMENTS as f32 * TAU + tier_phase
+}
+
+/// Structural tread segment index for a crowd seat's mid-angle.
+fn crowd_seat_structural_segment(seg: usize, tier: usize) -> usize {
+    let mid = crowd_seat_mid_angle(seg, tier);
+    (mid.rem_euclid(TAU) / TAU * TIER_SEGMENTS as f32) as usize
+}
+
+/// True when a crowd seat's angle falls in one of the structural aisle gaps
+/// cut by `ring_band_specs(TIER_SEGMENTS, AISLE_EVERY, ..)` — there is no
+/// tread there, so a spectator placed on it would float.
+fn crowd_seat_over_aisle_gap(seg: usize, tier: usize) -> bool {
+    let mid = crowd_seat_mid_angle(seg, tier);
+    let seg_f = mid.rem_euclid(TAU) / TAU * TIER_SEGMENTS as f32;
+    let structural_seg = seg_f as usize;
+    if structural_seg.is_multiple_of(AISLE_EVERY) {
+        return true;
+    }
+    // Rows are 1–2 seats wide (±~0.5 m tangentially); widen gap edges by ±0.25
+    // structural segments so edge seats beside an aisle are excluded too.
+    let pos_in_aisle_cycle = seg_f % AISLE_EVERY as f32;
+    pos_in_aisle_cycle < 0.25 || pos_in_aisle_cycle > AISLE_EVERY as f32 - 0.25
 }
 
 fn spawn_stadium_apron(
@@ -765,18 +798,11 @@ fn spawn_crowd(
     ctx: &StadiumBuildCtx<'_>,
     spawn_count: &mut usize,
 ) -> usize {
-    // ---- Crowd: ~350–550 seated spectators ----
-    let crowd_variants = [
+    // ---- Crowd: ~350–550 posed Quaternius spectators ----
+    let crowd_scenes: [Handle<Scene>; 15] = std::array::from_fn(|i| {
         ctx.asset_server
-            .load(GltfAssetLabel::Scene(0).from_asset("crowd/crowd-a.glb")),
-        ctx.asset_server
-            .load(GltfAssetLabel::Scene(0).from_asset("crowd/crowd-b.glb")),
-        ctx.asset_server
-            .load(GltfAssetLabel::Scene(0).from_asset("crowd/crowd-c.glb")),
-        ctx.asset_server
-            .load(GltfAssetLabel::Scene(0).from_asset("crowd/crowd-d.glb")),
-    ];
-    let crowd_scale = 0.62;
+            .load(GltfAssetLabel::Scene(0).from_asset(CROWD_VARIANTS[i].path))
+    });
     let mut crowd_count = 0usize;
     let bowl = &ctx.bowl;
 
@@ -785,12 +811,10 @@ fn spawn_crowd(
             continue;
         }
         for &tier in &CROWD_TIERS {
-            // Stagger each tier's seat ring so figures don't stack in radial columns.
-            let tier_phase =
-                ((tier * 19 + 7) % CROWD_SEGMENTS) as f32 / CROWD_SEGMENTS as f32 * TAU;
-            let seg_jitter = ((seg * 3 + tier * 13) % 5) as f32 - 2.0;
-            let mid =
-                (seg as f32 + 0.5 + seg_jitter * 0.18) / CROWD_SEGMENTS as f32 * TAU + tier_phase;
+            if crowd_seat_over_aisle_gap(seg, tier) {
+                continue;
+            }
+            let mid = crowd_seat_mid_angle(seg, tier);
             let seats = crowd_seats_at(seg, tier);
             let seat_r = bowl.tier_mid_radius(tier) - 0.15;
             let seat_h = bowl.tier_height(tier) + bowl.tread_thickness - 0.06;
@@ -798,15 +822,19 @@ fn spawn_crowd(
             for k in 0..seats {
                 let off = (k as f32 - (seats as f32 - 1.0) * 0.5) * 0.95
                     + ((seg * 13 + tier * 5 + k) % 7) as f32 * 0.04;
-                let pos = ring_position(mid, seat_r, seat_h) + tangent * off;
-                let variant = crowd_variants[(seg * 7 + tier * 11 + k * 5) % 4].clone();
-                let s = 0.94 + ((seg * 11 + tier * 17 + k * 13) % 7) as f32 * 0.014;
-                let rot = ring_face_center_rotation(mid) * Quat::from_rotation_x(-0.26);
+                let variant_idx = variant_index_for_seat(seg, tier, k);
+                let y_off = posture_y_offset(variant_idx);
+                let pos = ring_position(mid, seat_r, seat_h + y_off) + tangent * off;
+                let seed = spectator_seed(seg, tier, k);
+                let scale = crowd::height_scale_for_seat(seg, tier, k);
+                let yaw_jitter = yaw_jitter_for_seat(seg, tier, k);
+                let rot = ring_face_center_rotation(mid) * Quat::from_rotation_y(yaw_jitter);
                 p.spawn((
-                    SceneRoot(variant),
+                    SceneRoot(crowd_scenes[variant_idx].clone()),
+                    outfit_for(seed),
                     Transform::from_translation(pos)
                         .with_rotation(rot)
-                        .with_scale(Vec3::splat(s * crowd_scale)),
+                        .with_scale(Vec3::splat(scale)),
                     Visibility::default(),
                     InheritedVisibility::default(),
                     ViewVisibility::default(),
@@ -1098,6 +1126,9 @@ pub fn expected_crowd_count() -> usize {
             continue;
         }
         for &tier in &CROWD_TIERS {
+            if crowd_seat_over_aisle_gap(seg, tier) {
+                continue;
+            }
             count += crowd_seats_at(seg, tier);
         }
     }
@@ -1377,6 +1408,69 @@ mod tests {
         let n = expected_crowd_count();
         assert!(n >= 350, "crowd too sparse: {n}");
         assert!(n <= 550, "crowd too dense: {n}");
+    }
+
+    fn simulated_crowd_spawn_count() -> usize {
+        let mut count = 0usize;
+        for seg in 0..CROWD_SEGMENTS {
+            if crowd_segment_skipped(seg) {
+                continue;
+            }
+            for &tier in &CROWD_TIERS {
+                if crowd_seat_over_aisle_gap(seg, tier) {
+                    continue;
+                }
+                count += crowd_seats_at(seg, tier);
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn crowd_seats_not_over_structural_aisle_gaps() {
+        for seg in 0..CROWD_SEGMENTS {
+            if crowd_segment_skipped(seg) {
+                continue;
+            }
+            for &tier in &CROWD_TIERS {
+                if crowd_seat_over_aisle_gap(seg, tier) {
+                    continue;
+                }
+                let structural_seg = crowd_seat_structural_segment(seg, tier);
+                assert!(
+                    !structural_seg.is_multiple_of(AISLE_EVERY),
+                    "seg {seg} tier {tier} maps to structural aisle segment {structural_seg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn crowd_aisle_gap_filter_is_material_but_not_excessive() {
+        let mut unfiltered = 0usize;
+        let mut filtered = 0usize;
+        for seg in 0..CROWD_SEGMENTS {
+            if crowd_segment_skipped(seg) {
+                continue;
+            }
+            for &tier in &CROWD_TIERS {
+                let seats = crowd_seats_at(seg, tier);
+                unfiltered += seats;
+                if crowd_seat_over_aisle_gap(seg, tier) {
+                    filtered += seats;
+                }
+            }
+        }
+        assert!(filtered > 0, "aisle gap filter removed no seats");
+        assert!(
+            filtered * 4 < unfiltered,
+            "aisle gap filter removed too many seats: {filtered} of {unfiltered}"
+        );
+    }
+
+    #[test]
+    fn expected_crowd_count_matches_spawn_loop() {
+        assert_eq!(expected_crowd_count(), simulated_crowd_spawn_count());
     }
 
     #[test]

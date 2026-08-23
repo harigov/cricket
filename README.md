@@ -39,9 +39,12 @@ full batting / bowling / fielding gameplay on both keyboard and gamepad.
   (green seamer / hard & true / dusty turner / dry), striped mown outfield
   with outer shell from **Poly Pizza Stylized Stadium** (CC-BY 3.0,
   `assets/stadium/poly_stadium.glb` 104KB) and tiered stands.
-- **Realistic crowd** — ~120 **Kenney Blocky Characters** (CC0,
-  `assets/crowd/crowd-*.glb` 111KB each) seated on stands, varied scale/yaw,
-  replacing 480 cuboid blobs; 1k tris each, instanced via `SceneRoot`.
+- **Realistic crowd** — ~450 **Quaternius Background Posed Humans** (CC0,
+  `assets/crowd/posed/` — 15 GLBs: male sit/cheer/wave × hair1/hair3/bald,
+  female sit/cheer/wave × hair1/hair2, ~71–126 KB each) on tiered stands with
+  shared palette materials (6 skin / 10 shirt / 5 pants / 3 shoes / 5 hair —
+  one shared material per colour, no per-instance clones) and deterministic
+  per-seat colour variation; life-sized GLBs via `SceneRoot`.
 - **Realistic human models** — MIT-licensed **Xbot glTF** (Mixamo rig,
   `assets/characters/Xbot.glb` 2.8 MB via three.js `examples` — MIT, PBR,
   16k tris, 55-bone humanoid). Skinned, code-driven skeletal animation

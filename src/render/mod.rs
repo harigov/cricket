@@ -1,4 +1,5 @@
 pub mod camera_rig;
+pub mod crowd;
 pub mod outfield_grass;
 pub mod player;
 pub mod ring_geometry;
@@ -127,16 +128,18 @@ impl Plugin for RenderPlugin {
         );
         // Shared mocap locomotion graph (idle/run) for every figure.
         player::build_locomotion_clips(app);
-        app.add_systems(
-            Update,
-            (
-                player::disable_figure_frustum_culling,
-                player::tag_skeleton_bones,
-                player::apply_team_kit_materials,
-                player::attach_animation_players,
-                player::animate_figures,
-            ),
-        )
-        .add_systems(PostUpdate, player::strip_skeleton_root_motion);
+        app.add_systems(Startup, crowd::init_crowd_palette)
+            .add_systems(
+                Update,
+                (
+                    player::disable_figure_frustum_culling,
+                    player::tag_skeleton_bones,
+                    player::apply_team_kit_materials,
+                    crowd::apply_crowd_materials,
+                    player::attach_animation_players,
+                    player::animate_figures,
+                ),
+            )
+            .add_systems(PostUpdate, player::strip_skeleton_root_motion);
     }
 }
