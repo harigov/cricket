@@ -11,21 +11,33 @@ pub struct Fielder {
     pub slot: usize,
     pub is_keeper: bool,
     pub label: &'static str,
+    /// Assigned post in world XZ (metres).
+    pub post: Vec2,
 }
 
 /// Movement brain for a fielder.
-#[derive(Component)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub enum Brain {
     /// Standing at the assigned post.
     AtPost,
     /// Chasing the ball's projected position.
     Chase,
+    /// Bending to pick up the ball at the feet.
+    Collect,
     /// Walking back to post after collecting.
     Return,
 }
 
 pub const FIELDER_SPEED: f32 = 8.2;
 const KEEPER_SPEED: f32 = 9.0;
+/// Horizontal reach for ground collection (metres) — a fielder's pick-up radius.
+pub const COLLECTION_RADIUS: f32 = 1.35;
+/// Duration of the bend-and-gather pickup beat.
+const COLLECT_SECS: f32 = 0.55;
+/// Walk-back speed after collecting.
+const RETURN_SPEED: f32 = 5.5;
+/// Close enough to the post to stand down.
+const POST_ARRIVAL_RADIUS: f32 = 0.4;
 /// Exponential smoothing rate for fielders tracking the ball with their gaze.
 const FACE_TRACK_RATE: f32 = 8.0;
 
@@ -51,6 +63,15 @@ fn smooth_face_target(tf: &mut Transform, from: Vec2, to: Vec2, dt: f32) {
     let target_yaw = face_target(from, to);
     let current_yaw = tf.rotation.to_euler(EulerRot::YXZ).0;
     tf.rotation = Quat::from_rotation_y(smooth_yaw_toward(current_yaw, target_yaw, dt));
+}
+
+/// When a chaser closes within collection range, transition out of chase.
+pub(crate) fn brain_on_chase_arrival(dist_to_ball: f32, brain: Brain) -> Brain {
+    if matches!(brain, Brain::Chase) && dist_to_ball <= COLLECTION_RADIUS {
+        Brain::Collect
+    } else {
+        brain
+    }
 }
 
 /// Build slot-indexed world positions for fielders (index = `Fielder.slot`).
@@ -103,6 +124,7 @@ pub fn spawn_field_side(
                 slot,
                 is_keeper,
                 label: fp.name,
+                post: pos,
             },
             Brain::AtPost,
         ));
@@ -126,7 +148,7 @@ pub fn reset_brains(mut brains: Query<&mut Brain>) {
 pub fn chase_system(
     time: Res<Time>,
     ball_q: Query<&crate::game::ball::BallState, With<CricketBall>>,
-    mut fielders: Query<(&Fielder, &Brain, &mut Transform, &mut Anim)>,
+    mut fielders: Query<(&Fielder, &mut Brain, &mut Transform, &mut Anim)>,
 ) {
     let Ok(ball) = ball_q.single() else { return };
     let dt = time.delta_secs();
@@ -138,11 +160,21 @@ pub fn chase_system(
         ball_xz
     };
 
-    for (f, brain, mut tf, mut anim) in &mut fielders {
+    for (f, mut brain, mut tf, mut anim) in &mut fielders {
         let pos = Vec2::new(tf.translation.x, tf.translation.z);
 
         match *brain {
             Brain::Chase if !ball_parked => {
+                let to_ball =
+                    Vec2::new(ball.pos.x - tf.translation.x, ball.pos.z - tf.translation.z);
+                let dist = to_ball.length();
+                if dist <= COLLECTION_RADIUS {
+                    *brain = Brain::Collect;
+                    anim.state = AnimState::Throw { p: 0.0 };
+                    smooth_face_target(&mut tf, pos, ball_xz, dt);
+                    continue;
+                }
+
                 // Sprint animation while chasing.
                 if !matches!(anim.state, AnimState::Run { .. }) {
                     anim.state = AnimState::Run { t: 0.0 };
@@ -155,13 +187,6 @@ pub fn chase_system(
                     FIELDER_SPEED
                 };
                 // Predict where the ball will be when we get there (simple lead)
-                let to_ball =
-                    Vec2::new(ball.pos.x - tf.translation.x, ball.pos.z - tf.translation.z);
-                let dist = to_ball.length();
-                if dist < 0.05 {
-                    smooth_face_target(&mut tf, pos, look_target, dt);
-                    continue;
-                }
                 let t_intercept = (dist / speed).clamp(0.0, 0.65);
                 // Only predict horizontal motion; vertical is irrelevant for ground chase
                 let pred = Vec2::new(
@@ -170,7 +195,7 @@ pub fn chase_system(
                 );
                 let to_pred = Vec2::new(pred.x - tf.translation.x, pred.y - tf.translation.z);
                 let d2 = to_pred.length();
-                if d2 < 0.05 {
+                if d2 < 1e-4 {
                     smooth_face_target(&mut tf, pos, look_target, dt);
                     continue;
                 }
@@ -180,7 +205,46 @@ pub fn chase_system(
                 tf.translation.z += dir.y * step;
                 tf.rotation = Quat::from_rotation_y(yaw_to_face(dir));
             }
-            Brain::AtPost | Brain::Return | Brain::Chase => {
+            Brain::Collect => {
+                smooth_face_target(&mut tf, pos, ball_xz, dt);
+                let p = match &mut anim.state {
+                    AnimState::Throw { p } => p,
+                    _ => {
+                        anim.state = AnimState::Throw { p: 0.0 };
+                        if let AnimState::Throw { p } = &mut anim.state {
+                            p
+                        } else {
+                            continue;
+                        }
+                    }
+                };
+                *p = (*p + dt / COLLECT_SECS).min(1.0);
+                if *p >= 1.0 {
+                    *brain = Brain::Return;
+                    anim.state = AnimState::Idle;
+                }
+            }
+            Brain::Return => {
+                let to_post = f.post - pos;
+                let dist = to_post.length();
+                if dist <= POST_ARRIVAL_RADIUS {
+                    *brain = Brain::AtPost;
+                    anim.state = AnimState::Idle;
+                    smooth_face_target(&mut tf, pos, geometry::BATSMAN_POS, dt);
+                } else {
+                    if !matches!(anim.state, AnimState::Run { .. }) {
+                        anim.state = AnimState::Run { t: 0.0 };
+                    } else if let AnimState::Run { t } = &mut anim.state {
+                        *t += dt;
+                    }
+                    let step = (RETURN_SPEED * dt).min(dist);
+                    let dir = to_post / dist;
+                    tf.translation.x += dir.x * step;
+                    tf.translation.z += dir.y * step;
+                    tf.rotation = Quat::from_rotation_y(yaw_to_face(dir));
+                }
+            }
+            Brain::AtPost | Brain::Chase => {
                 smooth_face_target(&mut tf, pos, look_target, dt);
             }
         }
@@ -230,6 +294,22 @@ mod tests {
         assert!(
             delta.abs() < 0.05,
             "should wrap the short way, settled={settled} delta={delta}"
+        );
+    }
+
+    #[test]
+    fn chaser_within_collection_radius_leaves_chase() {
+        assert_eq!(
+            brain_on_chase_arrival(COLLECTION_RADIUS, Brain::Chase),
+            Brain::Collect
+        );
+        assert_eq!(
+            brain_on_chase_arrival(COLLECTION_RADIUS + 0.1, Brain::Chase),
+            Brain::Chase
+        );
+        assert_eq!(
+            brain_on_chase_arrival(0.5, Brain::AtPost),
+            Brain::AtPost
         );
     }
 }

@@ -616,19 +616,19 @@ pub fn sys_runup(mut phase: ResMut<Phase>, time: Res<Time>, mut runup: RunupPara
     let p = *p;
 
     // Bowler jogs in; delivery stride over the last 30%.
+    // Keep the mocap run clip through the whole approach: switching to procedural
+    // `BowlAction` here stops the clip and the deep knee bend buries the feet
+    // ~1 m below the pitch (see `bowler_runup_keeps_mocap_run` test note).
     for (fig, mut tf, mut anim) in &mut runup.figs {
         if fig.kind == FigureKind::Bowler {
-            tf.translation.x = bowler_runup_x(p.clamp(0.0, 1.0));
+            let pc = p.clamp(0.0, 1.0);
+            tf.translation.x = bowler_runup_x(pc);
             tf.translation.y = 0.0;
             tf.rotation = face_target_quat(
                 Vec2::new(tf.translation.x, tf.translation.z),
                 geo::BATSMAN_POS,
             );
-            anim.state = if p > 0.7 {
-                AnimState::BowlAction { p: (p - 0.7) / 0.3 }
-            } else {
-                AnimState::Run { t: p * 4.0 }
-            };
+            anim.state = AnimState::Run { t: pc * 4.0 };
         }
     }
 
@@ -686,6 +686,7 @@ pub fn sys_runup(mut phase: ResMut<Phase>, time: Res<Time>, mut runup: RunupPara
     for (fig, mut tf, mut anim) in &mut runup.figs {
         if fig.kind == FigureKind::Bowler {
             tf.translation.x = geo::RELEASE_POINT.x + BOWLER_FOLLOW_THROUGH_X;
+            tf.translation.y = 0.0;
             anim.state = AnimState::BowlSettle { t: 0.0 };
         }
     }
@@ -1917,7 +1918,7 @@ pub fn fielding_brain_reset(phase: Res<Phase>, mut last: Local<u8>, mut brains: 
     };
     if disc == 1 && *last != 1 {
         for mut b in &mut brains {
-            if matches!(*b, Brain::Chase) {
+            if matches!(*b, Brain::Chase | Brain::Collect | Brain::Return) {
                 *b = Brain::AtPost;
             }
         }
@@ -2052,6 +2053,7 @@ mod tests {
                 slot,
                 is_keeper: false,
                 label: "cover",
+                post: expected,
             },
             Transform::from_xyz(99.0, 99.0, 99.0),
             Anim::default(),
@@ -2152,7 +2154,9 @@ mod tests {
                 kind: FigureKind::Bowler,
             },
             Transform::from_xyz(-20.0, 0.0, 0.35),
-            Anim::default(),
+            Anim {
+                state: AnimState::Run { t: 0.0 },
+            },
         ));
         app.world_mut().spawn((
             CricketBall,
@@ -2199,6 +2203,59 @@ mod tests {
             bs.pos
         );
         assert_eq!(tf.translation, bs.pos);
+    }
+
+    /// Run-up must stay on the mocap jog through the delivery stride; switching
+    /// to procedural `BowlAction` at `p > 0.7` was measured to bury foot bones
+    /// to about **−1.03 m** world Y (vs **+0.004 m** with run clip retained).
+    #[test]
+    fn bowler_runup_keeps_mocap_run_through_delivery_stride() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, sys_runup);
+
+        app.world_mut().spawn((
+            Figure {
+                kind: FigureKind::Bowler,
+            },
+            Transform::from_xyz(-20.0, 0.0, 0.35),
+            Anim::default(),
+        ));
+        app.world_mut().spawn((
+            CricketBall,
+            BallState::default(),
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+
+        app.world_mut()
+            .insert_resource(Phase(PhaseEnum::RunUp { p: 0.84 }));
+        app.world_mut().insert_resource(CurrentDelivery(None));
+        app.world_mut().insert_resource(minimal_active_match());
+        app.world_mut().insert_resource(WorldData::new());
+        app.world_mut().insert_resource(MatchScene {
+            stadium_root: Entity::PLACEHOLDER,
+            ball: Entity::PLACEHOLDER,
+            bowler: Entity::PLACEHOLDER,
+            striker: Entity::PLACEHOLDER,
+            non_striker: Entity::PLACEHOLDER,
+            fielders: vec![],
+            marker: None,
+        });
+        prime_test_time(&mut app);
+        advance_test_time(app.world_mut(), 0.02);
+        app.update();
+
+        let mut q = app.world_mut().query::<&Anim>();
+        let anim = q.single(app.world()).unwrap();
+        assert!(
+            matches!(anim.state, AnimState::Run { .. }),
+            "delivery stride should keep mocap run, got {:?}",
+            anim.state
+        );
+        assert!(
+            !matches!(anim.state, AnimState::BowlAction { .. }),
+            "BowlAction during run-up sinks the bowler's feet below the pitch"
+        );
     }
 
     /// The bowler used to be lerped linearly all the way to the crease, so he
