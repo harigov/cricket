@@ -69,6 +69,15 @@ pub enum StadiumEnvironment {
 }
 
 impl StadiumEnvironment {
+    /// Every theme, so renderers and tests can cover the set exhaustively.
+    pub const ALL: [StadiumEnvironment; 5] = [
+        StadiumEnvironment::Metropolis,
+        StadiumEnvironment::Alpine,
+        StadiumEnvironment::Coastal,
+        StadiumEnvironment::Parkland,
+        StadiumEnvironment::Desert,
+    ];
+
     pub fn label(&self) -> &'static str {
         match self {
             StadiumEnvironment::Metropolis => "City centre",
@@ -171,13 +180,7 @@ mod tests {
     #[test]
     fn every_environment_theme_is_playable() {
         let stadiums = builtin_stadiums();
-        for theme in [
-            StadiumEnvironment::Metropolis,
-            StadiumEnvironment::Alpine,
-            StadiumEnvironment::Coastal,
-            StadiumEnvironment::Parkland,
-            StadiumEnvironment::Desert,
-        ] {
+        for theme in StadiumEnvironment::ALL {
             assert!(
                 stadiums.iter().any(|s| s.environment == theme),
                 "no stadium uses {theme:?}"
