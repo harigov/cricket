@@ -173,6 +173,12 @@ pub fn build_locomotion_clips(app: &mut App) {
 #[derive(Component)]
 pub struct Bat;
 
+/// Cricket gear we spawn ourselves (bat, gloves, helmet, cap, pads, crest).
+/// The kit recolouring pass must skip these: it classifies unnamed meshes by
+/// base colour, and willow/white gear otherwise gets repainted in team colours.
+#[derive(Component)]
+pub(crate) struct Equipment;
+
 /// Team colours carried by the figure root while its glTF scene streams in.
 #[derive(Component, Clone)]
 pub struct TeamKit {
@@ -447,7 +453,7 @@ pub fn apply_team_kit_materials(
     parents: Query<&ChildOf>,
     meshes: Query<
         (Entity, Option<&Name>, &MeshMaterial3d<StandardMaterial>),
-        (Without<KitStyled>, With<Mesh3d>),
+        (Without<KitStyled>, With<Mesh3d>, Without<Equipment>),
     >,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -658,7 +664,7 @@ fn spawn_mesh_child(
     transform: Transform,
 ) {
     commands.entity(parent).with_children(|p| {
-        p.spawn((Mesh3d(mesh), MeshMaterial3d(material), transform));
+        p.spawn((Equipment, Mesh3d(mesh), MeshMaterial3d(material), transform));
     });
 }
 
@@ -711,11 +717,13 @@ fn attach_bat(
     commands.entity(hand).with_children(|p| {
         p.spawn((
             Bat,
+            Equipment,
             Mesh3d(blade),
             MeshMaterial3d(wood.clone()),
             blade_tf,
         ));
         p.spawn((
+            Equipment,
             Mesh3d(handle),
             MeshMaterial3d(grip_mat),
             handle_tf,
@@ -767,6 +775,7 @@ fn attach_helmet(
     let peak_mat = matte_shell(materials, shell_col, 0.82, 0.10);
     commands.entity(head).with_children(|p| {
         p.spawn((
+            Equipment,
             Mesh3d(shell),
             MeshMaterial3d(shell_mat),
             equipment_transform_m_scaled(
@@ -776,6 +785,7 @@ fn attach_helmet(
             ),
         ));
         p.spawn((
+            Equipment,
             Mesh3d(peak),
             MeshMaterial3d(peak_mat),
             equipment_transform_m(Vec3::new(0.0, 0.115, 0.115), Quat::IDENTITY),
@@ -799,6 +809,7 @@ fn attach_cap(
     let dome_mat = matte(materials, primary, 0.85);
     commands.entity(head).with_children(|p| {
         p.spawn((
+            Equipment,
             Mesh3d(dome),
             MeshMaterial3d(dome_mat.clone()),
             equipment_transform_m_scaled(
@@ -808,6 +819,7 @@ fn attach_cap(
             ),
         ));
         p.spawn((
+            Equipment,
             Mesh3d(brim),
             MeshMaterial3d(dome_mat),
             equipment_transform_m_scaled(
@@ -1389,6 +1401,24 @@ mod tests {
         assert_eq!(
             bone_kind_for_name("mixamorig:RightHand"),
             Some(BoneKind::RightHand)
+        );
+    }
+
+    #[test]
+    /// The colour fallback in `kit_mesh_kind` classifies willow and white gear
+    /// as jersey material, so equipment must be excluded from the recolour pass
+    /// by marker, not by colour. Regression: the bat rendered in team colours.
+    #[test]
+    fn willow_and_pad_colours_would_be_misread_as_kit() {
+        let willow = StandardMaterial {
+            base_color: Color::srgb_u8(0xE6, 0xD2, 0xA0),
+            ..Default::default()
+        };
+        assert_eq!(
+            kit_mesh_kind("", &willow),
+            Some(KitMeshKind::Surface),
+            "willow trips the colour fallback, so `Without<Equipment>` is what keeps \
+             the bat from being repainted - do not rely on colour to exclude gear"
         );
     }
 
