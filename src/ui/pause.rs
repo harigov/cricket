@@ -122,9 +122,8 @@ fn reset_pause_flag(mut paused: ResMut<MatchPaused>) {
 
 fn toggle_pause(
     input: Res<PlayerInput>,
-    paused: Res<MatchPaused>,
     menu: Res<PauseMenuState>,
-    mut next_paused: ResMut<MatchPaused>,
+    mut paused: ResMut<MatchPaused>,
     phase: Res<Phase>,
 ) {
     if !input.pressed(Action::Cancel) {
@@ -134,11 +133,12 @@ fn toggle_pause(
         return;
     }
     if paused.0 {
+        // Esc only resumes from the root page; sub-pages handle their own back.
         if menu.screen == PauseScreen::Root {
-            next_paused.0 = false;
+            paused.0 = false;
         }
     } else {
-        next_paused.0 = true;
+        paused.0 = true;
     }
 }
 
@@ -508,7 +508,7 @@ fn handle_settings_input(
 }
 
 fn handle_pause_input(
-    paused: Res<MatchPaused>,
+    mut paused: ResMut<MatchPaused>,
     mut menu: ResMut<PauseMenuState>,
     input: Res<PlayerInput>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -517,7 +517,6 @@ fn handle_pause_input(
     mut audio: ResMut<AudioSettings>,
     mut ui_prefs: ResMut<UiPreferences>,
     mut rig: ResMut<CameraRig>,
-    mut next_paused: ResMut<MatchPaused>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     if !paused.0 {
@@ -529,14 +528,14 @@ fn handle_pause_input(
             navigate_list(&input, &mut menu.sel, 3);
             if input.pressed(Action::Confirm) {
                 match menu.sel {
-                    0 => next_paused.0 = false,
+                    0 => paused.0 = false,
                     1 => {
                         menu.screen = PauseScreen::Settings;
                         menu.sel = 0;
                         menu.settings_tab = SettingsTab::Audio;
                     }
                     _ => {
-                        next_paused.0 = false;
+                        paused.0 = false;
                         next_state.set(AppState::Menu);
                     }
                 }

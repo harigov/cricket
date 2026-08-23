@@ -175,21 +175,26 @@ enum AutotestMode {
 }
 
 struct AutotestScript {
-    presses: [(f32, input::Action); 7],
+    presses: [(f32, input::Action); 9],
     milestones: &'static [f32],
     end_time: f32,
     switches_to_night: bool,
     swings: bool,
 }
 
-const QUICK_MATCH_PRESSES: [(f32, input::Action); 7] = [
-    (2.0, input::Action::Confirm), // Quick Match -> team select
-    (3.5, input::Action::Confirm), // pick your team
-    (5.0, input::Action::Confirm), // pick opponent
-    (6.5, input::Action::Confirm), // overs
-    (8.0, input::Action::Confirm), // stadium (random)
-    (9.5, input::Action::Confirm), // bat first -> match starts
+// The toss adds a flip, a result slide, a bat/bowl choice and a summary
+// between the venue pick and the first ball; the flip and result slides
+// auto-advance, the other two wait for Confirm.
+const QUICK_MATCH_PRESSES: [(f32, input::Action); 9] = [
+    (2.0, input::Action::Confirm),  // Quick Match -> team select
+    (3.5, input::Action::Confirm),  // pick your team
+    (5.0, input::Action::Confirm),  // pick opponent
+    (6.5, input::Action::Confirm),  // overs
+    (8.0, input::Action::Confirm),  // stadium (random)
+    (13.0, input::Action::Confirm), // toss: elect to bat
+    (14.5, input::Action::Confirm), // toss summary -> match starts
     (99.0, input::Action::Confirm),
+    (99.5, input::Action::Confirm),
 ];
 
 impl AutotestMode {
@@ -219,6 +224,8 @@ impl AutotestMode {
                     (12.0, input::Action::Confirm),
                     (14.0, input::Action::Confirm),
                     (16.0, input::Action::Confirm),
+                    (18.0, input::Action::Confirm),
+                    (20.0, input::Action::Confirm),
                 ],
                 milestones: &[1.5, 5.0, 7.0, 14.0],
                 end_time: 20.0,
@@ -234,6 +241,8 @@ impl AutotestMode {
                     (6.5, input::Action::Right),   // bump volume
                     (7.5, input::Action::Cancel),  // back to main
                     (99.0, input::Action::Confirm),
+                    (99.5, input::Action::Confirm),
+                    (100.0, input::Action::Confirm),
                 ],
                 milestones: &[1.5, 5.0, 6.8, 8.5],
                 end_time: 10.0,
@@ -242,28 +251,28 @@ impl AutotestMode {
             },
             Self::Night => AutotestScript {
                 presses: QUICK_MATCH_PRESSES,
-                milestones: &[1.5, 16.0, 30.0, 45.0],
+                milestones: &[1.5, 16.5, 30.0, 45.0],
                 end_time: 50.0,
                 switches_to_night: true,
                 swings: true,
             },
             Self::Stadium => AutotestScript {
                 presses: QUICK_MATCH_PRESSES,
-                milestones: &[16.0],
-                end_time: 20.0,
+                milestones: &[18.0],
+                end_time: 24.0,
                 switches_to_night: false,
                 swings: false,
             },
             Self::StadiumNight => AutotestScript {
                 presses: QUICK_MATCH_PRESSES,
-                milestones: &[16.0],
-                end_time: 20.0,
+                milestones: &[18.0],
+                end_time: 24.0,
                 switches_to_night: true,
                 swings: false,
             },
             Self::Quick => AutotestScript {
                 presses: QUICK_MATCH_PRESSES,
-                milestones: &[1.5, 16.0, 30.0, 45.0],
+                milestones: &[1.5, 16.5, 30.0, 45.0],
                 end_time: 50.0,
                 switches_to_night: false,
                 swings: true,
@@ -301,14 +310,15 @@ fn autotest_drive(
     }
 
     // Night / stadium-night: switch to floodlit mode once the match scene is live.
-    if script.switches_to_night && now > 11.5 && !*night_applied {
+    if script.switches_to_night && now > 16.5 && !*night_applied {
         *stadium_time = StadiumTime::Night;
         *night_applied = true;
         info!("AUTOTEST: switched to night stadium lighting");
     }
 
     // In-match: swing periodically once play is under way (not stadium captures).
-    if script.swings && now > 14.0 && now - *last_swing_t >= 3.0 {
+    // Starts after the toss slides so these presses cannot skip through them.
+    if script.swings && now > 16.0 && now - *last_swing_t >= 3.0 {
         *last_swing_t = now;
         input.just_pressed.push(input::Action::Confirm);
         info!("AUTOTEST: shot swing @ {:.1}s", now);

@@ -12,6 +12,13 @@ use crate::render::stadium::BowlLayout;
 const BATTING_CAM_HEIGHT_M: f32 = 3.6576;
 /// Distance behind the striker along the pitch axis: 10 ft in metres (10 × 0.3048).
 const BATTING_CAM_BEHIND_BATSMAN_M: f32 = 3.048;
+/// Aim point a few metres past the striker, down the pitch.
+const BATTING_CAM_LOOK_X: f32 = 2.0;
+/// Aim height, near the strip so the lens tilts down enough to frame the striker.
+const BATTING_CAM_LOOK_Y: f32 = 0.35;
+/// Vertical FOV. The 10 ft standoff is short, so framing the striker *and* the
+/// bowler 30 m away needs a wide lens - wider than the establishing shot.
+const BATTING_CAM_FOV_DEG: f32 = 60.0;
 
 #[derive(Resource, Default)]
 pub struct CameraRig {
@@ -102,12 +109,16 @@ pub fn mode_view(
                 BATTING_CAM_HEIGHT_M,
                 batsman.y,
             );
+            // Aim short of the bowler and low: from only 10 ft back, sighting
+            // the release point directly tilts the lens far enough up that the
+            // striker drops out of frame, and a batting view has to show the
+            // batter playing the ball as well as the ball itself.
             let look = Vec3::new(
-                geometry::RELEASE_POINT.x,
-                geometry::RELEASE_POINT.y * 0.55,
+                BATTING_CAM_LOOK_X,
+                BATTING_CAM_LOOK_Y,
                 geometry::RELEASE_POINT.z,
             );
-            (cam, look, 48.0)
+            (cam, look, BATTING_CAM_FOV_DEG)
         }
         CamMode::BowlingEnd => (
             Vec3::new(-stump_x - 11.5, 7.2, -4.2),
@@ -303,12 +314,39 @@ mod tests {
         );
     }
 
+    /// The 10 ft standoff is short enough that a slightly high aim point pushes
+    /// the striker below the frame; a batting view must still show the batter.
     #[test]
-    fn broadcast_wider_than_batting_lens() {
+    fn batting_lens_keeps_striker_in_frame() {
+        let br = geometry::DEFAULT_BOUNDARY_RADIUS;
+        let (pos, look, fov) = mode_view(CamMode::BattingEnd, None, br, None);
+
+        // Depression of the optical axis below horizontal.
+        let flat = Vec2::new(look.x - pos.x, look.z - pos.z).length();
+        let depression = ((pos.y - look.y) / flat).atan();
+
+        // Height of the optical axis where the striker stands, and the bottom
+        // of the frame there (half the vertical FOV below the axis).
+        let to_striker = Vec2::new(geometry::BATSMAN_POS.x - pos.x, geometry::BATSMAN_POS.y - pos.z)
+            .length();
+        let axis_y = pos.y - to_striker * depression.tan();
+        let frame_bottom = axis_y - to_striker * (fov.to_radians() * 0.5).tan();
+
+        const STRIKER_HEAD_Y: f32 = 1.8;
+        assert!(
+            frame_bottom < STRIKER_HEAD_Y,
+            "striker's head ({STRIKER_HEAD_Y} m) falls below the frame bottom ({frame_bottom})              at {to_striker} m; lower the aim point or widen the lens"
+        );
+    }
+
+    #[test]
+    /// Compared against the bowling-end telephoto: the batting lens sits only
+    /// 10 ft off the striker, so it is necessarily wide (see BATTING_CAM_FOV_DEG).
+    fn broadcast_wider_than_gameplay_telephoto() {
         let br = 65.0;
-        let (_, _, bat_fov) = mode_view(CamMode::BattingEnd, None, br, None);
+        let (_, _, tele_fov) = mode_view(CamMode::BowlingEnd, None, br, None);
         let (_, _, wide_fov) = mode_view(CamMode::Broadcast, None, br, None);
-        assert!(wide_fov > bat_fov + 15.0);
+        assert!(wide_fov > tele_fov + 15.0);
     }
 
     #[test]
@@ -336,8 +374,8 @@ mod tests {
             "batting cam should look down the pitch at the bowler: look={look:?}"
         );
         assert!(
-            fov >= 42.0 && fov <= 55.0,
-            "over-the-shoulder read needs a wider lens than telephoto: fov={fov}"
+            (50.0..=70.0).contains(&fov),
+            "over-the-shoulder read from 10 ft needs a wide lens: fov={fov}"
         );
     }
 

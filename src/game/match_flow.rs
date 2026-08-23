@@ -363,6 +363,13 @@ pub fn sys_ready(
         }
     }
 
+    if std::env::var("CRICKET_CAMDEBUG").is_ok() {
+        for (fig, fielder, tf, _a) in &scene.players {
+            if fielder.is_none() {
+                info!("FIGDEBUG {:?} at {:?}", fig.kind, tf.translation);
+            }
+        }
+    }
     scene.cam.mode = if am.user_batting() {
         CamMode::BattingEnd
     } else {
