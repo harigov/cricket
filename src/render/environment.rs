@@ -14,6 +14,11 @@
 //!
 //! Placement is driven entirely by [`sky_hash`], so a ground looks the same in
 //! every match.
+//!
+//! Every colour in here is written as the value it should have **on screen**
+//! and turned into an albedo by [`day_albedo`]. The camera is exposed a long
+//! way off the light it is given, so the two are nowhere near each other: see
+//! [`DAY_FLAT_RESPONSE`].
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
@@ -98,6 +103,56 @@ fn smoothstep(t: f32) -> f32 {
 /// Distance from the pitch centre, ignoring height.
 fn planar_radius(pos: Vec3) -> f32 {
     (pos.x * pos.x + pos.z * pos.z).sqrt()
+}
+
+// ---------------------------------------------------------------------------
+// Exposure
+// ---------------------------------------------------------------------------
+
+/// Radiance one unit of albedo returns from flat, unshadowed ground under the
+/// day lighting preset, per channel.
+///
+/// `lighting_preset` in `main.rs` runs the day at EV100 10.2 — about three
+/// stops hotter than the light it sets up — so albedo and screen value are a
+/// long way apart out here. Working the preset through Bevy's Lambertian term
+/// (`albedo / π · illuminance · N·L`, summed over the 54 klx key at 56°, the
+/// 5.8 klx skylight and 520 lx of ambient) and then through the exposure
+/// (`exp2(-10.2) / 1.2`) still leaves ten times the albedo, so a landform
+/// painted with a raw 0.8 lands eight stops into the tonemapper's shoulder and
+/// comes out white. That is what turned the beach into a snowfield.
+///
+/// The key light is warm, so blue returns the least of the three.
+const DAY_FLAT_RESPONSE: [f32; 3] = [10.38, 9.19, 7.29];
+
+/// Albedo that returns the same radiance as an *unlit* surface painted `srgb`.
+///
+/// The sky dome is unlit and the distance fog is screen-referred, so this is
+/// the only way for the ground, the sea and the far haze to agree with the air
+/// they dissolve into: a disc rim painted with `day_albedo(horizon)` and the
+/// sky texel it came from reach the tonemapper as the same number and so land
+/// on the same pixel.
+///
+/// Everything below the shoulder comes back within a hair of the value written
+/// (0.35 renders as 0.35); the brightest values are pulled back a little (0.80
+/// renders as ≈0.69), so where a surface really is brighter than the sky the
+/// palette is authored past white on purpose — see [`ALPINE_RAMP`].
+pub(crate) fn day_albedo(srgb: [f32; 3]) -> [f32; 3] {
+    [
+        srgb_to_linear(srgb[0]) / DAY_FLAT_RESPONSE[0],
+        srgb_to_linear(srgb[1]) / DAY_FLAT_RESPONSE[1],
+        srgb_to_linear(srgb[2]) / DAY_FLAT_RESPONSE[2],
+    ]
+}
+
+/// sRGB transfer function, matching `Color::srgb`. Vertex colours reach the
+/// shader as linear, so the decode has to happen on this side. Extends past
+/// 1.0 smoothly, which is what lets a snowfield be authored above white.
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +324,10 @@ fn clamp_radius(pos: Vec3, inner: f32, outer: f32) -> Vec3 {
 ///
 /// Landforms are the bulk of the geometry out here, and Bevy exposes no
 /// instancing, so each one is merged into a single mesh and drawn once.
+///
+/// Colours go in screen-referred and come out as albedo: doing the [`day_albedo`]
+/// conversion here, at the one place vertices are written, is what keeps every
+/// palette in this module readable and stops a colour being converted twice.
 #[derive(Default)]
 pub(crate) struct ColorMesh {
     positions: Vec<[f32; 3]>,
@@ -293,7 +352,7 @@ impl ColorMesh {
             self.positions.push(corners[i].to_array());
             self.normals.push(normal);
             self.uvs.push(UVS[i]);
-            let c = colors[i];
+            let c = day_albedo(colors[i]);
             self.colors.push([c[0], c[1], c[2], 1.0]);
         }
         self.indices
@@ -311,11 +370,12 @@ impl ColorMesh {
             .unwrap_or(Vec3::Y)
             .to_array();
         let base = self.positions.len() as u32;
+        let albedo = day_albedo(rgb);
         for (i, corner) in corners.iter().enumerate() {
             self.positions.push(corner.to_array());
             self.normals.push(normal);
             self.uvs.push([i as f32 * 0.5, (i / 2) as f32]);
-            self.colors.push([rgb[0], rgb[1], rgb[2], 1.0]);
+            self.colors.push([albedo[0], albedo[1], albedo[2], 1.0]);
         }
         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
@@ -428,23 +488,38 @@ impl ColorRamp {
     }
 }
 
+/// Dry beach sand. Shared by the coastal ground and the islands off it so one
+/// material reads the same at both distances.
+///
+/// The blue channel is held well down: the apron is seen at a grazing angle
+/// from the broadcast lens, where Fresnel lifts the sky's own colour off it,
+/// and sand with any blue left in it goes khaki under that sheen.
+const BEACH_SAND: [f32; 3] = [0.81, 0.74, 0.42];
+
 /// Grass, bare rock, then snow above the snow line.
+///
+/// The snow stops are authored past white: a sunlit snowfield is one of the
+/// few things in the scene genuinely brighter than the sky behind it, and
+/// clamped to 1.0 the summits come back darker than the horizon they are
+/// supposed to stand against.
 const ALPINE_RAMP: ColorRamp = ColorRamp(&[
     (0.00, [0.20, 0.28, 0.18]),
     (0.20, [0.27, 0.30, 0.23]),
     (0.44, [0.34, 0.32, 0.30]),
-    (0.60, [0.44, 0.43, 0.42]),
-    (0.70, [0.86, 0.88, 0.92]),
-    (1.00, [0.97, 0.98, 1.00]),
+    (0.60, [0.46, 0.45, 0.44]),
+    (0.70, [1.02, 1.05, 1.12]),
+    (1.00, [1.26, 1.28, 1.34]),
 ]);
 
-/// Sedimentary banding: ochre floor, red beds, pale caprock.
+/// Sedimentary banding: ochre floor, red beds, pale caprock. Kept a shade
+/// under the desert plain so the mesas read as a landform standing on it
+/// rather than more of the same dust.
 const MESA_RAMP: ColorRamp = ColorRamp(&[
-    (0.00, [0.68, 0.52, 0.33]),
-    (0.28, [0.60, 0.35, 0.22]),
-    (0.52, [0.71, 0.46, 0.27]),
-    (0.78, [0.57, 0.31, 0.20]),
-    (1.00, [0.78, 0.62, 0.42]),
+    (0.00, [0.62, 0.47, 0.30]),
+    (0.28, [0.56, 0.32, 0.20]),
+    (0.52, [0.67, 0.43, 0.25]),
+    (0.78, [0.52, 0.28, 0.18]),
+    (1.00, [0.76, 0.61, 0.41]),
 ]);
 
 /// Distant woodland, dark and near-flat.
@@ -456,7 +531,7 @@ const TREELINE_RAMP: ColorRamp = ColorRamp(&[
 
 /// Beach, scrub, forest, then bare summit rock.
 const ISLAND_RAMP: ColorRamp = ColorRamp(&[
-    (0.00, [0.80, 0.74, 0.56]),
+    (0.00, BEACH_SAND),
     (0.16, [0.44, 0.52, 0.28]),
     (0.55, [0.25, 0.39, 0.20]),
     (0.86, [0.37, 0.35, 0.32]),
@@ -614,8 +689,11 @@ pub(crate) struct OceanSpec {
     pub(crate) rings: usize,
     pub(crate) shallow: [f32; 3],
     pub(crate) deep: [f32; 3],
-    /// The far water washes out into this, matching the ground disc's own fade
-    /// so the sea reads as running all the way to the horizon.
+    /// The last of the water washes into this, matching the ground disc's own
+    /// fade so the sea reads as running all the way to the horizon. Kept light:
+    /// the camera's own distance fog already does most of the recession, and
+    /// washing the whole outer half of the bay into the sky is what stopped the
+    /// water reading as water.
     pub(crate) horizon: [f32; 3],
     pub(crate) seed: u32,
 }
@@ -636,6 +714,38 @@ impl OceanSpec {
     fn wave(&self, radius: f32, angle: f32) -> f32 {
         0.55 * (radius * 0.05 + angle * 6.0).sin() + 0.35 * (radius * 0.11 - angle * 3.0).sin()
     }
+
+    /// Screen colour of the water `g` of the way from the shore to the horizon.
+    ///
+    /// Depth does the work: the sea darkens and saturates as the bottom drops
+    /// away, and only the last fifth of the bay is allowed to lift toward the
+    /// sky. Without that ordering the shallows and the sand meet at the same
+    /// value and the waterline disappears.
+    fn water_color(&self, g: f32) -> [f32; 3] {
+        let water = lerp_rgb(self.shallow, self.deep, smoothstep(g * 1.45));
+        lerp_rgb(water, self.horizon, smoothstep((g - 0.78) / 0.22) * 0.30)
+    }
+}
+
+/// The bay off the coastal ground.
+pub(crate) fn coastal_sea(layout: &EnvLayout, horizon: [f32; 3]) -> OceanSpec {
+    OceanSpec {
+        centre_angle: SEA_ANGLE,
+        sweep: PI * 1.25,
+        shore_radius: layout.at(0.20),
+        // Water is flat, so unlike the props it may run out to the rim and
+        // meet the sky rather than stopping on the sand.
+        outer_radius: layout.rim() - 6.0,
+        segments: 72,
+        rings: 10,
+        // Turquoise over pale sand, dropping to open-ocean blue. Both sit well
+        // under the beach in value and on the other side of neutral in hue,
+        // which is what makes the waterline read from the stands.
+        shallow: [0.33, 0.71, 0.63],
+        deep: [0.09, 0.25, 0.44],
+        horizon,
+        seed: 3407,
+    }
 }
 
 pub(crate) fn ocean_mesh(spec: &OceanSpec) -> Mesh {
@@ -649,11 +759,7 @@ pub(crate) fn ocean_mesh(spec: &OceanSpec) -> Mesh {
         let r = lerp(shore, spec.outer_radius, g);
         ring_position(angle, r, spec.wave(r, angle))
     };
-    let colour = |ring: usize| {
-        let g = ring as f32 / spec.rings as f32;
-        let water = lerp_rgb(spec.shallow, spec.deep, smoothstep(g * 1.6));
-        lerp_rgb(water, spec.horizon, smoothstep((g - 0.7) / 0.3) * 0.6)
-    };
+    let colour = |ring: usize| spec.water_color(ring as f32 / spec.rings as f32);
 
     for seg in 0..spec.segments {
         for ring in 0..spec.rings {
@@ -668,6 +774,20 @@ pub(crate) fn ocean_mesh(spec: &OceanSpec) -> Mesh {
     mesh.build()
 }
 
+/// Concrete of the deepest layer of the skyline, before any haze.
+const FAR_TOWER: [f32; 3] = [0.42, 0.44, 0.48];
+
+/// Fraction of the way to the horizon colour a tower `t` of the way across the
+/// far band is painted.
+///
+/// Only enough to seat the blocks in their own air: the camera's distance fog
+/// is already worth half the colour of anything out here, and the previous
+/// pass' 0.42–0.77 on top of that left the skyline as white cut-outs with no
+/// silhouette left to read.
+fn skyline_haze(t: f32) -> f32 {
+    0.12 + smoothstep(t) * 0.30
+}
+
 /// Merged silhouette of far-off tower blocks, hazed toward the horizon colour.
 ///
 /// Beyond ~450 m the kit models are a few pixels wide, so the deepest layer of
@@ -680,7 +800,6 @@ pub(crate) fn far_skyline_mesh(
     horizon: [f32; 3],
     seed: u32,
 ) -> Mesh {
-    const CONCRETE: [f32; 3] = [0.42, 0.44, 0.48];
     let mut mesh = ColorMesh::default();
     for slot in 0..slots {
         let s = slot as u32;
@@ -693,12 +812,12 @@ pub(crate) fn far_skyline_mesh(
         let height = lerp(45.0, 190.0, sky_hash(s, 4, seed) * (0.25 + 0.75 * w));
         let width = lerp(18.0, 46.0, sky_hash(s, 5, seed));
         let depth = lerp(18.0, 40.0, sky_hash(s, 6, seed));
-        let haze = smoothstep((radius - inner) / (outer - inner).max(1e-3)) * 0.35 + 0.42;
+        let haze = skyline_haze((radius - inner) / (outer - inner).max(1e-3));
         mesh.box_at(
             ring_position(angle, radius, height * 0.5),
             Vec3::new(width * 0.5, height * 0.5, depth * 0.5),
             -angle - FRAC_PI_2,
-            lerp_rgb(CONCRETE, horizon, haze),
+            lerp_rgb(FAR_TOWER, horizon, haze),
         );
     }
     mesh.build()
@@ -1083,20 +1202,7 @@ pub(crate) fn theme_landforms(
         .collect(),
         StadiumEnvironment::Coastal => {
             let mut out = vec![(
-                ocean_mesh(&OceanSpec {
-                    centre_angle: SEA_ANGLE,
-                    sweep: PI * 1.25,
-                    shore_radius: layout.at(0.20),
-                    // Water is flat, so unlike the props it may run out to the
-                    // rim and meet the sky rather than stopping on the sand.
-                    outer_radius: layout.rim() - 6.0,
-                    segments: 72,
-                    rings: 10,
-                    shallow: [0.20, 0.58, 0.58],
-                    deep: [0.03, 0.16, 0.30],
-                    horizon,
-                    seed: 3407,
-                }),
+                ocean_mesh(&coastal_sea(layout, horizon)),
                 // Sea level sits just proud of the sand so the swell never
                 // clips through the beach at the waterline.
                 Transform::from_translation(Vec3::Y * 0.95),
@@ -1190,19 +1296,35 @@ pub(crate) enum LandformSurface {
     Water,
 }
 
+/// Ground colour under and around the stadium for each theme, as it should
+/// read on screen.
+///
+/// Each has to say what the site is made of on its own, and every one of them
+/// has to sit under the bowl's concrete next door (`0x8A8E92`, which renders at
+/// about 0.90): ground brighter than the building standing on it is the single
+/// thing that made all five of these read as snow.
+pub(crate) fn ground_srgb(theme: StadiumEnvironment) -> [f32; 3] {
+    match theme {
+        // Service tarmac and car parks: dark, faintly blue-grey.
+        StadiumEnvironment::Metropolis => [0.32, 0.34, 0.38],
+        // High pasture — paler and yellower than lowland turf.
+        StadiumEnvironment::Alpine => [0.44, 0.56, 0.31],
+        StadiumEnvironment::Coastal => BEACH_SAND,
+        // English turf, a shade duller and darker than the mown square.
+        StadiumEnvironment::Parkland => [0.35, 0.60, 0.28],
+        // Sun-bleached ochre dust, warmer and lighter than the mesa beds.
+        StadiumEnvironment::Desert => [0.70, 0.53, 0.32],
+    }
+}
+
 /// Ground tint under and around the stadium for each theme.
 pub(crate) fn ground_palette(theme: StadiumEnvironment) -> GroundPalette {
-    let base = match theme {
-        StadiumEnvironment::Metropolis => [0.29, 0.29, 0.31],
-        StadiumEnvironment::Alpine => [0.33, 0.43, 0.26],
-        StadiumEnvironment::Coastal => [0.84, 0.78, 0.62],
-        StadiumEnvironment::Parkland => [0.31, 0.44, 0.23],
-        StadiumEnvironment::Desert => [0.72, 0.56, 0.36],
-    };
     GroundPalette {
-        base,
+        base: day_albedo(ground_srgb(theme)),
         // The rim has to dissolve into this theme's own air, not a fixed blue.
-        horizon: sky_horizon_color(theme, false),
+        // Converted the same way as everything else, so the last ring of the
+        // disc and the sky texel above it reach the tonemapper as one number.
+        horizon: day_albedo(sky_horizon_color(theme, false)),
     }
 }
 
@@ -1256,11 +1378,15 @@ fn retint_ground(ctx: &mut StadiumBuildCtx<'_>, theme: StadiumEnvironment) {
         *mesh = stadium_ground_disc_mesh_tinted(radius, GROUND_DISC_SEGMENTS, palette);
     }
     if let Some(material) = ctx.materials.get_mut(&ctx.shared.apron_mat) {
-        // Wet sand and tarmac catch a little more light than dust or meadow.
+        // Asphalt is the only one of these with a sheen worth having. The
+        // establishing lens looks along the apron rather than down onto it, and
+        // at that angle Fresnel lifts a slice of sky off any reflectance left
+        // here — which is what turned the beach grey-green even once its albedo
+        // was right. Sand and dust are matte in life; keep them matte.
         let (roughness, reflectance) = match theme {
-            StadiumEnvironment::Metropolis => (0.82, 0.36),
-            StadiumEnvironment::Coastal => (0.86, 0.34),
-            _ => (0.94, 0.26),
+            StadiumEnvironment::Metropolis => (0.84, 0.28),
+            StadiumEnvironment::Coastal => (0.92, 0.18),
+            _ => (0.95, 0.16),
         };
         material.perceptual_roughness = roughness;
         material.reflectance = reflectance;
@@ -1287,8 +1413,11 @@ fn spawn_landforms(
     });
     let water = ctx.materials.add(StandardMaterial {
         base_color: Color::WHITE,
-        perceptual_roughness: 0.08,
-        reflectance: 0.92,
+        // Water is F0 ≈ 0.04, which `reflectance` squares into 0.5, and a bay
+        // has enough chop to spread the sun. A mirror finish on flat-shaded
+        // swell quads scattered blown-out glints across the whole sea instead.
+        perceptual_roughness: 0.16,
+        reflectance: 0.5,
         metallic: 0.0,
         ..default()
     });
@@ -1596,11 +1725,14 @@ mod tests {
     #[test]
     fn only_the_high_range_wears_snow() {
         let ranges = theme_landforms(StadiumEnvironment::Alpine, &layout());
+        // Snow is counted by what it comes out as on screen: as an albedo it is
+        // a sixth of that, because the exposure gives most of it back.
         let snow_fraction = |mesh: &Mesh| {
             let colors = mesh_colors(mesh);
             let white = colors
                 .iter()
-                .filter(|c| c[0] > 0.8 && c[1] > 0.8 && c[2] > 0.8)
+                .map(|c| rendered_srgb([c[0], c[1], c[2]]))
+                .filter(|s| s[0] > 0.8 && s[1] > 0.8 && s[2] > 0.8)
                 .count();
             white as f32 / colors.len() as f32
         };
@@ -1678,6 +1810,59 @@ mod tests {
         }
     }
 
+    /// Screen colour a lit albedo comes back as, i.e. the inverse of
+    /// [`day_albedo`]. The tonemapper is left out on purpose: it is applied to
+    /// the sky and to the ground alike, so two surfaces that agree here agree
+    /// on screen as well.
+    fn rendered_srgb(albedo: [f32; 3]) -> [f32; 3] {
+        let encode = |c: f32| {
+            if c <= 0.003_130_8 {
+                c * 12.92
+            } else {
+                1.055 * c.powf(1.0 / 2.4) - 0.055
+            }
+        };
+        [
+            encode(albedo[0] * DAY_FLAT_RESPONSE[0]),
+            encode(albedo[1] * DAY_FLAT_RESPONSE[1]),
+            encode(albedo[2] * DAY_FLAT_RESPONSE[2]),
+        ]
+    }
+
+    fn luma(rgb: [f32; 3]) -> f32 {
+        rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114
+    }
+
+    /// The bowl's concourse concrete (`0x8A8E92` in `stadium.rs`) — the
+    /// brightest large surface any of these grounds is seen next to.
+    const STADIUM_CONCRETE: [f32; 3] = [0.541, 0.557, 0.573];
+
+    #[test]
+    fn day_albedo_round_trips_to_the_colour_it_was_asked_for() {
+        for srgb in [
+            [0.0, 0.0, 0.0],
+            [0.35, 0.37, 0.40],
+            BEACH_SAND,
+            [1.26, 1.28, 1.34],
+        ] {
+            let back = rendered_srgb(day_albedo(srgb));
+            for c in 0..3 {
+                assert!(
+                    (back[c] - srgb[c]).abs() < 1e-3,
+                    "{srgb:?} came back as {back:?}"
+                );
+            }
+        }
+        // The whole point: a colour that would clip as a raw albedo lands well
+        // inside range once the exposure is taken out of it.
+        for c in day_albedo([0.8, 0.8, 0.8]) {
+            assert!(
+                c < 0.12,
+                "day_albedo still returns a near-white albedo: {c}"
+            );
+        }
+    }
+
     #[test]
     fn ground_palettes_are_distinct_and_match_their_sky() {
         let palettes: Vec<GroundPalette> = StadiumEnvironment::ALL
@@ -1685,14 +1870,82 @@ mod tests {
             .map(|t| ground_palette(*t))
             .collect();
         for (i, a) in palettes.iter().enumerate() {
-            assert_eq!(
-                a.horizon,
-                sky_horizon_color(StadiumEnvironment::ALL[i], false)
-            );
+            let theme = StadiumEnvironment::ALL[i];
+            // The rim has to reach the tonemapper as the same number the sky
+            // texel above it does, or the edge of the world glares.
+            let rim = rendered_srgb(a.horizon);
+            let sky = sky_horizon_color(theme, false);
+            for c in 0..3 {
+                assert!(
+                    (rim[c] - sky[c]).abs() < 1e-3,
+                    "{theme:?} rim renders {rim:?}, sky is {sky:?}"
+                );
+            }
             for b in palettes.iter().skip(i + 1) {
                 assert_ne!(a.base, b.base, "two themes share a ground colour");
             }
         }
+    }
+
+    /// Radiance an albedo returns to the camera before tonemapping — the space
+    /// two surfaces have to be compared in to know which looks brighter.
+    fn radiance(albedo: [f32; 3]) -> [f32; 3] {
+        [
+            albedo[0] * DAY_FLAT_RESPONSE[0],
+            albedo[1] * DAY_FLAT_RESPONSE[1],
+            albedo[2] * DAY_FLAT_RESPONSE[2],
+        ]
+    }
+
+    #[test]
+    fn every_ground_reads_darker_than_the_stadium_on_it() {
+        // `stadium.rs` paints the concourse with an sRGB base colour, so its
+        // albedo is that colour decoded — which the exposure then returns ten
+        // times over. That is the wall of white the ground has to sit under.
+        let concrete = luma(radiance(STADIUM_CONCRETE.map(srgb_to_linear)));
+        for theme in StadiumEnvironment::ALL {
+            let ground = ground_srgb(theme);
+            let lit = luma(radiance(day_albedo(ground)));
+            assert!(
+                lit < concrete * 0.5,
+                "{theme:?} ground {ground:?} returns {lit:.2} against concrete's {concrete:.2}"
+            );
+            // And it must survive the trip through the exposure as an albedo
+            // that is nowhere near clipping.
+            for c in day_albedo(ground) {
+                assert!(c > 0.0 && c < 0.2, "{theme:?} albedo channel {c} is unsafe");
+            }
+        }
+    }
+
+    #[test]
+    fn sand_is_warm_and_the_meadows_are_green() {
+        let sand = ground_srgb(StadiumEnvironment::Coastal);
+        let dust = ground_srgb(StadiumEnvironment::Desert);
+        for warm in [sand, dust] {
+            assert!(
+                warm[0] > warm[1] && warm[1] > warm[2],
+                "{warm:?} is not warm"
+            );
+        }
+        // What tells the two warm grounds apart is value, not hue: bleached
+        // beach sand against darker ochre dust.
+        assert!(
+            luma(sand) - luma(dust) > 0.05,
+            "sand {sand:?} and dust {dust:?} are the same material"
+        );
+        for green in [
+            ground_srgb(StadiumEnvironment::Alpine),
+            ground_srgb(StadiumEnvironment::Parkland),
+        ] {
+            assert!(
+                green[1] > green[0] && green[1] > green[2],
+                "{green:?} is not green"
+            );
+        }
+        // Tarmac is the only one that leans cool.
+        let tarmac = ground_srgb(StadiumEnvironment::Metropolis);
+        assert!(tarmac[2] > tarmac[0], "{tarmac:?} is not a cool grey");
     }
 
     #[test]
@@ -1757,10 +2010,151 @@ mod tests {
         let mesh = far_skyline_mesh(l.at(0.78), l.at(0.92), 120, horizon, 1723);
         let colors = mesh_colors(&mesh);
         assert!(!colors.is_empty());
-        // Nothing out there may be more saturated than raw concrete: every
-        // vertex has been pulled at least part way toward the sky.
+        let sky = luma(horizon);
+        // The shaded sides of a block are 18% under its lit top, so that is the
+        // floor; the sky is the ceiling. Between the two the towers still have
+        // a silhouette to read.
+        let floor = luma(FAR_TOWER) * 0.8;
         for c in &colors {
-            assert!(c[2] > 0.4, "far building is too crisp: {c:?}");
+            let value = luma(rendered_srgb([c[0], c[1], c[2]]));
+            assert!(
+                value > floor,
+                "far building is darker than its own concrete: {c:?}"
+            );
+            assert!(
+                value < sky - 0.05,
+                "far building has dissolved into the sky: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn skyline_haze_only_seats_the_towers_in_their_air() {
+        assert!(skyline_haze(0.0) > 0.0, "the far band gets no haze at all");
+        assert!(
+            skyline_haze(1.0) > skyline_haze(0.0),
+            "haze is not distance-keyed"
+        );
+        // Distance fog is worth about half the colour of anything this far out
+        // on its own, so the baked haze has to stay a minority share or the
+        // silhouette goes.
+        assert!(
+            skyline_haze(1.0) < 0.5,
+            "haze of {} leaves nothing to read",
+            skyline_haze(1.0)
+        );
+    }
+
+    fn coastal_ocean() -> OceanSpec {
+        coastal_sea(
+            &layout(),
+            sky_horizon_color(StadiumEnvironment::Coastal, false),
+        )
+    }
+
+    #[test]
+    fn the_sea_separates_from_the_sand() {
+        let spec = coastal_ocean();
+        let sand = ground_srgb(StadiumEnvironment::Coastal);
+        for water in [spec.water_color(0.0), spec.water_color(0.5)] {
+            assert!(
+                luma(sand) - luma(water) > 0.08,
+                "sand {sand:?} and water {water:?} share a value"
+            );
+            // Opposite sides of neutral: the sand runs warm, the sea cool.
+            assert!(
+                sand[0] - sand[2] > 0.1 && water[2] - water[0] > 0.1,
+                "sand {sand:?} and water {water:?} share a hue"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sea_deepens_and_saturates_with_distance() {
+        let spec = coastal_ocean();
+        let saturation = |c: [f32; 3]| {
+            let max = c[0].max(c[1]).max(c[2]);
+            let min = c[0].min(c[1]).min(c[2]);
+            if max > 1e-4 { (max - min) / max } else { 0.0 }
+        };
+        // Depth owns everything up to the horizon wash, and has to darken and
+        // saturate the whole way: that gradient is the only thing that says
+        // "water" rather than "more haze".
+        let deepening: Vec<[f32; 3]> = (0..=8)
+            .map(|i| spec.water_color(i as f32 / 8.0 * 0.78))
+            .collect();
+        for pair in deepening.windows(2) {
+            assert!(
+                luma(pair[1]) < luma(pair[0]) + 1e-4,
+                "the sea does not darken: {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        let shore = deepening[0];
+        let far = *deepening.last().expect("water samples");
+        assert!(
+            luma(shore) - luma(far) > 0.2,
+            "the sea barely deepens at all"
+        );
+        assert!(
+            saturation(far) > saturation(shore) + 0.05,
+            "the sea does not saturate as it deepens: {shore:?} then {far:?}"
+        );
+        // The horizon wash may tint the last of the water but must not hand it
+        // over to the sky, or the sea reads as more haze.
+        let rim = spec.water_color(1.0);
+        let horizon = spec.horizon;
+        for c in 0..3 {
+            assert!(
+                (rim[c] - horizon[c]).abs() > (spec.deep[c] - horizon[c]).abs() * 0.5,
+                "the far water has washed out into the sky: {rim:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn snow_is_the_only_thing_brighter_than_white() {
+        // Everything else has to be a colour a screen can show; snow is the one
+        // surface that really does out-run the sky behind it.
+        let summit = ALPINE_RAMP.sample(1.0);
+        assert!(
+            summit.iter().all(|c| *c > 1.0),
+            "snow {summit:?} is clamped"
+        );
+        for t in [0.0, 0.2, 0.44, 0.6] {
+            let stop = ALPINE_RAMP.sample(t);
+            assert!(
+                stop.iter().all(|c| *c <= 1.0),
+                "{stop:?} at {t} is over white"
+            );
+        }
+        for ramp in [&MESA_RAMP, &TREELINE_RAMP, &ISLAND_RAMP] {
+            for step in 0..=10 {
+                let stop = ramp.sample(step as f32 / 10.0);
+                assert!(stop.iter().all(|c| *c > 0.0 && *c <= 1.0), "{stop:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_islands_are_made_of_the_same_sand_as_the_beach() {
+        assert_eq!(
+            ISLAND_RAMP.sample(0.0),
+            ground_srgb(StadiumEnvironment::Coastal)
+        );
+        // And they still band up out of it rather than staying one pale lump.
+        let banded: Vec<[f32; 3]> = [0.0, 0.3, 0.6, 1.0]
+            .iter()
+            .map(|t| ISLAND_RAMP.sample(*t))
+            .collect();
+        for (i, a) in banded.iter().enumerate() {
+            for b in banded.iter().skip(i + 1) {
+                assert!(
+                    (luma(*a) - luma(*b)).abs() > 0.04,
+                    "island bands {a:?} and {b:?} are the same value"
+                );
+            }
         }
     }
 }
