@@ -839,7 +839,9 @@ fn spawn_scroll_edge_hint(
         ))
         .with_children(|hint| {
             hint.spawn((
-                Text::new(if top { "▲" } else { "▼" }),
+                // U+2191/U+2193 rather than the filled triangles: the bundled
+                // UI font has no glyph for those and renders a tofu box.
+                Text::new(if top { "↑" } else { "↓" }),
                 TextFont {
                     font: fonts.bold.clone(),
                     font_size: 10.0 * scale,
