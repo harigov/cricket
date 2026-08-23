@@ -1,5 +1,6 @@
 pub mod hud;
 pub mod menus;
+pub mod pause;
 pub mod theme;
 
 use bevy::prelude::*;
@@ -12,6 +13,6 @@ impl Plugin for UiPlugin {
             .init_resource::<theme::UiPreferences>()
             .init_resource::<theme::MenuTransition>()
             .add_systems(Update, theme::tick_menu_transition);
-        app.add_plugins((hud::HudPlugin, menus::MenusPlugin));
+        app.add_plugins((hud::HudPlugin, menus::MenusPlugin, pause::PausePlugin));
     }
 }

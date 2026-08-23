@@ -34,6 +34,8 @@ const RUN_SECONDS: f32 = 2.9;
 const RESULT_PAUSE_SECS: f32 = 2.4;
 /// Run-up duration in seconds.
 const RUNUP_SECS: f32 = 1.7;
+/// Bowler follow-through past the popping crease after release (metres).
+const BOWLER_FOLLOW_THROUGH_X: f32 = 0.45;
 /// Timing offset beyond which the batter is beaten (play and miss).
 const BEATEN_TIMING_THRESHOLD: f32 = 0.27;
 /// Perfect-contact tier: offset below this is middle of the bat.
@@ -296,8 +298,8 @@ fn reset_delivery_resources(commands: &mut Commands) {
 
 #[derive(SystemParam)]
 pub(crate) struct ReadySceneParams<'w, 's> {
-    am: Res<'w, ActiveMatch>,
-    layout: Res<'w, CurrentLayout>,
+    am: Option<Res<'w, ActiveMatch>>,
+    layout: Option<Res<'w, CurrentLayout>>,
     players: Query<
         'w,
         's,
@@ -318,6 +320,12 @@ pub fn sys_ready(
     mut scene: ReadySceneParams,
 ) {
     let PhaseEnum::ReadyToBall { t } = &mut phase.0 else {
+        return;
+    };
+    let Some(am) = scene.am.as_ref() else {
+        return;
+    };
+    let Some(layout) = scene.layout.as_ref() else {
         return;
     };
     *t += time.delta_secs();
@@ -345,7 +353,7 @@ pub fn sys_ready(
             _ => {}
         }
         if let Some(f) = fielder
-            && let Some(fp) = scene.layout.0.positions.get(f.slot)
+            && let Some(fp) = layout.0.positions.get(f.slot)
         {
             let p = fp.world_pos(geo::BATSMAN_POS);
             tf.translation.x = p.x;
@@ -355,13 +363,13 @@ pub fn sys_ready(
         }
     }
 
-    scene.cam.mode = if scene.am.user_batting() {
+    scene.cam.mode = if am.user_batting() {
         CamMode::BattingEnd
     } else {
         CamMode::BowlingEnd
     };
 
-    let user_bowling = scene.am.user_bowling();
+    let user_bowling = am.user_bowling();
     if user_bowling {
         if input.pressed(Action::Confirm) {
             phase.0 = PhaseEnum::AimLength { t: 0.0, lock: None };
@@ -383,9 +391,9 @@ pub fn sys_aim(
     mut phase: ResMut<Phase>,
     input: Res<PlayerInput>,
     time: Res<Time>,
-    am: Res<ActiveMatch>,
-    wd: Res<WorldData>,
-    mut scene: ResMut<MatchScene>,
+    am: Option<Res<ActiveMatch>>,
+    wd: Option<Res<WorldData>>,
+    scene: Option<ResMut<MatchScene>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -394,6 +402,10 @@ pub fn sys_aim(
     let PhaseEnum::AimLength { t, lock } = &mut phase.0 else {
         return;
     };
+    let (Some(am), Some(wd), Some(scene)) = (am, wd, scene) else {
+        return;
+    };
+    let scene = scene.into_inner();
     *t += time.delta_secs();
 
     let bowler = am.bowler(&wd);
@@ -547,11 +559,37 @@ fn ai_plan(bowler: &Player, pitch: crate::core::stadiums::PitchType) -> Delivery
 // Phase: RunUp
 // ---------------------------------------------------------------------------
 
+/// Ease-in approach then a planted delivery stride so the bowler accelerates
+/// into the run-up and decelerates through the release rather than gliding.
+fn bowler_runup_x(p: f32) -> f32 {
+    let start_x = -geo::PITCH_HALF_LEN - 8.0;
+    let plant_x = geo::RELEASE_POINT.x - 0.55;
+    let release_x = geo::RELEASE_POINT.x - 0.15;
+    if p < 0.7 {
+        let t = (p / 0.7).powi(2);
+        start_x + (plant_x - start_x) * t
+    } else {
+        let t = ((p - 0.7) / 0.3).clamp(0.0, 1.0);
+        let ease = 1.0 - (1.0 - t).powi(2);
+        plant_x + (release_x - plant_x) * ease
+    }
+}
+
+/// Predict arrival at the bat plane in **game** seconds (matches scaled physics).
+fn estimate_arrival_at_bat(plan: &DeliveryPlan, start: Vec3) -> f32 {
+    let bounce_x = geo::PITCH_HALF_LEN - plan.length_from_stumps;
+    let dx_pre = (bounce_x - start.x).max(1.0);
+    let t_pre = dx_pre / plan.speed.max(0.1);
+    let dx_post = (BAT_PLANE_X - bounce_x).max(0.5);
+    let t_post = dx_post / (plan.speed.max(0.1) * 0.82);
+    t_pre + 0.14 + t_post
+}
+
 #[derive(SystemParam)]
 pub(crate) struct RunupParams<'w, 's> {
     del: Res<'w, CurrentDelivery>,
-    am: Res<'w, ActiveMatch>,
-    wd: Res<'w, WorldData>,
+    am: Option<Res<'w, ActiveMatch>>,
+    wd: Option<Res<'w, WorldData>>,
     figs: Query<
         'w,
         's,
@@ -560,7 +598,7 @@ pub(crate) struct RunupParams<'w, 's> {
     >,
     ball_q: Query<'w, 's, (&'static mut BallState, &'static mut Transform), With<CricketBall>>,
     commands: Commands<'w, 's>,
-    _scene: ResMut<'w, MatchScene>,
+    _scene: Option<ResMut<'w, MatchScene>>,
 }
 
 pub fn sys_runup(mut phase: ResMut<Phase>, time: Res<Time>, mut runup: RunupParams) {
@@ -573,9 +611,7 @@ pub fn sys_runup(mut phase: ResMut<Phase>, time: Res<Time>, mut runup: RunupPara
     // Bowler jogs in; delivery stride over the last 30%.
     for (fig, mut tf, mut anim) in &mut runup.figs {
         if fig.kind == FigureKind::Bowler {
-            let start_x = -geo::PITCH_HALF_LEN - 8.0;
-            let end_x = geo::RELEASE_POINT.x - 0.4;
-            tf.translation.x = start_x + (end_x - start_x) * p.clamp(0.0, 1.0);
+            tf.translation.x = bowler_runup_x(p.clamp(0.0, 1.0));
             tf.translation.y = 0.0;
             tf.rotation = face_target_quat(
                 Vec2::new(tf.translation.x, tf.translation.z),
@@ -607,11 +643,14 @@ pub fn sys_runup(mut phase: ResMut<Phase>, time: Res<Time>, mut runup: RunupPara
     }
 
     // ---- RELEASE ----
+    let (Some(am), Some(wd)) = (runup.am.as_ref(), runup.wd.as_ref()) else {
+        return;
+    };
     let plan = runup
         .del
         .0
         .clone()
-        .unwrap_or_else(|| ai_plan(runup.am.bowler(&runup.wd), runup.am.pitch(&runup.wd)));
+        .unwrap_or_else(|| ai_plan(am.bowler(wd), am.pitch(wd)));
     runup
         .commands
         .insert_resource(CurrentDelivery(Some(plan.clone())));
@@ -636,15 +675,15 @@ pub fn sys_runup(mut phase: ResMut<Phase>, time: Res<Time>, mut runup: RunupPara
         tf.translation = bs.pos;
     }
 
-    // Ease bowler from delivery follow-through into standing idle (not frozen
-    // at the terminal procedural keyframe).
-    for (fig, _, mut anim) in &mut runup.figs {
+    // Carry through past the crease; procedural settle eases back to idle.
+    for (fig, mut tf, mut anim) in &mut runup.figs {
         if fig.kind == FigureKind::Bowler {
+            tf.translation.x = geo::RELEASE_POINT.x + BOWLER_FOLLOW_THROUGH_X;
             anim.state = AnimState::BowlSettle { t: 0.0 };
         }
     }
 
-    let est_t_arrive = (BAT_PLANE_X - start.x) / plan.speed.max(0.1) / BALL_TIME_SCALE;
+    let est_t_arrive = estimate_arrival_at_bat(&plan, start);
     runup.commands.insert_resource(ReleaseInfo {
         active: true,
         resolved: false,
@@ -712,12 +751,13 @@ pub fn sys_ball_physics(
 // ---------------------------------------------------------------------------
 
 #[derive(SystemParam)]
-pub(crate) struct ShotInputParams<'w> {
-    am: Res<'w, ActiveMatch>,
-    wd: Res<'w, WorldData>,
+pub(crate) struct ShotInputParams<'w, 's> {
+    am: Option<Res<'w, ActiveMatch>>,
+    wd: Option<Res<'w, WorldData>>,
     del: Res<'w, CurrentDelivery>,
     rel: ResMut<'w, ReleaseInfo>,
     attempt: ResMut<'w, ShotAttempt>,
+    batters: Query<'w, 's, (&'static Figure, &'static mut Anim)>,
 }
 
 pub fn sys_shot_input(
@@ -727,29 +767,52 @@ pub fn sys_shot_input(
     mut shot: ShotInputParams,
 ) {
     let PhaseEnum::BallLive = phase.0 else { return };
+    if shot.am.is_none() {
+        return;
+    }
     if !shot.rel.active || shot.rel.resolved {
         return;
     }
-    shot.rel.t += time.delta_secs();
+    shot.rel.t += time.delta_secs() * BALL_TIME_SCALE;
     let Some(plan) = shot.del.0.as_ref() else {
         return;
     };
 
-    if shot.am.user_batting() {
-        // Human batter: register the press the instant it happens.
-        if !shot.attempt.pressed && input.pressed(Action::Confirm) {
+    let user_batting = shot
+        .am
+        .as_ref()
+        .map(|am| am.user_batting())
+        .unwrap_or(false);
+
+    if user_batting && input.pressed(Action::Confirm) {
+        for (fig, mut anim) in &mut shot.batters {
+            if fig.kind == FigureKind::Batter {
+                anim.state = AnimState::BatSwing { p: 0.0 };
+            }
+        }
+        if !shot.attempt.pressed {
             shot.attempt.pressed = true;
-            shot.attempt.offset = Some(shot.rel.t - shot.rel.t_arrive);
+            let offset = shot.rel.t - shot.rel.t_arrive;
+            shot.attempt.offset = Some(offset);
             shot.attempt.loft = input.held(Action::Loft);
             shot.attempt.dir_x = input.move_vec.x;
+            info!(
+                "SHOT registered: offset {:.3}s (arrive {:.3}s, t {:.3}s) loft={} dir={:.2}",
+                offset,
+                shot.rel.t_arrive,
+                shot.rel.t,
+                shot.attempt.loft,
+                shot.attempt.dir_x
+            );
         }
-    } else if !shot.attempt.ai_scheduled && shot.rel.t > shot.rel.t_arrive - 0.45 {
+    } else if let (Some(am), Some(wd)) = (shot.am.as_ref(), shot.wd.as_ref()) {
+        if !shot.attempt.ai_scheduled && shot.rel.t > shot.rel.t_arrive - 0.45 {
         // AI batter: line/length aware decision
         shot.attempt.ai_scheduled = true;
         if plan.wide {
             return;
         }
-        let batsman = shot.am.striker(&shot.wd);
+        let batsman = am.striker(wd);
         let q = plan.quality_vs_batsman();
         let skill = batsman.batting as f32 / 100.0;
         // Fuller / good-length balls are easier to time; short balls harder
@@ -763,10 +826,10 @@ pub fn sys_shot_input(
         let sigma =
             (0.045 + (1.0 - q) * 0.10 - (skill - 0.7) * 0.04 + length_factor).clamp(0.028, 0.30);
         let agg = chase_pressure(
-            shot.am.state.innings.target,
-            shot.am.state.innings.runs,
-            shot.am.state.innings.legal_balls,
-            shot.am.state.overs,
+            am.state.innings.target,
+            am.state.innings.runs,
+            am.state.innings.legal_balls,
+            am.state.overs,
         );
         // Defend good balls more often unless chasing hard
         let defend_bias = if q > 0.75 && agg < 0.6 { 0.18 } else { 0.0 };
@@ -796,6 +859,7 @@ pub fn sys_shot_input(
             // Add variation around preferred
             let spread = 0.32 + (1.0 - skill) * 0.18;
             shot.attempt.dir_x = (preferred + (unit() * 2.0 - 1.0) * spread).clamp(-1.0, 1.0);
+        }
         }
     }
 }
@@ -831,8 +895,8 @@ enum Tier {
 pub(crate) struct ContactWatchParams<'w, 's> {
     commands: Commands<'w, 's>,
     phase: ResMut<'w, Phase>,
-    am: ResMut<'w, ActiveMatch>,
-    wd: Res<'w, WorldData>,
+    am: Option<ResMut<'w, ActiveMatch>>,
+    wd: Option<Res<'w, WorldData>>,
     rel: ResMut<'w, ReleaseInfo>,
     attempt: Res<'w, ShotAttempt>,
     del: Res<'w, CurrentDelivery>,
@@ -840,12 +904,19 @@ pub(crate) struct ContactWatchParams<'w, 's> {
     recent: ResMut<'w, RecentBalls>,
     ball_q: Query<'w, 's, (&'static mut BallState, &'static mut BallFlags), With<CricketBall>>,
     gts: Query<'w, 's, (&'static Fielder, &'static GlobalTransform)>,
-    layout: Res<'w, CurrentLayout>,
+    layout: Option<Res<'w, CurrentLayout>>,
     chasers: Query<'w, 's, (Entity, &'static Fielder, &'static mut Brain)>,
 }
 
 pub fn sys_contact_watch(mut watch: ContactWatchParams) {
     let PhaseEnum::BallLive = watch.phase.0 else {
+        return;
+    };
+    let (Some(mut am), Some(wd), Some(layout)) = (
+        watch.am.as_mut(),
+        watch.wd.as_ref(),
+        watch.layout.as_ref(),
+    ) else {
         return;
     };
     if !watch.rel.active || watch.rel.resolved {
@@ -868,20 +939,20 @@ pub fn sys_contact_watch(mut watch: ContactWatchParams) {
             .gts
             .iter()
             .map(|(f, g)| (f.slot, Vec2::new(g.translation().x, g.translation().z))),
-        watch.layout.0.positions.len(),
+        layout.0.positions.len(),
     );
 
-    let batting_skill = watch.am.striker(&watch.wd).batting as f32 / 100.0;
+    let batting_skill = am.striker(wd).batting as f32 / 100.0;
     let chaser_slot = resolve_at_bat(
         &mut watch.commands,
         &mut watch.recent,
         &mut watch.phase.0,
-        &mut watch.am,
+        &mut am,
         &plan,
         &watch.attempt,
         &mut bs,
         &fielder_pos,
-        &watch.layout,
+        layout,
         watch.br.0,
         batting_skill,
     );
@@ -1301,7 +1372,7 @@ pub fn clear_recent_on_innings_change(
 pub(crate) struct PendingWatchParams<'w, 's> {
     commands: Commands<'w, 's>,
     phase: ResMut<'w, Phase>,
-    am: ResMut<'w, ActiveMatch>,
+    am: Option<ResMut<'w, ActiveMatch>>,
     br: Res<'w, BoundaryRadius>,
     pending: ResMut<'w, Pending>,
     recent: ResMut<'w, RecentBalls>,
@@ -1311,6 +1382,9 @@ pub(crate) struct PendingWatchParams<'w, 's> {
 
 pub fn sys_pending_watch(time: Res<Time>, _rel: Res<ReleaseInfo>, mut watch: PendingWatchParams) {
     let PhaseEnum::BallLive = watch.phase.0 else {
+        return;
+    };
+    let Some(mut am) = watch.am.as_mut() else {
         return;
     };
     let Some(p) = watch.pending.0.as_mut() else {
@@ -1329,7 +1403,7 @@ pub fn sys_pending_watch(time: Res<Time>, _rel: Res<ReleaseInfo>, mut watch: Pen
             &mut watch.commands,
             &mut watch.recent,
             &mut watch.phase,
-            &mut watch.am,
+            &mut am,
             &mut watch.pending,
             &mut watch.ball_q,
             o,
@@ -1353,7 +1427,7 @@ pub fn sys_pending_watch(time: Res<Time>, _rel: Res<ReleaseInfo>, mut watch: Pen
                         &mut watch.commands,
                         &mut watch.recent,
                         &mut watch.phase,
-                        &mut watch.am,
+                        &mut am,
                         &mut watch.pending,
                         &mut watch.ball_q,
                         o,
@@ -1372,7 +1446,7 @@ pub fn sys_pending_watch(time: Res<Time>, _rel: Res<ReleaseInfo>, mut watch: Pen
             &mut watch.commands,
             &mut watch.recent,
             &mut watch.phase,
-            &mut watch.am,
+            &mut am,
             &mut watch.pending,
             &mut watch.ball_q,
             o,
@@ -1540,11 +1614,16 @@ pub fn sys_result_pause(
     mut commands: Commands,
     time: Res<Time>,
     mut phase: ResMut<Phase>,
-    mut am: ResMut<ActiveMatch>,
+    am: Option<ResMut<ActiveMatch>>,
+    _wd: Option<Res<WorldData>>,
 ) {
     let PhaseEnum::ResultPause { t, .. } = &mut phase.0 else {
         return;
     };
+    let Some(am) = am else {
+        return;
+    };
+    let am = am.into_inner();
     *t += time.delta_secs();
     if *t < RESULT_PAUSE_SECS {
         return;
@@ -1575,12 +1654,16 @@ pub fn sys_over_break(
     mut commands: Commands,
     time: Res<Time>,
     mut phase: ResMut<Phase>,
-    mut am: ResMut<ActiveMatch>,
-    wd: Res<WorldData>,
+    am: Option<ResMut<ActiveMatch>>,
+    wd: Option<Res<WorldData>>,
 ) {
     let PhaseEnum::OverBreak { t } = &mut phase.0 else {
         return;
     };
+    let (Some(am), Some(wd)) = (am, wd) else {
+        return;
+    };
+    let am = am.into_inner();
     *t += time.delta_secs();
     if *t < 1.3 {
         return;
@@ -1605,13 +1688,17 @@ pub fn sys_innings_break(
     mut commands: Commands,
     input: Res<PlayerInput>,
     mut phase: ResMut<Phase>,
-    mut am: ResMut<ActiveMatch>,
-    wd: Res<WorldData>,
+    am: Option<ResMut<ActiveMatch>>,
+    wd: Option<Res<WorldData>>,
     mut rebuild: MessageWriter<RebuildScene>,
 ) {
     let PhaseEnum::InningsBreak = phase.0 else {
         return;
     };
+    let (Some(am), Some(wd)) = (am, wd) else {
+        return;
+    };
+    let am = am.into_inner();
     if !input.pressed(Action::Confirm) {
         return;
     }
@@ -1769,7 +1856,7 @@ fn apply_result_pause_camera(
 /// camera flash, then a slow-motion side-on replay before play resumes.
 pub fn sys_camera_modes(
     phase: Res<Phase>,
-    am: Res<ActiveMatch>,
+    am: Option<Res<ActiveMatch>>,
     pending: Res<Pending>,
     recording: Res<BallRecording>,
     mut replay: ResMut<ReplayState>,
@@ -1778,6 +1865,9 @@ pub fn sys_camera_modes(
     mut was_pause: Local<bool>,
     mut eligible: Local<bool>,
 ) {
+    let Some(am) = am.as_ref() else {
+        return;
+    };
     pres.replay_on = false;
     pres.impact_on = false;
 
@@ -1793,7 +1883,7 @@ pub fn sys_camera_modes(
     match phase.0.clone() {
         PhaseEnum::BallLive => {
             *was_pause = false;
-            rig.mode = camera_mode_ball_live(&pending, &recording, &am);
+            rig.mode = camera_mode_ball_live(&pending, &recording, am);
         }
         PhaseEnum::ResultPause { t, text } => {
             // Fresh result pause? Decide whether this moment deserves the full
@@ -1802,7 +1892,7 @@ pub fn sys_camera_modes(
                 *eligible = init_result_pause_presentation(&text, &recording, &mut replay);
             }
             *was_pause = true;
-            rig.mode = apply_result_pause_camera(t, &text, *eligible, &am, &mut replay, &mut pres);
+            rig.mode = apply_result_pause_camera(t, &text, *eligible, am, &mut replay, &mut pres);
         }
         PhaseEnum::OverBreak { .. } | PhaseEnum::InningsBreak | PhaseEnum::MatchOver => {
             rig.mode = CamMode::Broadcast;
@@ -2097,10 +2187,67 @@ mod tests {
             "run-up progress should reflect 0.65s of motion (p={run_p:.3}, last_delta={delta:.3})"
         );
         assert!(
-            bs.pos.x > -15.0,
+            bs.pos.x > -16.5,
             "ball did not follow bowler far enough (p={run_p:.3}, pos={:?})",
             bs.pos
         );
         assert_eq!(tf.translation, bs.pos);
+    }
+
+    /// Regression: `cleanup_after_match` can remove `ActiveMatch` mid-`Update`
+    /// when deferred commands flush at a camera sync point. Gameplay systems
+    /// must tolerate the missing resource and match-exit must run last.
+    #[test]
+    fn match_over_confirm_survives_active_match_teardown() {
+        use crate::input::Action;
+        use crate::state::AppState;
+        use bevy::state::app::StatesPlugin;
+
+        fn flush_active_match_removal(mut commands: Commands) {
+            commands.remove_resource::<ActiveMatch>();
+        }
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin));
+        app.init_state::<AppState>();
+        app.insert_resource(Phase(PhaseEnum::MatchOver));
+        app.insert_resource(PlayerInput {
+            just_pressed: vec![Action::Confirm],
+            ..Default::default()
+        });
+        app.insert_resource(minimal_active_match());
+        app.insert_resource(CurrentDelivery(None));
+        app.insert_resource(ReleaseInfo::default());
+        app.insert_resource(ShotAttempt::default());
+        app.insert_resource(WorldData::new());
+        app.insert_resource(BoundaryRadius(65.0));
+        app.insert_resource(CurrentLayout(geo::FieldLayout::standard()));
+        app.insert_resource(CameraRig::default());
+        app.insert_resource(Pending::default());
+        app.insert_resource(RecentBalls::default());
+        app.world_mut().spawn((
+            CricketBall,
+            BallState::default(),
+            BallFlags::default(),
+        ));
+
+        app.add_systems(
+            Update,
+            (
+                flush_active_match_removal,
+                sys_shot_input,
+                sys_contact_watch,
+                sys_pending_watch,
+                sys_ball_physics,
+            )
+                .chain()
+                .run_if(in_state(AppState::InMatch)),
+        );
+
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InMatch);
+
+        app.update();
     }
 }

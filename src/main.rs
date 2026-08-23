@@ -20,12 +20,20 @@ use render::sky::{create_sky_texture, sky_texture_for_time};
 use render::{
     DayEnvironmentLight, FloodlightFixture, FloodlightMaterials, NightEnvironmentLight, SkyTextures,
 };
-use state::{AppState, RebuildScene};
-
+use state::{AppState, MatchPaused, RebuildScene};
 /// Gameplay systems only run while the match resources actually exist
 /// (they are torn down slightly before the state flips on exit).
 fn in_live_match() -> impl bevy::ecs::schedule::SystemCondition<()> + Clone {
     in_state(AppState::InMatch).and(resource_exists::<ActiveMatch>)
+}
+
+/// Ball physics, AI and timers freeze while the pause overlay is open.
+fn gameplay_active(
+    state: Res<State<AppState>>,
+    am: Option<Res<ActiveMatch>>,
+    paused: Res<MatchPaused>,
+) -> bool {
+    *state.get() == AppState::InMatch && am.is_some() && !paused.0
 }
 
 fn register_core_plugins(app: &mut App) {
@@ -75,7 +83,7 @@ fn register_match_systems(app: &mut App) {
                 match_flow::sys_runners,
             )
                 .chain()
-                .run_if(in_live_match()),
+                .run_if(gameplay_active),
         )
         .add_systems(
             Update,
@@ -92,25 +100,30 @@ fn register_match_systems(app: &mut App) {
                 match_flow::fielding_brain_reset,
                 match_flow::clear_recent_on_innings_change,
             )
-                .run_if(in_live_match()),
+                .run_if(gameplay_active),
         )
-        .add_systems(Update, game::fielding::chase_system.run_if(in_live_match()))
+        .add_systems(Update, game::fielding::chase_system.run_if(gameplay_active))
         .add_systems(
             Update,
             (
                 render::camera_rig::camera_toggle_system,
                 game::match_flow::wicket_shake_trigger,
             )
-                .run_if(in_live_match()),
+                .run_if(gameplay_active),
         )
         // Director sets rig.mode, QA may override for stadium captures, then apply transform.
         .add_systems(
             Update,
-            render::camera_rig::update_camera.after(match_flow::sys_stadium_qa_camera),
+            render::camera_rig::update_camera
+                .after(match_flow::sys_stadium_qa_camera)
+                .run_if(in_live_match()),
         )
+        // Tear down only after all gameplay + camera work for the frame (C1).
         .add_systems(
             Update,
-            ui::menus::handle_match_exit.run_if(in_state(AppState::InMatch)),
+            ui::menus::handle_match_exit
+                .run_if(in_state(AppState::InMatch))
+                .after(render::camera_rig::update_camera),
         );
 }
 
@@ -591,6 +604,7 @@ fn enter_match(
     commands.insert_resource(scene);
     commands.insert_resource(CurrentDelivery(None));
     commands.insert_resource(Phase(PhaseEnum::ReadyToBall { t: 0.0 }));
+    commands.insert_resource(MatchPaused(false));
 }
 
 /// Tear down the live scene when leaving the match.
@@ -599,6 +613,7 @@ fn exit_match(mut commands: Commands, scene: Option<Res<MatchScene>>) {
         match_flow::despawn_match_scene(&mut commands, s);
     }
     commands.remove_resource::<ActiveMatch>();
+    commands.remove_resource::<MatchPaused>();
     commands.remove_resource::<CurrentDelivery>();
     commands.remove_resource::<Pending>();
     commands.insert_resource(Phase(PhaseEnum::Idle));
