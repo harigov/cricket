@@ -87,6 +87,10 @@ pub struct Phase(pub PhaseEnum);
 pub enum PhaseEnum {
     #[default]
     Idle,
+    /// Opening walk-on while the welcome commentary plays.
+    MatchIntro {
+        t: f32,
+    },
     /// Waiting for the next delivery.
     ReadyToBall {
         t: f32,

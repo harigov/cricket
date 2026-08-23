@@ -885,6 +885,35 @@ pub fn result_pause_entered(prev_in_result_pause: bool, in_result_pause: bool) -
     in_result_pause && !prev_in_result_pause
 }
 
+/// Seconds the opening walk-on should run, derived from the welcome clip table.
+pub fn welcome_intro_duration_secs(
+    voice: CommentaryVoice,
+    durations: &CommentaryDurations,
+) -> f32 {
+    const MIN: f32 = 2.0;
+    const MAX: f32 = 5.0;
+    const FALLBACK: f32 = 2.6;
+    const TAIL: f32 = 0.35;
+
+    if voice == CommentaryVoice::Off {
+        return FALLBACK.clamp(MIN, MAX);
+    }
+    let role = if voice == CommentaryVoice::Female {
+        "female"
+    } else {
+        "male"
+    };
+    let prefix = format!("{role}/welcome_");
+    let clip = durations
+        .0
+        .iter()
+        .filter(|(k, _)| k.starts_with(&prefix))
+        .map(|(_, d)| *d)
+        .fold(0.0_f32, f32::max);
+    let base = if clip > 0.0 { clip } else { FALLBACK };
+    (base + TAIL).clamp(MIN, MAX)
+}
+
 /// Welcome plays exactly once at true match start — never on recurring ReadyToBall.
 pub fn should_play_welcome(
     lc: &CommentaryLifecycle,

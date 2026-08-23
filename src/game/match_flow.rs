@@ -293,6 +293,124 @@ fn reset_delivery_resources(commands: &mut Commands) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase: MatchIntro (opening walk-on)
+// ---------------------------------------------------------------------------
+
+/// Grace before Confirm can skip the intro (avoids menu carry-over).
+const MATCH_INTRO_SKIP_GRACE: f32 = 1.1;
+
+/// Off-screen start on the boundary, along the ray from the pitch centre.
+pub fn intro_walk_start(goal: Vec2, boundary_r: f32) -> Vec2 {
+    let dist = goal.length();
+    if dist < 1.0 {
+        Vec2::new(boundary_r * 0.85, 0.0)
+    } else {
+        goal * (boundary_r * 0.88 / dist)
+    }
+}
+
+/// 0..1 eased progress for the walk-in; finishes before the full intro ends.
+pub fn match_intro_walk_progress(elapsed: f32, duration: f32) -> f32 {
+    let walk_t = (duration * 0.82).clamp(1.4, (duration - 0.35).max(1.4));
+    let u = (elapsed / walk_t).clamp(0.0, 1.0);
+    1.0 - (1.0 - u) * (1.0 - u)
+}
+
+/// Striker and non-striker positions during the opening walk-on.
+pub fn match_intro_batter_positions(
+    elapsed: f32,
+    duration: f32,
+    boundary_r: f32,
+) -> (Vec2, Vec2) {
+    let striker_goal = geo::BATSMAN_POS;
+    let non_striker_goal = Vec2::new(-geo::PITCH_HALF_LEN + 1.6, 0.9);
+    let p = match_intro_walk_progress(elapsed, duration);
+    let striker = intro_walk_start(striker_goal, boundary_r).lerp(striker_goal, p);
+    let non_striker = intro_walk_start(non_striker_goal, boundary_r).lerp(non_striker_goal, p);
+    (striker, non_striker)
+}
+
+pub fn match_intro_should_finish(elapsed: f32, duration: f32, skip_requested: bool) -> bool {
+    elapsed >= duration || (skip_requested && elapsed >= MATCH_INTRO_SKIP_GRACE)
+}
+
+#[derive(SystemParam)]
+pub(crate) struct MatchIntroParams<'w, 's> {
+    am: Option<Res<'w, ActiveMatch>>,
+    br: Option<Res<'w, BoundaryRadius>>,
+    audio: Res<'w, crate::game::audio::AudioSettings>,
+    durations: Option<Res<'w, crate::game::audio::CommentaryDurations>>,
+    batters: Query<
+        'w,
+        's,
+        (&'static Figure, &'static mut Transform, &'static mut Anim),
+    >,
+    cam: ResMut<'w, CameraRig>,
+}
+
+pub fn sys_match_intro(
+    mut commands: Commands,
+    mut phase: ResMut<Phase>,
+    time: Res<Time>,
+    input: Res<PlayerInput>,
+    mut scene: MatchIntroParams,
+) {
+    let PhaseEnum::MatchIntro { t } = &mut phase.0 else {
+        return;
+    };
+    let Some(am) = scene.am.as_ref() else {
+        return;
+    };
+    let boundary_r = scene.br.as_ref().map(|b| b.0).unwrap_or(65.0);
+    let duration = scene
+        .durations
+        .as_ref()
+        .map(|d| crate::game::audio::welcome_intro_duration_secs(scene.audio.commentary, d))
+        .unwrap_or(2.6);
+
+    *t += time.delta_secs();
+    let elapsed = *t;
+    let (striker_pos, non_striker_pos) =
+        match_intro_batter_positions(elapsed, duration, boundary_r);
+    let walk_p = match_intro_walk_progress(elapsed, duration);
+    let bowler_end = Vec2::new(-geo::PITCH_HALF_LEN, 0.0);
+
+    for (fig, mut tf, mut anim) in &mut scene.batters {
+        let (pos, prev_goal) = match fig.kind {
+            FigureKind::Batter => (striker_pos, geo::BATSMAN_POS),
+            FigureKind::NonStriker => (
+                non_striker_pos,
+                Vec2::new(-geo::PITCH_HALF_LEN + 1.6, 0.9),
+            ),
+            _ => continue,
+        };
+        tf.translation = Vec3::new(pos.x, 0.0, pos.y);
+        if walk_p < 1.0 {
+            let start = intro_walk_start(prev_goal, boundary_r);
+            let move_dir = pos - start;
+            if move_dir.length_squared() > 1e-6 {
+                tf.rotation = face_target_quat(pos, pos + move_dir);
+            }
+            anim.state = AnimState::Run { t: elapsed * 1.4 };
+        } else {
+            tf.rotation = face_target_quat(pos, bowler_end);
+            anim.state = AnimState::Idle;
+        }
+    }
+
+    scene.cam.mode = CamMode::Broadcast;
+
+    if match_intro_should_finish(elapsed, duration, input.pressed(Action::Confirm)) {
+        enter_ready(&mut commands, &mut phase.0);
+        scene.cam.mode = if am.user_batting() {
+            CamMode::BattingEnd
+        } else {
+            CamMode::BowlingEnd
+        };
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Phase: ReadyToBall
 // ---------------------------------------------------------------------------
 
@@ -1736,7 +1854,10 @@ pub fn record_ball_flight(
     mut rec: ResMut<BallRecording>,
 ) {
     match &phase.0 {
-        PhaseEnum::RunUp { .. } | PhaseEnum::AimLength { .. } | PhaseEnum::ReadyToBall { .. } => {
+        PhaseEnum::MatchIntro { .. }
+        | PhaseEnum::RunUp { .. }
+        | PhaseEnum::AimLength { .. }
+        | PhaseEnum::ReadyToBall { .. } => {
             rec.samples.clear();
             rec.t = 0.0;
         }
@@ -1903,6 +2024,10 @@ pub fn sys_camera_modes(
             rig.mode = apply_result_pause_camera(t, &text, *eligible, am, &mut replay, &mut pres);
         }
         PhaseEnum::OverBreak { .. } | PhaseEnum::InningsBreak | PhaseEnum::MatchOver => {
+            rig.mode = CamMode::Broadcast;
+            replay.active = false;
+        }
+        PhaseEnum::MatchIntro { .. } => {
             rig.mode = CamMode::Broadcast;
             replay.active = false;
         }
@@ -2344,5 +2469,141 @@ mod tests {
             .set(AppState::InMatch);
 
         app.update();
+    }
+
+    #[test]
+    fn match_intro_batter_positions_walk_from_boundary_to_creases() {
+        let boundary = 65.0;
+        let duration = 2.65;
+        let (s0, n0) = match_intro_batter_positions(0.0, duration, boundary);
+        let striker_goal = geo::BATSMAN_POS;
+        let non_striker_goal = Vec2::new(-geo::PITCH_HALF_LEN + 1.6, 0.9);
+        assert!(
+            (s0 - intro_walk_start(striker_goal, boundary)).length() < 1e-4,
+            "striker should start on the boundary"
+        );
+        assert!(
+            (n0 - intro_walk_start(non_striker_goal, boundary)).length() < 1e-4,
+            "non-striker should start on the boundary"
+        );
+        assert!(s0.length() > striker_goal.length() + 5.0);
+        assert!(n0.length() > non_striker_goal.length() + 5.0);
+
+        let (s1, n1) = match_intro_batter_positions(duration, duration, boundary);
+        assert!((s1 - striker_goal).length() < 0.05);
+        assert!((n1 - non_striker_goal).length() < 0.05);
+    }
+
+    #[test]
+    fn match_intro_walk_progress_eases_and_finishes_before_hold_tail() {
+        let duration = 2.65;
+        let mid = match_intro_walk_progress(duration * 0.4, duration);
+        let end = match_intro_walk_progress(duration, duration);
+        assert!(mid > 0.2 && mid < 0.95);
+        assert!((end - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn sys_match_intro_hands_over_to_ready_to_ball() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, sys_match_intro);
+
+        app.world_mut().spawn((
+            Figure {
+                kind: FigureKind::Batter,
+            },
+            Transform::default(),
+            Anim::default(),
+        ));
+        app.world_mut().spawn((
+            Figure {
+                kind: FigureKind::NonStriker,
+            },
+            Transform::default(),
+            Anim::default(),
+        ));
+
+        app.world_mut()
+            .insert_resource(Phase(PhaseEnum::MatchIntro { t: 0.0 }));
+        app.world_mut().insert_resource(PlayerInput::default());
+        app.world_mut().insert_resource(minimal_active_match());
+        app.world_mut().insert_resource(BoundaryRadius(65.0));
+        app.world_mut().insert_resource(crate::game::audio::AudioSettings::default());
+        app.world_mut()
+            .insert_resource(crate::game::audio::CommentaryDurations::default());
+        app.world_mut().insert_resource(CameraRig::default());
+        prime_test_time(&mut app);
+
+        let mut elapsed = 0.0_f32;
+        let mut ready = false;
+        while elapsed < 4.0 && !ready {
+            advance_test_time(app.world_mut(), 0.05);
+            elapsed += 0.05;
+            app.update();
+            ready = matches!(
+                app.world().resource::<Phase>().0,
+                PhaseEnum::ReadyToBall { .. }
+            );
+        }
+        assert!(ready, "intro should transition to ReadyToBall");
+        assert!(
+            elapsed >= 2.0,
+            "intro should not end instantly: {:.2}s",
+            elapsed
+        );
+        assert!(elapsed < 3.5, "intro ran too long: {:.2}s", elapsed);
+    }
+
+    #[test]
+    fn match_intro_should_finish_respects_grace_and_duration() {
+        assert!(!match_intro_should_finish(0.4, 3.0, true));
+        assert!(match_intro_should_finish(1.2, 3.0, true));
+        assert!(match_intro_should_finish(3.0, 3.0, false));
+    }
+
+    #[test]
+    fn sys_match_intro_skips_to_ready_on_confirm_after_grace() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, sys_match_intro);
+
+        app.world_mut().spawn((
+            Figure {
+                kind: FigureKind::Batter,
+            },
+            Transform::default(),
+            Anim::default(),
+        ));
+        app.world_mut().spawn((
+            Figure {
+                kind: FigureKind::NonStriker,
+            },
+            Transform::default(),
+            Anim::default(),
+        ));
+
+        app.world_mut()
+            .insert_resource(Phase(PhaseEnum::MatchIntro { t: 1.15 }));
+        app.world_mut().insert_resource(PlayerInput {
+            just_pressed: vec![Action::Confirm],
+            ..Default::default()
+        });
+        app.world_mut().insert_resource(minimal_active_match());
+        app.world_mut().insert_resource(BoundaryRadius(65.0));
+        app.world_mut().insert_resource(crate::game::audio::AudioSettings::default());
+        app.world_mut()
+            .insert_resource(crate::game::audio::CommentaryDurations::default());
+        app.world_mut().insert_resource(CameraRig::default());
+        prime_test_time(&mut app);
+        advance_test_time(app.world_mut(), 0.0);
+        app.update();
+        assert!(
+            matches!(
+                app.world().resource::<Phase>().0,
+                PhaseEnum::ReadyToBall { .. }
+            ),
+            "confirm after grace should skip to ReadyToBall"
+        );
     }
 }
