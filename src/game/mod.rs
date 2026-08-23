@@ -260,7 +260,8 @@ impl Plugin for GameplayPlugin {
             .init_resource::<RecentBalls>()
             .init_resource::<crate::render::camera_rig::BallRecording>()
             .init_resource::<crate::render::camera_rig::ReplayState>()
-            .init_resource::<crate::render::camera_rig::PresentationState>();
+            .init_resource::<crate::render::camera_rig::PresentationState>()
+            .init_resource::<crate::state::MatchPaused>();
     }
 }
 

@@ -8,6 +8,11 @@ use crate::game::ball::CricketBall;
 use crate::render::ring_geometry::floodlight_radius;
 use crate::render::stadium::BowlLayout;
 
+/// Batting-end camera height: 12 ft in metres (12 × 0.3048).
+const BATTING_CAM_HEIGHT_M: f32 = 3.6576;
+/// Distance behind the striker along the pitch axis: 10 ft in metres (10 × 0.3048).
+const BATTING_CAM_BEHIND_BATSMAN_M: f32 = 3.048;
+
 #[derive(Resource, Default)]
 pub struct CameraRig {
     pub mode: CamMode,
@@ -88,13 +93,22 @@ pub fn mode_view(
 ) -> (Vec3, Vec3, f32) {
     let stump_x = geometry::PITCH_HALF_LEN;
     match mode {
-        // Medium telephoto behind the striker's end: down-axis with a slight
-        // lateral offset so foreground bodies sit beside the wicket line.
-        CamMode::BattingEnd => (
-            Vec3::new(stump_x + 11.5, 7.2, 4.2),
-            Vec3::new(-stump_x * 0.30, 0.90, 0.0),
-            25.0,
-        ),
+        // Over-the-shoulder from a 12 ft pole, 10 ft behind the striker —
+        // short enough that a wider lens keeps the release point readable.
+        CamMode::BattingEnd => {
+            let batsman = geometry::BATSMAN_POS;
+            let cam = Vec3::new(
+                batsman.x + BATTING_CAM_BEHIND_BATSMAN_M,
+                BATTING_CAM_HEIGHT_M,
+                batsman.y,
+            );
+            let look = Vec3::new(
+                geometry::RELEASE_POINT.x,
+                geometry::RELEASE_POINT.y * 0.55,
+                geometry::RELEASE_POINT.z,
+            );
+            (cam, look, 48.0)
+        }
         CamMode::BowlingEnd => (
             Vec3::new(-stump_x - 11.5, 7.2, -4.2),
             Vec3::new(stump_x * 0.30, 0.90, 0.0),
@@ -295,6 +309,36 @@ mod tests {
         let (_, _, bat_fov) = mode_view(CamMode::BattingEnd, None, br, None);
         let (_, _, wide_fov) = mode_view(CamMode::Broadcast, None, br, None);
         assert!(wide_fov > bat_fov + 15.0);
+    }
+
+    #[test]
+    fn batting_lens_behind_striker_at_twelve_ft_pole() {
+        let br = geometry::DEFAULT_BOUNDARY_RADIUS;
+        let (pos, look, fov) = mode_view(CamMode::BattingEnd, None, br, None);
+        let batsman = geometry::BATSMAN_POS;
+        assert!(
+            (pos.y - BATTING_CAM_HEIGHT_M).abs() < 0.02,
+            "batting cam height should be 12 ft: y={}",
+            pos.y
+        );
+        assert!(
+            (pos.x - (batsman.x + BATTING_CAM_BEHIND_BATSMAN_M)).abs() < 0.02,
+            "batting cam should sit 10 ft behind batsman: x={}",
+            pos.x
+        );
+        assert!(
+            (pos.z - batsman.y).abs() < 0.05,
+            "batting cam should track batsman lateral line: z={}",
+            pos.z
+        );
+        assert!(
+            look.x < batsman.x,
+            "batting cam should look down the pitch at the bowler: look={look:?}"
+        );
+        assert!(
+            fov >= 42.0 && fov <= 55.0,
+            "over-the-shoulder read needs a wider lens than telephoto: fov={fov}"
+        );
     }
 
     #[test]
