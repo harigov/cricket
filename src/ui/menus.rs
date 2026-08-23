@@ -101,9 +101,130 @@ pub struct MenuState {
 #[derive(Resource, Default)]
 struct MenuAnimTime(pub f32);
 
+/// Snapshot of every value that [`refresh_menu`] uses to build menu content.
+/// Compared explicitly so spurious `ResMut` change ticks never force a rebuild.
+#[derive(Debug, PartialEq, Clone)]
+struct MenuContentSignature {
+    screen: Screen,
+    sel: usize,
+    settings_tab: SettingsTab,
+    team: usize,
+    opp: usize,
+    overs_idx: usize,
+    stadium_idx: usize,
+    bat_first: bool,
+    toss_winner: usize,
+    toss_elects_bat: bool,
+    audio: AudioSignature,
+    bindings: Vec<(Action, KeyCode)>,
+    rebind: Option<Action>,
+    ui_prefs: UiPrefsSignature,
+    ui_scale: f32,
+    bracket: BracketSignature,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+struct AudioSignature {
+    master: f32,
+    sfx: f32,
+    music: f32,
+    commentary: crate::game::audio::CommentaryVoice,
+    commentary_volume: f32,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+struct UiPrefsSignature {
+    ui_scale: f32,
+    high_contrast: bool,
+    subtitle_scale: f32,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+struct BracketSignature {
+    inner: Option<BracketInnerSignature>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+struct BracketInnerSignature {
+    name: String,
+    fixtures: Vec<BracketFixtureSignature>,
+    user_team: Option<usize>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+struct BracketFixtureSignature {
+    stage: Stage,
+    home: usize,
+    away: usize,
+    stadium: usize,
+    result: Option<crate::core::rules::Result>,
+}
+
 #[derive(Resource, Default)]
 struct MenuRebuildState {
-    built: bool,
+    signature: Option<MenuContentSignature>,
+}
+
+fn menu_content_signature(
+    ms: &MenuState,
+    ct: &CurrentTournament,
+    bindings: &KeyBindings,
+    audio: &AudioSettings,
+    rebind: &RebindState,
+    ui_prefs: &UiPreferences,
+    ui_scale: &UiScale,
+) -> MenuContentSignature {
+    let mut binding_entries: Vec<_> = bindings
+        .map
+        .iter()
+        .map(|(&action, &key)| (action, key))
+        .collect();
+    binding_entries.sort_by(|(a, _), (b, _)| format!("{a:?}").cmp(&format!("{b:?}")));
+
+    MenuContentSignature {
+        screen: ms.screen,
+        sel: ms.sel,
+        settings_tab: ms.settings_tab,
+        team: ms.team,
+        opp: ms.opp,
+        overs_idx: ms.overs_idx,
+        stadium_idx: ms.stadium_idx,
+        bat_first: ms.bat_first,
+        toss_winner: ms.toss_winner,
+        toss_elects_bat: ms.toss_elects_bat,
+        audio: AudioSignature {
+            master: audio.master,
+            sfx: audio.sfx,
+            music: audio.music,
+            commentary: audio.commentary,
+            commentary_volume: audio.commentary_volume,
+        },
+        bindings: binding_entries,
+        rebind: rebind.0,
+        ui_prefs: UiPrefsSignature {
+            ui_scale: ui_prefs.ui_scale,
+            high_contrast: ui_prefs.high_contrast,
+            subtitle_scale: ui_prefs.subtitle_scale,
+        },
+        ui_scale: ui_scale.0,
+        bracket: BracketSignature {
+            inner: ct.0.as_ref().map(|t| BracketInnerSignature {
+                name: t.name.clone(),
+                fixtures: t
+                    .fixtures
+                    .iter()
+                    .map(|f| BracketFixtureSignature {
+                        stage: f.stage,
+                        home: f.home,
+                        away: f.away,
+                        stadium: f.stadium,
+                        result: f.result.clone(),
+                    })
+                    .collect(),
+                user_team: t.user_team,
+            }),
+        },
+    }
 }
 
 impl Default for MenuState {
@@ -250,7 +371,7 @@ fn spawn_menu_root(
     assets: Res<AssetServer>,
     mut built: ResMut<MenuRebuildState>,
 ) {
-    built.built = false;
+    built.signature = None;
     info!("MENU ROOT SPAWNED");
     commands
         .spawn((
@@ -885,24 +1006,8 @@ fn spawn_menu_footer_hint(
     ));
 }
 
-fn menu_content_dirty(
-    built: &MenuRebuildState,
-    ms: &Res<MenuState>,
-    ct: &Res<CurrentTournament>,
-    bindings: &Res<KeyBindings>,
-    audio: &Res<AudioSettings>,
-    rebind: &Res<RebindState>,
-    ui_prefs: &Res<UiPreferences>,
-    ui_scale: &Res<UiScale>,
-) -> bool {
-    !built.built
-        || ms.is_changed()
-        || ct.is_changed()
-        || bindings.is_changed()
-        || audio.is_changed()
-        || rebind.is_changed()
-        || ui_prefs.is_changed()
-        || ui_scale.is_changed()
+fn menu_content_dirty(built: &MenuRebuildState, signature: &MenuContentSignature) -> bool {
+    built.signature.as_ref() != Some(signature)
 }
 
 fn refresh_menu(
@@ -926,31 +1031,21 @@ fn refresh_menu(
     };
     let is_main = ms.screen == Screen::Main;
     let scale = ui_scale.0;
-    let dirty = menu_content_dirty(
-        &built,
-        &ms,
-        &ct,
-        &bindings,
-        &audio,
-        &rebind,
-        &ui_prefs,
-        &ui_scale,
-    );
-
-    if ms.is_changed() || ui_scale.is_changed() {
-        if let Ok((mut image, art)) = backdrop_q.single_mut() {
-            image.image = if is_main {
-                art.main.clone()
-            } else {
-                art.secondary.clone()
-            };
-        }
-        apply_menu_root_layout(&mut root_node, is_main, scale);
-    }
+    let signature = menu_content_signature(&ms, &ct, &bindings, &audio, &rebind, &ui_prefs, &ui_scale);
+    let dirty = menu_content_dirty(&built, &signature);
 
     if !dirty {
         return;
     }
+
+    if let Ok((mut image, art)) = backdrop_q.single_mut() {
+        image.image = if is_main {
+            art.main.clone()
+        } else {
+            art.secondary.clone()
+        };
+    }
+    apply_menu_root_layout(&mut root_node, is_main, scale);
 
     clear_menu_rows(&mut commands, root, &children_q);
 
@@ -1011,7 +1106,7 @@ fn refresh_menu(
         spawn_menu_footer_hint(p, &ms, fonts, scale);
     });
 
-    built.built = true;
+    built.signature = Some(signature);
 }
 
 /// Layout variant for [`spawn_setup_card`].
@@ -2206,5 +2301,80 @@ mod tests {
         assert!(!user_bats_first_from_toss(1, 1, false));
         assert!(!user_bats_first_from_toss(1, 4, true));
         assert!(user_bats_first_from_toss(1, 4, false));
+    }
+
+    fn signature_from_world(world: &World) -> MenuContentSignature {
+        menu_content_signature(
+            world.resource::<MenuState>(),
+            world.resource::<CurrentTournament>(),
+            world.resource::<KeyBindings>(),
+            world.resource::<AudioSettings>(),
+            world.resource::<RebindState>(),
+            world.resource::<UiPreferences>(),
+            world.resource::<UiScale>(),
+        )
+    }
+
+    fn insert_signature_resources(world: &mut World) {
+        world.insert_resource(MenuState::default());
+        world.insert_resource(CurrentTournament::default());
+        world.insert_resource(KeyBindings::default());
+        world.insert_resource(AudioSettings::default());
+        world.insert_resource(RebindState::default());
+        world.insert_resource(UiPreferences::default());
+        world.insert_resource(UiScale::default());
+    }
+
+    fn noop_menu_input(ms: &mut MenuState) {
+        let _ = ms.screen;
+    }
+
+    #[test]
+    fn menu_signature_unchanged_after_resmut_deref_without_write() {
+        let mut world = World::new();
+        insert_signature_resources(&mut world);
+        world.clear_trackers();
+
+        let before = signature_from_world(&world);
+
+        {
+            let mut ms = world.resource_mut::<MenuState>();
+            noop_menu_input(&mut ms);
+        }
+
+        let after = signature_from_world(&world);
+        assert_eq!(before, after);
+        assert!(
+            world.is_resource_changed::<MenuState>(),
+            "ResMut deref should still mark MenuState changed"
+        );
+        let rebuild = MenuRebuildState {
+            signature: Some(before),
+        };
+        assert!(!menu_content_dirty(&rebuild, &after));
+    }
+
+    #[test]
+    fn menu_signature_changes_when_sel_changes() {
+        let mut world = World::new();
+        insert_signature_resources(&mut world);
+        let before = signature_from_world(&world);
+
+        world.resource_mut::<MenuState>().sel = 2;
+        let after = signature_from_world(&world);
+
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn menu_signature_changes_when_audio_volume_changes() {
+        let mut world = World::new();
+        insert_signature_resources(&mut world);
+        let before = signature_from_world(&world);
+
+        world.resource_mut::<AudioSettings>().master = 0.42;
+        let after = signature_from_world(&world);
+
+        assert_ne!(before, after);
     }
 }
