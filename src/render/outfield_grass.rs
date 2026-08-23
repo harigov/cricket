@@ -11,8 +11,11 @@ pub const OUTFIELD_GRASS_TILE_METERS: f32 = 4.0;
 /// Number of alternating mow bands across the square outfield.
 pub const MOW_BAND_COUNT: u32 = 16;
 
-/// Canonical outfield green the authored albedo was balanced against.
-pub const REFERENCE_OUTFIELD_COLOR: Color = Color::srgb_u8(0x2F, 0x7D, 0x32);
+/// Legacy outfield green the authored albedo PNG was balanced against (personality anchor).
+const LEGACY_REFERENCE_OUTFIELD_COLOR: Color = Color::srgb_u8(0x2F, 0x7D, 0x32);
+
+/// Canonical bright fairway green for material base colours (golf-course groomed turf).
+pub const REFERENCE_OUTFIELD_COLOR: Color = Color::srgb_u8(0x52, 0xA6, 0x42);
 
 /// Expected authored grass albedo resolution (verified at load time in tests).
 pub const AUTHORED_GRASS_ALBEDO_SIZE: u32 = 1254;
@@ -30,27 +33,33 @@ pub fn outfield_grass_uv_scale(span_m: f32) -> f32 {
 #[inline]
 pub fn mow_stripe_multiplier(band_index: u32) -> f32 {
     if band_index.is_multiple_of(2) {
-        1.04
+        1.10
     } else {
-        0.96
+        0.90
     }
 }
 
-/// Near-neutral tint preserving stadium personality relative to [`REFERENCE_OUTFIELD_COLOR`].
+/// Fairway base colour preserving stadium personality relative to [`REFERENCE_OUTFIELD_COLOR`].
 ///
-/// The authored albedo is already green; multiplying by a dark stadium outfield colour
-/// would crush luminance. Instead we ratio each channel against the reference so the
-/// reference stadium modulates as white and others stay subtly distinct.
+/// Stadium outfield tints are still authored against the legacy PNG anchor; ratio each
+/// channel against that anchor and apply the delta to the bright fairway reference so
+/// personality survives the retune without crushing the albedo multiply.
 pub fn stadium_modulation_tint(stadium_tint: Color) -> Color {
+    let legacy = LEGACY_REFERENCE_OUTFIELD_COLOR.to_srgba();
     let reference = REFERENCE_OUTFIELD_COLOR.to_srgba();
     let stadium = stadium_tint.to_srgba();
     let mut s = bevy::color::Srgba {
-        red: (stadium.red / reference.red).clamp(MODULATION_CLAMP_LOW, MODULATION_CLAMP_HIGH),
-        green: (stadium.green / reference.green).clamp(MODULATION_CLAMP_LOW, MODULATION_CLAMP_HIGH),
-        blue: (stadium.blue / reference.blue).clamp(MODULATION_CLAMP_LOW, MODULATION_CLAMP_HIGH),
+        red: (reference.red * (stadium.red / legacy.red))
+            .clamp(reference.red * MODULATION_CLAMP_LOW, reference.red * MODULATION_CLAMP_HIGH),
+        green: (reference.green * (stadium.green / legacy.green)).clamp(
+            reference.green * MODULATION_CLAMP_LOW,
+            reference.green * MODULATION_CLAMP_HIGH,
+        ),
+        blue: (reference.blue * (stadium.blue / legacy.blue))
+            .clamp(reference.blue * MODULATION_CLAMP_LOW, reference.blue * MODULATION_CLAMP_HIGH),
         alpha: stadium.alpha,
     };
-    // Leave headroom for the brightest mow stripe (+4%) without clipping to white.
+    // Leave headroom for the brightest mow stripe without clipping to white.
     let lum = 0.2126 * s.red + 0.7152 * s.green + 0.0722 * s.blue;
     let max_lum = 1.0 / mow_stripe_multiplier(0);
     if lum > max_lum {
@@ -230,27 +239,29 @@ mod tests {
     }
 
     #[test]
-    fn reference_stadium_modulation_is_near_neutral() {
-        let tint = stadium_modulation_tint(REFERENCE_OUTFIELD_COLOR).to_srgba();
-        // Headroom for the +4% mow stripe keeps reference luminance just under white.
-        assert!((tint.red - tint.green).abs() < 0.02);
-        assert!((tint.green - tint.blue).abs() < 0.02);
-        assert!(tint.red > 0.94 && tint.red <= 1.0);
-        assert!(tint.green > 0.94 && tint.green <= 1.0);
-        assert!(tint.blue > 0.94 && tint.blue <= 1.0);
+    fn reference_stadium_modulation_matches_fairway() {
+        let tint = stadium_modulation_tint(LEGACY_REFERENCE_OUTFIELD_COLOR).to_srgba();
+        let fairway = REFERENCE_OUTFIELD_COLOR.to_srgba();
+        assert!((tint.red - fairway.red).abs() < 0.02);
+        assert!((tint.green - fairway.green).abs() < 0.02);
+        assert!((tint.blue - fairway.blue).abs() < 0.02);
+        // Headroom for the +10% mow stripe keeps reference luminance in range.
+        assert!(tint.red > 0.30 && tint.red <= 1.0);
+        assert!(tint.green > 0.60 && tint.green <= 1.0);
+        assert!(tint.blue > 0.20 && tint.blue <= 1.0);
     }
 
     #[test]
     fn modulation_preserves_stadium_personality_within_bounds() {
         let rose = Color::srgb_u8(0x35, 0x82, 0x36);
         let tint = stadium_modulation_tint(rose).to_srgba();
-        assert!(tint.red > 1.0);
-        assert!(tint.red <= MODULATION_CLAMP_HIGH);
-        assert!(tint.green <= MODULATION_CLAMP_HIGH);
-        assert!(tint.blue <= MODULATION_CLAMP_HIGH);
-        assert!(tint.red >= MODULATION_CLAMP_LOW);
-        assert!(tint.green >= MODULATION_CLAMP_LOW);
-        assert!(tint.blue >= MODULATION_CLAMP_LOW);
+        let fairway = stadium_modulation_tint(LEGACY_REFERENCE_OUTFIELD_COLOR).to_srgba();
+        assert!(tint.red > fairway.red);
+        assert!(tint.green >= fairway.green * MODULATION_CLAMP_LOW);
+        assert!(tint.blue >= fairway.blue * MODULATION_CLAMP_LOW);
+        assert!(tint.red <= fairway.red * MODULATION_CLAMP_HIGH);
+        assert!(tint.green <= fairway.green * MODULATION_CLAMP_HIGH);
+        assert!(tint.blue <= fairway.blue * MODULATION_CLAMP_HIGH);
     }
 
     #[test]

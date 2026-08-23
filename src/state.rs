@@ -20,6 +20,16 @@ pub fn not_paused(paused: Option<Res<MatchPaused>>) -> bool {
     !paused.map(|p| p.0).unwrap_or(false)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_paused_tolerates_missing_resource() {
+        assert!(not_paused(None));
+    }
+}
+
 /// Fired when the match scene must be torn down and rebuilt
 /// (innings change).
 #[derive(Message)]

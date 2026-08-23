@@ -26,6 +26,13 @@ const INTRO_CAM_BACK: f32 = 12.0;
 /// bowler 30 m away needs a wide lens - wider than the establishing shot.
 const BATTING_CAM_FOV_DEG: f32 = 60.0;
 
+/// Bowling-end lens: a static camera 10 ft up and 25 ft back from the bowler's stumps.
+const BOWLING_CAM_HEIGHT_M: f32 = 3.048; // 10 ft
+const BOWLING_CAM_SETBACK_M: f32 = 7.62; // 25 ft
+/// Vertical FOV. At ~27 m the vertical frame is ~12 m tall (2 × 26.8 m × tan(12.5°)),
+/// framing the striker, stumps and pitch strip without wasting the 25 ft standoff.
+const BOWLING_CAM_FOV_DEG: f32 = 25.0;
+
 #[derive(Resource, Default)]
 pub struct CameraRig {
     pub mode: CamMode,
@@ -128,11 +135,20 @@ pub fn mode_view(
             );
             (cam, look, BATTING_CAM_FOV_DEG)
         }
-        CamMode::BowlingEnd => (
-            Vec3::new(-stump_x - 11.5, 7.2, -4.2),
-            Vec3::new(stump_x * 0.30, 0.90, 0.0),
-            25.0,
-        ),
+        // Static over-the-shoulder from a 10 ft pole, 25 ft behind the bowler's
+        // stumps — far enough back for a telephoto lens aimed straight at the striker.
+        CamMode::BowlingEnd => {
+            let cam = Vec3::new(-stump_x - BOWLING_CAM_SETBACK_M, BOWLING_CAM_HEIGHT_M, 0.0);
+            // Unlike the batting lens (only 10 ft back), 25 ft gives enough standoff
+            // to sight the striker's stumps directly — the optical axis lands on the
+            // batsman with the pitch leading the eye into them.
+            let look = Vec3::new(
+                geometry::PITCH_HALF_LEN,
+                geometry::STUMP_HEIGHT,
+                geometry::BATSMAN_POS.y,
+            );
+            (cam, look, BOWLING_CAM_FOV_DEG)
+        }
         CamMode::Broadcast => broadcast_establishing_view(boundary_r),
         CamMode::FollowBall => {
             let b = ball.unwrap_or(Vec3::new(20.0, 3.0, 10.0));
@@ -236,11 +252,17 @@ pub fn update_camera(
 
     // Snappy cuts between modes (broadcast switching), smooth within a mode:
     // use a faster blend so mode switches feel like deliberate cuts rather
-    // than floaty drifts.
+    // than floaty drifts. Bowling-end is a fixed world lens — no follow.
     let k = (1.0 - (-9.0 * time.delta_secs()).exp()).clamp(0.0, 1.0);
-    rig.pos = rig.pos.lerp(target_pos, k);
-    rig.look = rig.look.lerp(target_look, k);
-    rig.fov += (target_fov - rig.fov) * k;
+    if rig.mode == CamMode::BowlingEnd {
+        rig.pos = target_pos;
+        rig.look = target_look;
+        rig.fov = target_fov;
+    } else {
+        rig.pos = rig.pos.lerp(target_pos, k);
+        rig.look = rig.look.lerp(target_look, k);
+        rig.fov += (target_fov - rig.fov) * k;
+    }
 
     // Apply shake as random offset
     let mut pos = rig.pos;
@@ -398,6 +420,94 @@ mod tests {
         let large = broadcast_establishing_view(75.0).0;
         assert!(large.z > small.z);
         assert!(large.y > small.y);
+    }
+
+    #[test]
+    fn bowling_lens_behind_bowler_stumps() {
+        let br = geometry::DEFAULT_BOUNDARY_RADIUS;
+        let (pos, look, fov) = mode_view(CamMode::BowlingEnd, None, br, None);
+        let bowler_stumps_x = -geometry::PITCH_HALF_LEN;
+
+        assert!(
+            (pos.y - BOWLING_CAM_HEIGHT_M).abs() < 0.02,
+            "bowling cam height should be 10 ft: y={}",
+            pos.y
+        );
+        assert!(
+            (pos.x - (bowler_stumps_x - BOWLING_CAM_SETBACK_M)).abs() < 0.02,
+            "bowling cam should sit 25 ft behind bowler's stumps: x={}",
+            pos.x
+        );
+        assert!(
+            pos.x < bowler_stumps_x,
+            "bowling cam should be behind the bowler's stumps (further -X): x={}",
+            pos.x
+        );
+        assert!(
+            pos.x < geometry::BATSMAN_POS.x,
+            "bowling cam should be on the far side of the stumps from the striker: x={}",
+            pos.x
+        );
+        assert!(
+            pos.z.abs() < 0.05,
+            "bowling cam should be centred on the pitch: z={}",
+            pos.z
+        );
+        assert!(
+            look.x > pos.x,
+            "bowling cam should look down +X toward the batting end: pos={pos:?} look={look:?}"
+        );
+        assert!(
+            (look.x - geometry::PITCH_HALF_LEN).abs() < 0.05,
+            "bowling cam should aim at the striker's stumps: look={look:?}"
+        );
+        assert!(
+            (look.y - geometry::STUMP_HEIGHT).abs() < 0.05,
+            "bowling cam should aim at upper-stump height: look={look:?}"
+        );
+        assert!(
+            (20.0..=30.0).contains(&fov),
+            "25 ft standoff is a telephoto gameplay lens: fov={fov}"
+        );
+    }
+
+    /// From 25 ft back the optical axis must land on the batsman and the striker
+    /// must read as a person, not a speck above empty foreground.
+    #[test]
+    fn bowling_lens_keeps_striker_in_frame() {
+        let br = geometry::DEFAULT_BOUNDARY_RADIUS;
+        let (pos, look, fov) = mode_view(CamMode::BowlingEnd, None, br, None);
+
+        let flat = Vec2::new(look.x - pos.x, look.z - pos.z).length();
+        let depression = ((pos.y - look.y) / flat).atan();
+
+        let batsman = geometry::BATSMAN_POS;
+        let to_striker = Vec2::new(batsman.x - pos.x, batsman.y - pos.z).length();
+        let axis_y = pos.y - to_striker * depression.tan();
+        let half_fov = fov.to_radians() * 0.5;
+        let frame_bottom = axis_y - to_striker * half_fov.tan();
+        let frame_top = axis_y + to_striker * half_fov.tan();
+        let frame_height = frame_top - frame_bottom;
+
+        const STRIKER_FEET_Y: f32 = 0.0;
+        const STRIKER_HEAD_Y: f32 = 1.8;
+
+        assert!(
+            axis_y >= 0.0 && axis_y <= 3.0,
+            "optical axis should land on the batsman at striker distance, not below ground: \
+             axis_y={axis_y} at {to_striker} m"
+        );
+        assert!(
+            frame_bottom < STRIKER_FEET_Y && frame_top > STRIKER_HEAD_Y,
+            "striker ({STRIKER_FEET_Y}–{STRIKER_HEAD_Y} m) should sit inside the frame \
+             [{frame_bottom}, {frame_top}] at {to_striker} m"
+        );
+        let batsman_fraction = STRIKER_HEAD_Y / frame_height;
+        assert!(
+            (0.10..=0.35).contains(&batsman_fraction),
+            "striker should read as a person (~10–35% of frame height), not a speck: \
+             {batsman_fraction:.2} of {frame_height:.1} m at {to_striker} m"
+        );
     }
 }
 

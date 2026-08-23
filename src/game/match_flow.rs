@@ -14,6 +14,9 @@
 use crate::core::geometry::{self as geo};
 use crate::core::rules::{BallOutcome, Dismissal};
 use crate::core::teams::{BowlStyle, Player, batting_order, pick_bowlers};
+use crate::core::{
+    Footwork, ShotKind, footwork_from_move_y, select_shot, shot_length_penalty, shot_profile,
+};
 use crate::game::ball::*;
 use crate::game::fielding::{self, Brain, Fielder};
 use crate::game::*;
@@ -22,7 +25,8 @@ use crate::render::camera_rig::{
     BallRecording, CamMode, CameraRig, PresentationState, ReplayState,
 };
 use crate::render::player::{
-    Anim, AnimState, Figure, FigureKind, face_target, face_target_quat, spawn_figure,
+    Anim, AnimState, Figure, FigureKind, batter_stance_quat, face_target, face_target_quat,
+    spawn_figure,
 };
 use crate::state::RebuildScene;
 use bevy::ecs::system::SystemParam;
@@ -46,6 +50,15 @@ const TIER_GOOD_MAX: f32 = 0.115;
 const TIER_OKAY_MAX: f32 = 0.19;
 /// Chance an edge carries to the keeper for a dismissal.
 const EDGE_CARRY_CHANCE: f32 = 0.62;
+/// The aim ring lies flat on the pitch, so it has to clear the pitch slab
+/// (y = 0.05) and the worn strip (y = 0.06) or it is hidden underneath them.
+const AIM_MARKER_Y: f32 = 0.075;
+/// Grace before Confirm can signal readiness (avoids result-screen carry-over).
+const READY_GATE_GRACE: f32 = 0.5;
+/// Auto-start the run-up if the batter never signals ready.
+const READY_GATE_TIMEOUT: f32 = 12.0;
+/// Higher top-edge carry chance on mistimed aerial strokes.
+const AERIAL_MISTIME_EDGE_CHANCE: f32 = 0.78;
 
 // ---------------------------------------------------------------------------
 // Resources tied to the live scene
@@ -334,6 +347,12 @@ pub fn match_intro_should_finish(elapsed: f32, duration: f32, skip_requested: bo
     elapsed >= duration || (skip_requested && elapsed >= MATCH_INTRO_SKIP_GRACE)
 }
 
+/// The striker signals readiness with Confirm, after a short settle beat.
+/// Times out so an idle match still bowls the next ball.
+pub fn ready_gate_should_release(elapsed: f32, confirm_pressed: bool) -> bool {
+    elapsed >= READY_GATE_TIMEOUT || (confirm_pressed && elapsed >= READY_GATE_GRACE)
+}
+
 #[derive(SystemParam)]
 pub(crate) struct MatchIntroParams<'w, 's> {
     am: Option<Res<'w, ActiveMatch>>,
@@ -456,7 +475,7 @@ pub fn sys_ready(
         match fig.kind {
             FigureKind::Batter => {
                 tf.translation = Vec3::new(geo::BATSMAN_POS.x, 0.0, geo::BATSMAN_POS.y);
-                tf.rotation = face_target_quat(geo::BATSMAN_POS, bowler_end);
+                tf.rotation = batter_stance_quat(geo::BATSMAN_POS, bowler_end);
             }
             FigureKind::NonStriker => {
                 let pos = Vec2::new(-geo::PITCH_HALF_LEN + 1.6, 0.9);
@@ -494,17 +513,17 @@ pub fn sys_ready(
         CamMode::BowlingEnd
     };
 
-    let user_bowling = am.user_bowling();
-    if user_bowling {
+    if am.user_bowling() {
         if input.pressed(Action::Confirm) {
             phase.0 = PhaseEnum::AimLength { t: 0.0, lock: None };
         }
-    } else {
-        // AI bowling: brief beat, then automatic run-in. Human batting can't
-        // hurry it (that's the point of the wait).
-        if *t > 0.9 {
+    } else if am.user_batting() {
+        if ready_gate_should_release(*t, input.pressed(Action::Confirm)) {
             phase.0 = PhaseEnum::RunUp { p: 0.0 };
         }
+    } else if *t > 0.9 {
+        // AI vs AI: brief beat, then automatic run-in.
+        phase.0 = PhaseEnum::RunUp { p: 0.0 };
     }
 }
 
@@ -550,8 +569,7 @@ pub fn sys_aim(
                     unlit: true,
                     ..Default::default()
                 })),
-                Transform::from_xyz(-5.0, 0.04, 0.0)
-                    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+                Transform::from_xyz(-5.0, AIM_MARKER_Y, 0.0),
                 Visibility::default(),
             ))
             .id();
@@ -886,6 +904,93 @@ pub(crate) struct ShotInputParams<'w, 's> {
     batters: Query<'w, 's, (&'static Figure, &'static mut Anim)>,
 }
 
+/// AI batter inputs for footwork, aim and loft from line, length and skill.
+pub fn ai_batting_inputs(
+    plan: &DeliveryPlan,
+    skill: f32,
+    agg: f32,
+    quality: f32,
+    defend_bias: f32,
+    swing_prob: f32,
+    rng_unit: impl Fn() -> f32,
+    rng_coin: impl Fn(f32) -> bool,
+) -> Option<(Footwork, f32, bool)> {
+    if !rng_coin(swing_prob) {
+        return None;
+    }
+    if plan.wide {
+        return None;
+    }
+    if quality > 0.75 && agg < 0.6 && rng_coin(defend_bias) {
+        return Some((Footwork::Planted, 0.0, false));
+    }
+
+    let len = plan.length_from_stumps;
+    let line = plan.line_z;
+    let mut footwork = if len > 11.0 {
+        Footwork::Back
+    } else if len < 4.5 {
+        Footwork::Front
+    } else if line > 0.42 {
+        Footwork::Back
+    } else if line < -0.28 {
+        Footwork::Front
+    } else {
+        Footwork::Front
+    };
+    let mut aim = if line > 0.45 {
+        0.58
+    } else if line < -0.30 {
+        -0.52
+    } else if len < 4.5 {
+        0.08
+    } else if len > 11.0 {
+        -0.62
+    } else {
+        0.0
+    };
+    let loft = if len > 11.0 {
+        rng_coin((0.35 + agg * 0.45).clamp(0.1, 0.85))
+    } else if len <= 11.0 && len >= 4.5 {
+        rng_coin((agg * 0.45 * (1.25 - quality)).clamp(0.05, 0.88))
+    } else {
+        rng_coin((agg * 0.35).clamp(0.05, 0.55))
+    };
+
+    // Better batters pick length-appropriate footwork more often.
+    let noise = (1.0 - skill) * 0.42;
+    aim = (aim + (rng_unit() * 2.0 - 1.0) * (0.28 + noise)).clamp(-1.0, 1.0);
+    if rng_unit() < noise * 0.35 {
+        footwork = match footwork {
+            Footwork::Front => Footwork::Back,
+            Footwork::Back => Footwork::Front,
+            Footwork::Planted => {
+                if len > 9.0 {
+                    Footwork::Back
+                } else {
+                    Footwork::Front
+                }
+            }
+        };
+    }
+    if skill > 0.72 && rng_unit() < skill * 0.55 {
+        footwork = if len > 10.5 {
+            Footwork::Back
+        } else if len < 5.0 {
+            Footwork::Front
+        } else {
+            footwork
+        };
+        if len > 10.5 {
+            aim = aim.min(-0.55);
+        } else if len < 5.0 {
+            aim = aim.clamp(-0.2, 0.45);
+        }
+    }
+
+    Some((footwork, aim, loft))
+}
+
 pub fn sys_shot_input(
     phase: ResMut<Phase>,
     time: Res<Time>,
@@ -911,81 +1016,69 @@ pub fn sys_shot_input(
         .unwrap_or(false);
 
     if user_batting && input.pressed(Action::Confirm) {
+        let footwork = footwork_from_move_y(input.move_vec.y);
+        let loft = input.held(Action::Loft);
+        let aim = input.move_vec.x.clamp(-1.0, 1.0);
+        let kind = select_shot(footwork, aim, loft);
         for (fig, mut anim) in &mut shot.batters {
             if fig.kind == FigureKind::Batter {
-                anim.state = AnimState::BatSwing { p: 0.0 };
+                anim.state = AnimState::BatShot { p: 0.0, shot: kind };
             }
         }
         if !shot.attempt.pressed {
             shot.attempt.pressed = true;
             let offset = shot.rel.t - shot.rel.t_arrive;
             shot.attempt.offset = Some(offset);
-            shot.attempt.loft = input.held(Action::Loft);
-            shot.attempt.dir_x = input.move_vec.x;
+            shot.attempt.loft = loft;
+            shot.attempt.dir_x = aim;
+            shot.attempt.footwork = footwork;
+            shot.attempt.kind = kind;
             info!(
-                "SHOT registered: offset {:.3}s (arrive {:.3}s, t {:.3}s) loft={} dir={:.2}",
-                offset,
-                shot.rel.t_arrive,
-                shot.rel.t,
-                shot.attempt.loft,
-                shot.attempt.dir_x
+                "SHOT registered: {:?} offset {:.3}s loft={} aim={:.2}",
+                kind, offset, loft, aim
             );
         }
     } else if let (Some(am), Some(wd)) = (shot.am.as_ref(), shot.wd.as_ref()) {
         if !shot.attempt.ai_scheduled && shot.rel.t > shot.rel.t_arrive - 0.45 {
-        // AI batter: line/length aware decision
-        shot.attempt.ai_scheduled = true;
-        if plan.wide {
-            return;
-        }
-        let batsman = am.striker(wd);
-        let q = plan.quality_vs_batsman();
-        let skill = batsman.batting as f32 / 100.0;
-        // Fuller / good-length balls are easier to time; short balls harder
-        let length_factor = if plan.length_from_stumps < 4.5 {
-            0.04
-        } else if plan.length_from_stumps > 11.0 {
-            0.025
-        } else {
-            0.0
-        };
-        let sigma =
-            (0.045 + (1.0 - q) * 0.10 - (skill - 0.7) * 0.04 + length_factor).clamp(0.028, 0.30);
-        let agg = chase_pressure(
-            am.state.innings.target,
-            am.state.innings.runs,
-            am.state.innings.legal_balls,
-            am.state.overs,
-        );
-        // Defend good balls more often unless chasing hard
-        let defend_bias = if q > 0.75 && agg < 0.6 { 0.18 } else { 0.0 };
-        let swing_prob = (0.58 + agg * 0.38 - q * 0.32 - defend_bias).clamp(0.18, 0.96);
-        if coin(swing_prob) {
-            shot.attempt.pressed = true;
-            shot.attempt.offset = Some((gauss() * sigma).clamp(-0.5, 0.5));
-            // Direction mapped to line & length
-            let mut preferred = 0.0f32;
-            if plan.line_z > 0.45 {
-                preferred = 0.55; // wide off -> square through off
-            } else if plan.line_z < -0.30 {
-                preferred = -0.55; // leg stump -> flick / pull leg side
-            } else if plan.length_from_stumps < 4.5 {
-                preferred = 0.10; // yorker -> straight
+            shot.attempt.ai_scheduled = true;
+            let batsman = am.striker(wd);
+            let q = plan.quality_vs_batsman();
+            let skill = batsman.batting as f32 / 100.0;
+            let length_factor = if plan.length_from_stumps < 4.5 {
+                0.04
             } else if plan.length_from_stumps > 11.0 {
-                preferred = -0.40; // bouncer -> pull leg side
-                // short balls lofted more often
-                shot.attempt.loft = coin((0.35 + agg * 0.45).clamp(0.1, 0.85));
+                0.025
+            } else {
+                0.0
+            };
+            let sigma =
+                (0.045 + (1.0 - q) * 0.10 - (skill - 0.7) * 0.04 + length_factor)
+                    .clamp(0.028, 0.30);
+            let agg = chase_pressure(
+                am.state.innings.target,
+                am.state.innings.runs,
+                am.state.innings.legal_balls,
+                am.state.overs,
+            );
+            let defend_bias = if q > 0.75 && agg < 0.6 { 0.18 } else { 0.0 };
+            let swing_prob = (0.58 + agg * 0.38 - q * 0.32 - defend_bias).clamp(0.18, 0.96);
+            if let Some((footwork, aim, loft)) = ai_batting_inputs(
+                plan,
+                skill,
+                agg,
+                q,
+                defend_bias,
+                swing_prob,
+                || unit(),
+                coin,
+            ) {
+                shot.attempt.pressed = true;
+                shot.attempt.offset = Some((gauss() * sigma).clamp(-0.5, 0.5));
+                shot.attempt.loft = loft;
+                shot.attempt.dir_x = aim;
+                shot.attempt.footwork = footwork;
+                shot.attempt.kind = select_shot(footwork, aim, loft);
             }
-            if plan.length_from_stumps <= 11.0 && plan.length_from_stumps >= 4.5 {
-                // good length: loft only when chasing or bad ball
-                shot.attempt.loft = coin((agg * 0.45 * (1.25 - q)).clamp(0.05, 0.88));
-            } else if shot.attempt.loft {
-                // already set for short balls; keep
-            }
-            // Add variation around preferred
-            let spread = 0.32 + (1.0 - skill) * 0.18;
-            shot.attempt.dir_x = (preferred + (unit() * 2.0 - 1.0) * spread).clamp(-1.0, 1.0);
-        }
         }
     }
 }
@@ -1132,9 +1225,12 @@ fn resolve_at_bat(
     };
 
     let ao = offset.abs();
+    let profile = shot_profile(attempt.kind);
+    let len_mul = shot_length_penalty(attempt.kind, plan.length_from_stumps);
+    let effective_ao = ao * len_mul / profile.forgiveness;
 
     // ---- Play and miss / thick edge band ----
-    if ao >= BEATEN_TIMING_THRESHOLD {
+    if effective_ao >= BEATEN_TIMING_THRESHOLD {
         resolve_unplayed_ball(
             &mut ctx,
             bs,
@@ -1148,41 +1244,63 @@ fn resolve_at_bat(
         return None;
     }
 
-    let tier = if ao < TIER_PERFECT_MAX {
+    let tier = if effective_ao < TIER_PERFECT_MAX {
         Tier::Perfect
-    } else if ao < TIER_GOOD_MAX {
+    } else if effective_ao < TIER_GOOD_MAX {
         Tier::Good
-    } else if ao < TIER_OKAY_MAX {
+    } else if effective_ao < TIER_OKAY_MAX {
         Tier::Okay
     } else {
         Tier::Edge
     };
 
+    let edge_chance = if attempt.kind.aerial() && tier == Tier::Edge {
+        AERIAL_MISTIME_EDGE_CHANCE
+    } else {
+        EDGE_CARRY_CHANCE
+    };
+
     // ---- Edged ----
-    if tier == Tier::Edge && coin(EDGE_CARRY_CHANCE) {
+    if tier == Tier::Edge && coin(edge_chance) {
         bs.dead = true;
+        let edge_text = if attempt.kind.aerial() {
+            "Top edge! TAKEN behind!"
+        } else {
+            "Edged & TAKEN behind!"
+        };
         ctx.finalize(
             BallOutcome::Wicket(Dismissal::CaughtBehind { keeper: true }),
-            "Edged & TAKEN behind!".into(),
+            edge_text.into(),
         );
         return None;
     }
 
-    // ---- Clean contact: build the exit velocity ----
-    let (mut speed, mut elev): (f32, f32) = match tier {
-        Tier::Perfect => (34.0, 9.0),
-        Tier::Good => (29.0, 15.0),
-        Tier::Okay => (23.0, 24.0),
-        Tier::Edge => (11.0, 8.0),
+    // ---- Clean contact: build the exit velocity from stroke profile ----
+    let tier_speed = match tier {
+        Tier::Perfect => 1.08,
+        Tier::Good => 1.0,
+        Tier::Okay => 0.86,
+        Tier::Edge => 0.42,
     };
-    speed *= skill.clamp(0.82, 1.15);
-    if attempt.loft && tier != Tier::Edge {
-        elev += 17.0;
-        speed *= 1.12;
+    let tier_elev = match tier {
+        Tier::Perfect => 0.0,
+        Tier::Good => 2.0,
+        Tier::Okay => 5.0,
+        Tier::Edge => -6.0,
+    };
+    let mut speed = profile.speed * tier_speed * skill.clamp(0.82, 1.15);
+    let mut elev = (profile.elev + tier_elev).max(2.0);
+
+    if matches!(attempt.kind, ShotKind::Defend | ShotKind::Backfoot) {
+        speed = speed.min(13.5);
+        elev = elev.min(7.5);
+    } else if attempt.kind.aerial() && tier != Tier::Edge {
+        speed *= 1.06;
     }
 
-    // Direction: input sweeps leg (-) to off (+); timing biases it too.
-    let mut angle = attempt.dir_x * 80.0 + offset.signum() * ao * 260.0;
+    // Direction: stroke angle dominates; aim and timing perturb placement.
+    let mut angle =
+        profile.angle + attempt.dir_x * 14.0 + offset.signum() * effective_ao * 95.0;
     if tier == Tier::Edge {
         // Squirts behind square either side.
         angle = 105.0 + unit() * 55.0;
@@ -2560,6 +2678,32 @@ mod tests {
         assert!(!match_intro_should_finish(0.4, 3.0, true));
         assert!(match_intro_should_finish(1.2, 3.0, true));
         assert!(match_intro_should_finish(3.0, 3.0, false));
+    }
+
+    #[test]
+    fn ready_gate_should_release_respects_grace_and_timeout() {
+        assert!(!ready_gate_should_release(0.2, true));
+        assert!(ready_gate_should_release(0.55, true));
+        assert!(ready_gate_should_release(12.0, false));
+        assert!(!ready_gate_should_release(11.0, false));
+    }
+
+    #[test]
+    fn ai_batting_inputs_picks_short_ball_pull() {
+        let plan = build_plan(BowlStyle::Fast, 0.0, 12.5);
+        let inputs = ai_batting_inputs(&plan, 0.85, 0.7, 0.5, 0.0, 1.0, || 0.5, |_| true)
+            .expect("should swing");
+        let kind = select_shot(inputs.0, inputs.1, inputs.2);
+        assert!(matches!(kind, ShotKind::Pull | ShotKind::Hook | ShotKind::LateCut));
+    }
+
+    #[test]
+    fn ai_batting_inputs_defends_good_ball_when_not_chasing() {
+        let plan = build_plan(BowlStyle::Medium, 0.05, 7.2);
+        let inputs = ai_batting_inputs(&plan, 0.8, 0.4, 0.9, 1.0, 1.0, || 0.1, |_| true)
+            .expect("should swing");
+        assert_eq!(inputs.0, Footwork::Planted);
+        assert_eq!(select_shot(inputs.0, inputs.1, inputs.2), ShotKind::Defend);
     }
 
     #[test]

@@ -1,9 +1,11 @@
 //! In-match HUD: scoreboard, batter/bowler stats, phase prompts, outcome
 //! banner and the shot-timing meter.
 
+use crate::core::{footwork_from_move_y, select_shot};
 use crate::game::*;
-use crate::state::AppState;
+use crate::input::{Action, KeyBindings, PlayerInput, action_label};
 use crate::ui::theme::{UiFonts, palette, register_ui_font_assets};
+use crate::state::AppState;
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -62,6 +64,14 @@ struct BroadcastChip;
 #[derive(Component)]
 struct ShotDirRoot;
 #[derive(Component)]
+struct ShotPreviewRoot;
+#[derive(Component)]
+struct ShotPreviewText;
+#[derive(Component)]
+struct ShotLegendRoot;
+#[derive(Component)]
+struct ShotLegendText;
+#[derive(Component)]
 struct SummaryRoot;
 #[derive(Component)]
 struct SummaryText;
@@ -83,6 +93,7 @@ impl Plugin for HudPlugin {
                     update_summary,
                     update_broadcast_chip,
                     update_shot_direction,
+                    update_shot_preview,
                 )
                     .run_if(in_state(AppState::InMatch)),
             );
@@ -155,6 +166,8 @@ fn spawn_hud(mut commands: Commands, assets: Res<AssetServer>) {
             spawn_summary_panel(p, &fonts);
             spawn_timing_meter(p, &fonts);
             spawn_shot_direction_indicator(p, &fonts);
+            spawn_shot_preview(p, &fonts);
+            spawn_shot_legend(p, &fonts);
         });
 }
 
@@ -709,6 +722,63 @@ fn spawn_shot_direction_indicator(parent: &mut ChildSpawnerCommands, fonts: &UiF
         });
 }
 
+fn spawn_shot_preview(parent: &mut ChildSpawnerCommands, fonts: &UiFonts) {
+    parent
+        .spawn((
+            ShotPreviewRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: percent(22),
+                left: percent(32),
+                width: percent(36),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            Visibility::Hidden,
+        ))
+        .with_children(|p| {
+            p.spawn((
+                ShotPreviewText,
+                label_text(
+                    "Straight Drive",
+                    fonts.bold.clone(),
+                    13.0,
+                    palette::gold(),
+                ),
+                text_shadow(),
+            ));
+        });
+}
+
+fn spawn_shot_legend(parent: &mut ChildSpawnerCommands, fonts: &UiFonts) {
+    parent
+        .spawn((
+            ShotLegendRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: px(24),
+                right: px(18),
+                padding: UiRect::axes(px(10), px(5)),
+                border_radius: BorderRadius::all(px(3)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.03, 0.04, 0.06, 0.82)),
+            Visibility::Hidden,
+        ))
+        .with_children(|p| {
+            p.spawn((
+                ShotLegendText,
+                label_text(
+                    "W/S FOOT  •  A/D AIM  •  SHIFT LOFT",
+                    fonts.regular.clone(),
+                    9.0,
+                    palette::text_dim(),
+                ),
+            ));
+        });
+}
+
 fn despawn_hud(mut commands: Commands, q: Query<Entity, With<HudRoot>>) {
     for e in &q {
         commands.entity(e).despawn();
@@ -824,31 +894,65 @@ fn update_scoreboard(
 fn update_prompt(
     phase: Res<Phase>,
     am: Option<Res<ActiveMatch>>,
+    attempt: Res<ShotAttempt>,
+    bindings: Res<KeyBindings>,
+    input: Res<PlayerInput>,
     mut root_q: Query<&mut Visibility, With<PromptRoot>>,
     mut text_q: Query<(&PromptField, &mut Text)>,
 ) {
+    let confirm = action_label(Action::Confirm, &bindings, input.gamepad_connected);
+    let loft = action_label(Action::Loft, &bindings, input.gamepad_connected);
     let prompt = match &phase.0 {
-        PhaseEnum::ReadyToBall { .. } => match am.as_deref().map(|m| m.user_bowling()) {
-            Some(true) => Some(("BOWLING", "PRESS SPACE / A TO START RUN-UP")),
+        PhaseEnum::ReadyToBall { .. } => match am.as_deref().map(|m| (m.user_bowling(), m.user_batting())) {
+            Some((true, _)) => Some((
+                "BOWLING",
+                format!("PRESS {confirm} TO START RUN-UP"),
+            )),
+            Some((false, true)) => Some((
+                "BATTING",
+                format!("PRESS {confirm} WHEN READY"),
+            )),
             _ => None,
         },
         PhaseEnum::AimLength { lock, .. } => match lock {
-            None => Some(("BOWLING", "PRESS SPACE TO LOCK LENGTH")),
-            Some(_) => Some(("BOWLING", "PRESS SPACE TO LOCK LINE")),
+            None => Some((
+                "BOWLING",
+                format!("PRESS {confirm} TO LOCK LENGTH"),
+            )),
+            Some(_) => Some((
+                "BOWLING",
+                format!("PRESS {confirm} TO LOCK LINE"),
+            )),
         },
         PhaseEnum::BallLive => {
             if am.as_deref().map(|m| m.user_batting()).unwrap_or(false) {
                 Some((
                     "BATTING",
-                    "SPACE SHOT   •   SHIFT + SPACE LOFT   •   A / D AIM",
+                    format!(
+                        "{confirm} SHOT  •  {loft} LOFT  •  W/S FOOT  •  A/D AIM"
+                    ),
                 ))
             } else {
                 None
             }
         }
-        PhaseEnum::OverBreak { .. } => Some(("END OF OVER", "NEXT BOWLER COMING ON")),
-        PhaseEnum::InningsBreak => Some(("INNINGS BREAK", "PRESS SPACE / A TO BEGIN THE CHASE")),
-        PhaseEnum::MatchOver => Some(("MATCH RESULT", "PRESS SPACE / A TO CONTINUE")),
+        PhaseEnum::ResultPause { t, text } if *t < 1.35 && attempt.pressed => Some((
+            "SHOT",
+            format!(
+                "{}  •  {}",
+                attempt.kind.label().to_uppercase(),
+                text.to_uppercase()
+            ),
+        )),
+        PhaseEnum::OverBreak { .. } => Some(("END OF OVER", "NEXT BOWLER COMING ON".into())),
+        PhaseEnum::InningsBreak => Some((
+            "INNINGS BREAK",
+            format!("PRESS {confirm} TO BEGIN THE CHASE"),
+        )),
+        PhaseEnum::MatchOver => Some((
+            "MATCH RESULT",
+            format!("PRESS {confirm} TO CONTINUE"),
+        )),
         _ => None,
     };
 
@@ -863,7 +967,7 @@ fn update_prompt(
     for (field, mut text) in &mut text_q {
         **text = match field {
             PromptField::Kind => kind.into(),
-            PromptField::Message => message.into(),
+            PromptField::Message => message.clone(),
         };
     }
 }
@@ -1032,7 +1136,12 @@ fn update_shot_direction(
     phase: Res<Phase>,
     am: Option<Res<ActiveMatch>>,
     input: Res<crate::input::PlayerInput>,
-    mut root_q: Query<(&mut Visibility, &Children), With<ShotDirRoot>>,
+    bindings: Res<KeyBindings>,
+    // Disjoint filters: both write Visibility, so Bevy needs proof the sets
+    // cannot overlap (B0001).
+    mut root_q: Query<(&mut Visibility, &Children), (With<ShotDirRoot>, Without<ShotLegendRoot>)>,
+    mut legend_q: Query<(&mut Visibility, &Children), (With<ShotLegendRoot>, Without<ShotDirRoot>)>,
+    mut legend_text_q: Query<&mut Text, With<ShotLegendText>>,
     mut arrow_q: Query<&mut Node>,
 ) {
     let Ok((mut vis, children)) = root_q.single_mut() else {
@@ -1045,6 +1154,18 @@ fn update_shot_direction(
     } else {
         Visibility::Hidden
     };
+    if let Ok((mut legend_vis, legend_children)) = legend_q.single_mut() {
+        *legend_vis = *vis;
+        if show {
+            let confirm = action_label(Action::Confirm, &bindings, input.gamepad_connected);
+            let loft = action_label(Action::Loft, &bindings, input.gamepad_connected);
+            if let Some(ent) = legend_children.first()
+                && let Ok(mut text) = legend_text_q.get_mut(*ent)
+            {
+                **text = format!("W/S FOOT  •  A/D AIM  •  {loft} LOFT  •  {confirm} SHOT");
+            }
+        }
+    }
     if !show {
         return;
     }
@@ -1055,6 +1176,41 @@ fn update_shot_direction(
         let x = input.move_vec.x.clamp(-1.0, 1.0);
         node.margin = UiRect::horizontal(px(x * 28.0));
     }
+}
+
+fn update_shot_preview(
+    phase: Res<Phase>,
+    am: Option<Res<ActiveMatch>>,
+    attempt: Res<ShotAttempt>,
+    input: Res<PlayerInput>,
+    mut root_q: Query<&mut Visibility, With<ShotPreviewRoot>>,
+    mut text_q: Query<&mut Text, With<ShotPreviewText>>,
+) {
+    let Ok(mut vis) = root_q.single_mut() else {
+        return;
+    };
+    let batting_live = matches!(phase.0, PhaseEnum::BallLive)
+        && am.as_deref().map(|m| m.user_batting()).unwrap_or(false);
+    let result_flash = matches!(phase.0, PhaseEnum::ResultPause { .. }) && attempt.pressed;
+    *vis = if batting_live || result_flash {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    if !batting_live && !result_flash {
+        return;
+    }
+    let Ok(mut text) = text_q.single_mut() else {
+        return;
+    };
+    **text = if batting_live {
+        let fw = footwork_from_move_y(input.move_vec.y);
+        let loft = input.held(Action::Loft);
+        let aim = input.move_vec.x.clamp(-1.0, 1.0);
+        select_shot(fw, aim, loft).label().to_uppercase()
+    } else {
+        attempt.kind.label().to_uppercase()
+    };
 }
 
 fn update_summary(

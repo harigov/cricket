@@ -32,11 +32,13 @@ pub struct FloodlightMaterials {
     pub night: Handle<StandardMaterial>,
 }
 
+use bevy::app::AnimationSystems;
 use bevy::image::{
     CompressedImageFormats, ImageAddressMode, ImageSampler, ImageSamplerDescriptor, ImageType,
 };
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureUsages;
+use bevy::transform::TransformSystems;
 use bevy::{asset::AssetPath, gltf::GltfAssetLabel};
 
 use crate::render::outfield_grass::append_rgba8_srgb_mip_chain;
@@ -137,9 +139,21 @@ impl Plugin for RenderPlugin {
                     player::apply_team_kit_materials,
                     crowd::apply_crowd_materials,
                     player::attach_animation_players,
-                    player::animate_figures,
                 ),
             )
-            .add_systems(PostUpdate, player::strip_skeleton_root_motion);
+            .add_systems(
+                PostUpdate,
+                (
+                    player::strip_skeleton_root_motion
+                        .after(AnimationSystems)
+                        .before(TransformSystems::Propagate),
+                    // Procedural poses must run after AnimationPlayer so stopped
+                    // clips do not overwrite batter/non-striker stance each frame.
+                    player::animate_figures
+                        .after(AnimationSystems)
+                        .after(player::strip_skeleton_root_motion)
+                        .before(TransformSystems::Propagate),
+                ),
+            );
     }
 }

@@ -20,7 +20,7 @@ enum PauseScreen {
     Settings,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 enum SettingsTab {
     #[default]
     Audio,
@@ -116,8 +116,10 @@ fn reset_pause_menu(mut menu: ResMut<PauseMenuState>) {
     *menu = PauseMenuState::default();
 }
 
-fn reset_pause_flag(mut paused: ResMut<MatchPaused>) {
-    paused.0 = false;
+fn reset_pause_flag(paused: Option<ResMut<MatchPaused>>) {
+    if let Some(mut paused) = paused {
+        paused.0 = false;
+    }
 }
 
 fn toggle_pause(
@@ -209,6 +211,26 @@ fn despawn_pause_ui(mut commands: Commands, roots: Query<Entity, With<PauseRoot>
     }
 }
 
+fn settings_tab_strip(active: SettingsTab) -> String {
+    const TABS: [SettingsTab; 3] = [
+        SettingsTab::Audio,
+        SettingsTab::Controls,
+        SettingsTab::Camera,
+    ];
+    let parts = TABS
+        .iter()
+        .map(|tab| {
+            let label = tab.label();
+            if *tab == active {
+                format!("[ {label} ]")
+            } else {
+                format!("  {label}  ")
+            }
+        })
+        .collect::<Vec<_>>();
+    format!("{}   (←/→ or Q/C switch tab)", parts.join(""))
+}
+
 fn pause_lines(
     menu: &PauseMenuState,
     bindings: &KeyBindings,
@@ -221,10 +243,11 @@ fn pause_lines(
         PauseScreen::Root => vec![
             "Resume".into(),
             "Settings".into(),
+            "Controls".into(),
             "Quit to Main Menu".into(),
         ],
         PauseScreen::Settings => {
-            let mut out = vec![format!("Tab: {}", menu.settings_tab.label())];
+            let mut out = vec![settings_tab_strip(menu.settings_tab)];
             match menu.settings_tab {
                 SettingsTab::Audio => {
                     out.push(format!(
@@ -251,6 +274,7 @@ fn pause_lines(
                     out.push(format!("Commentary Voice : {comm_label:16} (←/→ cycle)"));
                 }
                 SettingsTab::Controls => {
+                    out.push("SPACE  rebind selected     ←/→ or Q/C  switch tab".into());
                     for (action, label) in SETTINGS_ACTIONS {
                         let key_str = if rebind.0 == Some(*action) {
                             "Press any key...".to_string()
@@ -288,9 +312,9 @@ fn pause_lines(
 
 fn settings_item_count(tab: SettingsTab) -> usize {
     match tab {
-        SettingsTab::Audio => 6,
-        SettingsTab::Controls => SETTINGS_ACTIONS.len() + 2,
-        SettingsTab::Camera => 4,
+        SettingsTab::Audio => 7,
+        SettingsTab::Controls => SETTINGS_ACTIONS.len() + 4,
+        SettingsTab::Camera => 5,
     }
 }
 
@@ -389,6 +413,19 @@ fn navigate_list(input: &PlayerInput, sel: &mut usize, count: usize) {
     }
 }
 
+fn switch_settings_tab(menu: &mut PauseMenuState, dir: i32) {
+    menu.settings_tab = if dir > 0 {
+        menu.settings_tab.next()
+    } else {
+        menu.settings_tab.prev()
+    };
+    menu.sel = 0;
+}
+
+fn settings_tab_switch_row(menu: &PauseMenuState) -> bool {
+    menu.sel == 0 || (menu.settings_tab == SettingsTab::Controls && menu.sel == 1)
+}
+
 fn cycle_playable_camera(rig: &mut CameraRig, dir: i32) {
     let cur = PLAYABLE_CAMERAS
         .iter()
@@ -431,18 +468,29 @@ fn handle_settings_input(
     }
 
     if input.pressed(Action::CycleType) {
-        menu.settings_tab = menu.settings_tab.next();
-        menu.sel = 0;
+        switch_settings_tab(menu, 1);
     }
     if input.pressed(Action::CycleCam) {
-        menu.settings_tab = menu.settings_tab.prev();
-        menu.sel = 0;
+        switch_settings_tab(menu, -1);
+    }
+
+    if settings_tab_switch_row(menu) {
+        if input.pressed(Action::Right) {
+            switch_settings_tab(menu, 1);
+        } else if input.pressed(Action::Left) {
+            switch_settings_tab(menu, -1);
+        }
     }
 
     let count = settings_item_count(menu.settings_tab);
     navigate_list(input, &mut menu.sel, count);
+    if menu.sel >= count {
+        menu.sel = count.saturating_sub(1);
+    }
 
-    let delta = if input.pressed(Action::Right) {
+    let delta = if settings_tab_switch_row(menu) {
+        0.0
+    } else if input.pressed(Action::Right) {
         0.05
     } else if input.pressed(Action::Left) {
         -0.05
@@ -477,9 +525,15 @@ fn handle_settings_input(
             }
         }
         SettingsTab::Controls => {
-            if menu.sel < SETTINGS_ACTIONS.len() && input.pressed(Action::Confirm) {
-                rebind.0 = Some(SETTINGS_ACTIONS[menu.sel].0);
-            } else if menu.sel == SETTINGS_ACTIONS.len() && input.pressed(Action::Confirm) {
+            let action_base = 2;
+            if menu.sel >= action_base
+                && menu.sel < action_base + SETTINGS_ACTIONS.len()
+                && input.pressed(Action::Confirm)
+            {
+                rebind.0 = Some(SETTINGS_ACTIONS[menu.sel - action_base].0);
+            } else if menu.sel == action_base + SETTINGS_ACTIONS.len()
+                && input.pressed(Action::Confirm)
+            {
                 *bindings = KeyBindings::default();
                 bindings.save();
             }
@@ -517,6 +571,7 @@ fn handle_pause_input(
     mut audio: ResMut<AudioSettings>,
     mut ui_prefs: ResMut<UiPreferences>,
     mut rig: ResMut<CameraRig>,
+    mut menu_state: ResMut<crate::ui::menus::MenuState>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     if !paused.0 {
@@ -525,7 +580,7 @@ fn handle_pause_input(
 
     match menu.screen {
         PauseScreen::Root => {
-            navigate_list(&input, &mut menu.sel, 3);
+            navigate_list(&input, &mut menu.sel, 4);
             if input.pressed(Action::Confirm) {
                 match menu.sel {
                     0 => paused.0 = false,
@@ -534,8 +589,17 @@ fn handle_pause_input(
                         menu.sel = 0;
                         menu.settings_tab = SettingsTab::Audio;
                     }
+                    2 => {
+                        menu.screen = PauseScreen::Settings;
+                        menu.sel = 0;
+                        menu.settings_tab = SettingsTab::Controls;
+                    }
                     _ => {
                         paused.0 = false;
+                        // The wizard is left on whatever setup screen started
+                        // this match; "Quit to Main Menu" must actually land
+                        // on the main menu, not back in the toss.
+                        crate::ui::menus::back_to_main(&mut menu_state);
                         next_state.set(AppState::Menu);
                     }
                 }
@@ -553,5 +617,136 @@ fn handle_pause_input(
                 &mut rig,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exit_match;
+    use crate::game::{MatchSetup, WorldData, build_active_match};
+    use crate::gameplay_active;
+    use bevy::state::app::StatesPlugin;
+
+    fn sample_match_setup() -> (WorldData, MatchSetup) {
+        let wd = WorldData::new();
+        let setup = MatchSetup {
+            teams: [0, 1],
+            stadium: 0,
+            overs: 20,
+            user_bats_first: true,
+            from_tournament: false,
+        };
+        (wd, setup)
+    }
+
+    fn sample_pause_lines(tab: SettingsTab) -> Vec<String> {
+        let menu = PauseMenuState {
+            screen: PauseScreen::Settings,
+            sel: 0,
+            settings_tab: tab,
+        };
+        pause_lines(
+            &menu,
+            &KeyBindings::default(),
+            &AudioSettings::default(),
+            &RebindState::default(),
+            &UiPreferences::default(),
+            &CameraRig::default(),
+        )
+    }
+
+    #[test]
+    fn settings_item_count_matches_pause_lines_rows() {
+        for tab in [SettingsTab::Audio, SettingsTab::Controls, SettingsTab::Camera] {
+            let lines = sample_pause_lines(tab);
+            assert_eq!(lines.len(), settings_item_count(tab), "tab {tab:?}");
+        }
+    }
+
+    #[test]
+    fn settings_tab_strip_marks_active_tab() {
+        let strip = settings_tab_strip(SettingsTab::Controls);
+        assert!(strip.contains("[ Controls ]"));
+        assert!(!strip.contains("[ Audio ]"));
+    }
+
+    #[test]
+    fn settings_left_right_switch_tab_on_tab_strip_row() {
+        let mut menu = PauseMenuState {
+            screen: PauseScreen::Settings,
+            sel: 0,
+            settings_tab: SettingsTab::Audio,
+        };
+        let input = PlayerInput {
+            just_pressed: vec![Action::Right],
+            ..Default::default()
+        };
+        let mut bindings = KeyBindings::default();
+        let mut rebind = RebindState::default();
+        let mut audio = AudioSettings::default();
+        let mut ui_prefs = UiPreferences::default();
+        let mut rig = CameraRig::default();
+        let keys = ButtonInput::<KeyCode>::default();
+
+        handle_settings_input(
+            &mut menu,
+            &input,
+            &keys,
+            &mut bindings,
+            &mut rebind,
+            &mut audio,
+            &mut ui_prefs,
+            &mut rig,
+        );
+
+        assert_eq!(menu.settings_tab, SettingsTab::Controls);
+        assert_eq!(menu.sel, 0);
+    }
+
+    #[test]
+    fn gameplay_active_tolerates_missing_match_paused() {
+        fn noop_system() {}
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin));
+        app.init_state::<AppState>();
+
+        let (wd, setup) = sample_match_setup();
+        app.insert_resource(build_active_match(&setup, &wd));
+        app.add_systems(Update, noop_system.run_if(gameplay_active));
+
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InMatch);
+        app.update();
+    }
+
+    #[test]
+    fn exit_match_preserves_match_paused_resource() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin));
+        app.init_state::<AppState>();
+        app.init_resource::<MatchPaused>();
+        app.add_systems(OnExit(AppState::InMatch), exit_match);
+
+        let (wd, setup) = sample_match_setup();
+        app.insert_resource(build_active_match(&setup, &wd));
+        app.insert_resource(Phase(PhaseEnum::Idle));
+
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InMatch);
+        app.update();
+        assert!(app.world().contains_resource::<MatchPaused>());
+
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Menu);
+        app.update();
+
+        assert!(app.world().contains_resource::<MatchPaused>());
+        assert!(!app.world().contains_resource::<ActiveMatch>());
+        assert!(!app.world().get_resource::<MatchPaused>().unwrap().0);
     }
 }

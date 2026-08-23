@@ -205,6 +205,10 @@ pub struct ShotAttempt {
     pub offset: Option<f32>,
     pub loft: bool,
     pub dir_x: f32,
+    /// Footwork committed to before contact.
+    pub footwork: crate::core::Footwork,
+    /// The stroke the batter selected, classified from footwork + aim + loft.
+    pub kind: crate::core::ShotKind,
     /// Set when an AI batter decides to swing.
     pub ai_scheduled: bool,
 }

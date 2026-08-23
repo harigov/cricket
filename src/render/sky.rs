@@ -70,10 +70,10 @@ pub fn sample_sky_color(u: f32, v: f32, night: bool) -> [f32; 3] {
 }
 
 fn sample_day_sky(u: f32, v: f32) -> [f32; 3] {
-    let t = v.clamp(0.0, 1.0).powf(1.18);
+    let t = v.clamp(0.0, 1.0).powf(1.12);
     // Horizon haze warms toward pale gold; zenith deep saturated blue.
-    let horizon = [0.72_f32, 0.82, 0.94];
-    let zenith = [0.18, 0.38, 0.78];
+    let horizon = [0.78_f32, 0.86, 0.96];
+    let zenith = [0.22, 0.46, 0.86];
     let mut rgb = [
         horizon[0] + (zenith[0] - horizon[0]) * t,
         horizon[1] + (zenith[1] - horizon[1]) * t,
@@ -84,16 +84,16 @@ fn sample_day_sky(u: f32, v: f32) -> [f32; 3] {
     let cloud_mask = (1.0 - (v - 0.42).abs() * 2.2).clamp(0.0, 1.0);
     let n1 = sky_fbm(u + 0.17, v * 0.9 + 0.04, 11);
     let n2 = sky_fbm(u * 1.3 + 0.5, v * 1.1, 29) * 0.45;
-    let clouds = ((n1 + n2) * 0.5).powf(1.6) * cloud_mask * 0.22;
-    rgb[0] += clouds * 0.35;
-    rgb[1] += clouds * 0.28;
-    rgb[2] += clouds * 0.18;
+    let clouds = ((n1 + n2) * 0.5).powf(1.6) * cloud_mask * 0.20;
+    rgb[0] += clouds * 0.32;
+    rgb[1] += clouds * 0.26;
+    rgb[2] += clouds * 0.14;
 
     // Subtle horizontal haze variation (not stripes).
-    let haze = sky_value_noise(u, v * 0.35 + 0.1, 1.8, 53) * 0.04;
+    let haze = sky_value_noise(u, v * 0.35 + 0.1, 1.8, 53) * 0.028;
     rgb[0] += haze;
     rgb[1] += haze * 0.9;
-    rgb[2] += haze * 0.7;
+    rgb[2] += haze * 0.65;
 
     rgb.map(|c| c.clamp(0.0, 1.0))
 }

@@ -82,6 +82,7 @@ pub enum Screen {
     SetupOpp,
     SetupOvers,
     SetupStadium,
+    SetupTossCall,
     SetupTossFlip,
     SetupTossResult,
     SetupTossChoice,
@@ -106,6 +107,8 @@ pub struct MenuState {
     pub toss_elects_bat: bool,
     /// Coin flip outcome (heads = true); fixed when the toss begins.
     pub coin_heads: bool,
+    /// true when the player called heads at the toss.
+    pub toss_call_heads: bool,
     /// Settings screen active tab.
     pub settings_tab: SettingsTab,
     /// true when the current setup wizard leads into a tournament.
@@ -255,6 +258,7 @@ impl Default for MenuState {
             toss_winner: 0,
             toss_elects_bat: true,
             coin_heads: true,
+            toss_call_heads: true,
             settings_tab: SettingsTab::Audio,
             tournament_mode: false,
         }
@@ -515,7 +519,10 @@ fn screen_title(ms: &MenuState) -> &'static str {
         Screen::SetupOpp => "SELECT OPPONENT",
         Screen::SetupOvers => "MATCH LENGTH",
         Screen::SetupStadium => "SELECT STADIUM",
-        Screen::SetupTossFlip | Screen::SetupTossResult | Screen::SetupTossChoice => "TOSS",
+        Screen::SetupTossCall
+        | Screen::SetupTossFlip
+        | Screen::SetupTossResult
+        | Screen::SetupTossChoice => "TOSS",
         Screen::SetupTossSummary => "MATCH PREVIEW",
         Screen::Settings => "SETTINGS",
         Screen::Bracket => "TOURNAMENT BRACKET",
@@ -529,7 +536,8 @@ fn screen_kicker(ms: &MenuState) -> &'static str {
         Screen::SetupOpp => "MATCH SETUP  /  02",
         Screen::SetupOvers => "MATCH SETUP  /  03",
         Screen::SetupStadium => "MATCH SETUP  /  04",
-        Screen::SetupTossFlip
+        Screen::SetupTossCall
+        | Screen::SetupTossFlip
         | Screen::SetupTossResult
         | Screen::SetupTossChoice
         | Screen::SetupTossSummary => "MATCH SETUP  /  05",
@@ -566,7 +574,8 @@ fn screen_items(
             .map(|s| format!("{} — {} [{}]", s.name, s.city, s.pitch.label()))
             .chain(std::iter::once("Random venue".into()))
             .collect(),
-        Screen::SetupTossFlip
+        Screen::SetupTossCall
+        | Screen::SetupTossFlip
         | Screen::SetupTossResult
         | Screen::SetupTossChoice
         | Screen::SetupTossSummary => Vec::new(),
@@ -1030,7 +1039,8 @@ fn spawn_menu_item_rows(
         }
         if matches!(
             ms.screen,
-            Screen::SetupTossFlip
+            Screen::SetupTossCall
+                | Screen::SetupTossFlip
                 | Screen::SetupTossResult
                 | Screen::SetupTossChoice
                 | Screen::SetupTossSummary
@@ -1193,6 +1203,7 @@ fn screen_footer_hint(ms: &MenuState) -> &'static str {
         }
         Screen::SetupOvers => "←→ / A D  NAVIGATE     SPACE  SELECT     ESC  BACK",
         Screen::SetupStadium => "↑↓ / W S  NAVIGATE     SPACE  SELECT     ESC  BACK",
+        Screen::SetupTossCall => "←→ / A D  CHOOSE     SPACE  CALL     ESC  BACK",
         Screen::SetupTossFlip | Screen::SetupTossResult => "ESC  BACK",
         Screen::SetupTossChoice => "←→ / A D  CHOOSE     SPACE  CONFIRM     ESC  BACK",
         Screen::SetupTossSummary => "SPACE  CONTINUE     ESC  BACK",
@@ -1281,7 +1292,8 @@ fn refresh_menu(
             },
             justify_content: if matches!(
                 ms.screen,
-                Screen::SetupTossFlip
+                Screen::SetupTossCall
+                    | Screen::SetupTossFlip
                     | Screen::SetupTossResult
                     | Screen::SetupTossChoice
                     | Screen::SetupTossSummary
@@ -1315,6 +1327,7 @@ fn refresh_menu(
                         | Screen::SetupOpp
                         | Screen::SetupStadium
                         | Screen::SetupOvers
+                        | Screen::SetupTossCall
                         | Screen::SetupTossFlip
                         | Screen::SetupTossResult
                         | Screen::SetupTossChoice
@@ -1948,6 +1961,42 @@ fn spawn_setup_visuals(
                     );
                 });
         }
+        Screen::SetupTossCall => {
+            let user = &wd.teams[ms.team];
+            let opp = &wd.teams[ms.opp];
+            spawn_toss_panel(parent, scale, |call| {
+                spawn_toss_crest_row(call, assets, fonts, user, opp, scale);
+                call.spawn((
+                    Text::new(format!("{} TO CALL", user.name.to_uppercase())),
+                    TextFont {
+                        font: fonts.bold.clone(),
+                        font_size: 15.0 * scale,
+                        ..default()
+                    },
+                    TextColor(theme::palette::text_muted()),
+                ));
+                call
+                    .spawn((Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: theme::spx(16.0, scale),
+                        ..default()
+                    },))
+                    .with_children(|row| {
+                        for (i, label) in ["HEADS", "TAILS"].iter().enumerate() {
+                            spawn_setup_card(
+                                row,
+                                fonts,
+                                SetupCardStyle::Overs { scale },
+                                label,
+                                None,
+                                None,
+                                None,
+                                i == ms.sel,
+                            );
+                        }
+                    });
+            });
+        }
         Screen::SetupTossFlip => {
             let user = &wd.teams[ms.team];
             let opp = &wd.teams[ms.opp];
@@ -1978,6 +2027,7 @@ fn spawn_setup_visuals(
             let user = &wd.teams[ms.team];
             let opp = &wd.teams[ms.opp];
             let winner = &wd.teams[ms.toss_winner];
+            let coin_face = if ms.coin_heads { "HEADS" } else { "TAILS" };
             spawn_toss_panel(parent, scale, |toss| {
                 spawn_toss_crest_row(toss, assets, fonts, user, opp, scale);
                 toss
@@ -1991,7 +2041,10 @@ fn spawn_setup_visuals(
                         spawn_toss_coin(coin_block, fonts, scale, ms.coin_heads);
                     });
                 toss.spawn((
-                    Text::new(format!("{} WINS THE TOSS", winner.name.to_uppercase())),
+                    Text::new(format!(
+                        "IT'S {coin_face} — {} WINS THE TOSS",
+                        winner.name.to_uppercase()
+                    )),
                     TextFont {
                         font: fonts.display.clone(),
                         font_size: 24.0 * scale,
@@ -2331,12 +2384,39 @@ fn stadium_menu_sel(stadium_idx: usize, stadium_count: usize) -> usize {
 }
 
 fn begin_toss(ms: &mut MenuState) {
-    let user_wins = rand::random::<bool>();
-    ms.toss_winner = if user_wins { ms.team } else { ms.opp };
-    ms.coin_heads = rand::random::<bool>();
+    ms.toss_call_heads = true;
     ms.toss_elects_bat = false;
-    ms.screen = Screen::SetupTossFlip;
+    ms.screen = Screen::SetupTossCall;
     ms.sel = 0;
+}
+
+/// The calling side wins the toss when the coin lands on the face they called.
+pub fn toss_winner_from_call(
+    user_team: usize,
+    opp_team: usize,
+    call_heads: bool,
+    coin_heads: bool,
+) -> usize {
+    if call_heads == coin_heads {
+        user_team
+    } else {
+        opp_team
+    }
+}
+
+fn handle_setup_toss_call_input(ms: &mut MenuState, input: &PlayerInput, wd: &WorldData) {
+    navigate_horizontal_row(input, &mut ms.sel, 2);
+    if input.pressed(Action::Confirm) {
+        ms.toss_call_heads = ms.sel == 0;
+        ms.coin_heads = rand::random::<bool>();
+        ms.toss_winner =
+            toss_winner_from_call(ms.team, ms.opp, ms.toss_call_heads, ms.coin_heads);
+        ms.screen = Screen::SetupTossFlip;
+    }
+    if input.pressed(Action::Cancel) {
+        ms.screen = Screen::SetupStadium;
+        ms.sel = stadium_menu_sel(ms.stadium_idx, wd.stadiums.len());
+    }
 }
 
 fn handle_setup_toss_choice_input(ms: &mut MenuState, input: &PlayerInput, wd: &WorldData) {
@@ -2447,6 +2527,7 @@ fn handle_menu_input(
         Screen::SetupOpp => handle_setup_opp_input(&mut ms, &input, &wd),
         Screen::SetupOvers => handle_setup_overs_input(&mut ms, &input, &wd),
         Screen::SetupStadium => handle_setup_stadium_input(&mut ms, &input, &wd),
+        Screen::SetupTossCall => handle_setup_toss_call_input(&mut ms, &input, &wd),
         Screen::SetupTossFlip | Screen::SetupTossResult => {
             handle_setup_toss_back(&mut ms, &input, &wd);
         }
@@ -2543,14 +2624,16 @@ fn screen_item_count(ms: &MenuState, wd: &WorldData) -> usize {
         Screen::SetupTeam | Screen::SetupOpp => wd.teams.len(),
         Screen::SetupOvers => OVERS_CHOICES.len(),
         Screen::SetupStadium => wd.stadiums.len() + 1,
-        Screen::SetupTossChoice => 2,
+        Screen::SetupTossCall | Screen::SetupTossChoice => 2,
         Screen::SetupTossFlip | Screen::SetupTossResult | Screen::SetupTossSummary => 0,
         Screen::Settings => settings_item_count(ms.settings_tab),
         Screen::Bracket => 0,
     }
 }
 
-fn back_to_main(ms: &mut MenuState) {
+/// Return the wizard to the main menu. Also used by the in-match pause
+/// overlay, which leaves the setup screens behind when the player quits.
+pub fn back_to_main(ms: &mut MenuState) {
     ms.screen = Screen::Main;
     ms.sel = 0;
 }
@@ -2735,6 +2818,18 @@ mod tests {
         let indices = team_picker_indices(Screen::SetupOpp, 3, 10);
         let sel = 4;
         assert_eq!(indices[sel], 5);
+    }
+
+    #[test]
+    fn toss_call_matching_coin_gives_user_win() {
+        assert_eq!(toss_winner_from_call(1, 4, true, true), 1);
+        assert_eq!(toss_winner_from_call(1, 4, false, false), 1);
+    }
+
+    #[test]
+    fn toss_call_mismatch_gives_opp_win() {
+        assert_eq!(toss_winner_from_call(1, 4, true, false), 4);
+        assert_eq!(toss_winner_from_call(1, 4, false, true), 4);
     }
 
     #[test]

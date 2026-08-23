@@ -7,7 +7,7 @@ use crate::render::crowd::{
     self, CROWD_VARIANTS, outfit_for, posture_y_offset, spectator_seed, variant_index_for_seat,
     yaw_jitter_for_seat,
 };
-use crate::render::outfield_grass::{self, MOW_BAND_COUNT};
+use crate::render::outfield_grass::{self, MOW_BAND_COUNT, append_rgba8_srgb_mip_chain};
 use crate::render::ring_geometry::{
     floodlight_angles, floodlight_radius, ring_band_specs, ring_boxes_mesh,
     ring_face_center_rotation, ring_position, ring_segment_transform, ring_tangent,
@@ -1011,16 +1011,20 @@ pub fn build_stadium(
         meshes.add(Plane3d::default().mesh().size(geo::CREASE_DEPTH * 2.0, 0.06));
 
     let pitch_img = images.add(create_pitch_image());
+    // Convention: `base_color` is white; the procedural texture carries the full wicket
+    // albedo so we do not double-stack a tan tint on top of an already-bright map.
     let pitch_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb_u8(0xC8, 0xA9, 0x7A),
+        base_color: Color::WHITE,
         base_color_texture: Some(pitch_img.clone()),
-        perceptual_roughness: 0.92,
+        perceptual_roughness: 0.96,
+        reflectance: 0.22,
         ..Default::default()
     });
     let pitch_worn_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb_u8(0xB8, 0x9A, 0x6E),
+        base_color: Color::WHITE,
         base_color_texture: Some(pitch_img),
-        perceptual_roughness: 0.96,
+        perceptual_roughness: 0.98,
+        reflectance: 0.18,
         ..Default::default()
     });
 
@@ -1036,7 +1040,7 @@ pub fn build_stadium(
                 base_color_texture: Some(shared.grass_tex.clone()),
                 perceptual_roughness: 0.88,
                 metallic: 0.0,
-                reflectance: 0.42,
+                reflectance: 0.36,
                 uv_transform: outfield_grass::strip_uv_transform(span, band_width, x_min),
                 ..default()
             })
@@ -1153,25 +1157,35 @@ fn texture_mat(texture: Handle<Image>) -> StandardMaterial {
     }
 }
 
+/// Pitch albedo width in texels (maps once along `PITCH_LENGTH + 2` metres).
+pub const PITCH_TEX_LENGTH_PX: u32 = 1024;
+/// Pitch albedo height in texels (maps once along `PITCH_WIDTH` metres).
+pub const PITCH_TEX_WIDTH_PX: u32 = 144;
+
 fn create_pitch_image() -> Image {
     use bevy::asset::RenderAssetUsages;
     use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
-    let size = 128u32;
-    let mut data = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let n = ((x as f32 * 0.09).sin() * (y as f32 * 0.08).cos() * 0.5 + 0.5).clamp(0.0, 1.0);
-            let r = 0.71 + n * 0.08;
-            let g = 0.58 + n * 0.06;
-            let b = 0.38 + n * 0.04;
-            data.extend_from_slice(&[(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]);
+
+    let mut data =
+        Vec::with_capacity((PITCH_TEX_LENGTH_PX * PITCH_TEX_WIDTH_PX * 4) as usize);
+    for y in 0..PITCH_TEX_WIDTH_PX {
+        for x in 0..PITCH_TEX_LENGTH_PX {
+            let u = (x as f32 + 0.5) / PITCH_TEX_LENGTH_PX as f32;
+            let v = (y as f32 + 0.5) / PITCH_TEX_WIDTH_PX as f32;
+            let rgb = pitch_albedo_at(u, v);
+            data.extend_from_slice(&[
+                (rgb[0] * 255.0).round() as u8,
+                (rgb[1] * 255.0).round() as u8,
+                (rgb[2] * 255.0).round() as u8,
+                255,
+            ]);
         }
     }
     let mut img = Image::new(
         Extent3d {
-            width: size,
-            height: size,
+            width: PITCH_TEX_LENGTH_PX,
+            height: PITCH_TEX_WIDTH_PX,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
@@ -1180,16 +1194,154 @@ fn create_pitch_image() -> Image {
         RenderAssetUsages::RENDER_WORLD,
     );
     img.texture_descriptor.usage =
-        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::RENDER_ATTACHMENT;
-    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::Repeat,
-        address_mode_v: ImageAddressMode::Repeat,
-        mag_filter: ImageFilterMode::Linear,
-        min_filter: ImageFilterMode::Linear,
-        mipmap_filter: ImageFilterMode::Linear,
-        ..Default::default()
-    });
+        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::COPY_SRC;
+    let mut sampler = ImageSamplerDescriptor::linear();
+    sampler.address_mode_u = ImageAddressMode::ClampToEdge;
+    sampler.address_mode_v = ImageAddressMode::ClampToEdge;
+    sampler.mag_filter = ImageFilterMode::Linear;
+    sampler.min_filter = ImageFilterMode::Linear;
+    sampler.mipmap_filter = ImageFilterMode::Linear;
+    sampler.set_anisotropic_filter(8);
+    img.sampler = ImageSampler::Descriptor(sampler);
+    append_rgba8_srgb_mip_chain(&mut img);
     img
+}
+
+/// Deterministic hash in `[0, 1)` for pitch procedural detail.
+fn pitch_hash(x: u32, y: u32, seed: u32) -> f32 {
+    let mut n = x
+        .wrapping_mul(374_761_393)
+        .wrapping_add(y.wrapping_mul(668_265_263))
+        .wrapping_add(seed.wrapping_mul(982_451_653));
+    n = (n ^ (n >> 13)).wrapping_mul(1_274_126_177);
+    (n & 0x00FF_FFFF) as f32 / 16_777_215.0
+}
+
+fn pitch_value_noise(u: f32, v: f32, scale: f32, seed: u32) -> f32 {
+    let x = u * scale;
+    let y = v * scale;
+    let ix = x.floor() as i32;
+    let iy = y.floor() as i32;
+    let fx = x - x.floor();
+    let fy = y - y.floor();
+    let smooth = |t: f32| t * t * (3.0 - 2.0 * t);
+    let sfx = smooth(fx);
+    let sfy = smooth(fy);
+    let sample = |xi: i32, yi: i32| pitch_hash(xi as u32, yi as u32, seed);
+    let a = sample(ix, iy);
+    let b = sample(ix + 1, iy);
+    let c = sample(ix, iy + 1);
+    let d = sample(ix + 1, iy + 1);
+    let ab = a + (b - a) * sfx;
+    let cd = c + (d - c) * sfx;
+    ab + (cd - ab) * sfy
+}
+
+fn pitch_fbm(u: f32, v: f32, seed: u32) -> f32 {
+    let mut sum = 0.0;
+    let mut amp = 0.55;
+    let mut freq = 5.5;
+    for octave in 0..3 {
+        sum += pitch_value_noise(u, v, freq, seed.wrapping_add(octave * 41)) * amp;
+        amp *= 0.5;
+        freq *= 2.1;
+    }
+    sum
+}
+
+/// Normalised pitch length coordinate (`0` = bowler end, `1` = striker end).
+fn pitch_length_u(world_x: f32) -> f32 {
+    let span = geo::PITCH_LENGTH + 2.0;
+    ((world_x + span / 2.0) / span).clamp(0.0, 1.0)
+}
+
+/// Darkening from footmarks and crease wear at normalised UV `(u, v)`.
+fn pitch_wear_mask(u: f32, v: f32) -> f32 {
+    let span = geo::PITCH_LENGTH + 2.0;
+    let crease_x = geo::PITCH_HALF_LEN - geo::CREASE_DEPTH;
+    let crease_u = pitch_length_u(crease_x);
+    let bowler_crease_u = pitch_length_u(-crease_x);
+    let bowler_land_u = pitch_length_u(-geo::PITCH_HALF_LEN + 1.8);
+
+    let mut wear = 0.0_f32;
+    for anchor in [crease_u, bowler_crease_u, bowler_land_u] {
+        let along = ((u - anchor).abs() / 0.045).min(1.0);
+        let across = (v - 0.5).abs() / (geo::PITCH_WIDTH / span * 0.55);
+        let patch = (1.0 - along).max(0.0) * (1.0 - across.min(1.0));
+        wear = wear.max(patch * 0.55);
+    }
+    // Central worn roller lane.
+    let centre = (1.0 - ((v - 0.5).abs() / 0.16).min(1.0)) * 0.12;
+    wear + centre
+}
+
+/// Pitch mesh extent in metres (matches the `Plane3d` size in `build_stadium`).
+const PITCH_LENGTH_M: f32 = geo::PITCH_LENGTH + 2.0;
+const PITCH_WIDTH_M: f32 = geo::PITCH_WIDTH;
+
+/// Full sine cycles across normalised `u` for a feature spacing in metres along pitch length.
+#[inline]
+fn pitch_u_cycles(spacing_m: f32) -> f32 {
+    PITCH_LENGTH_M / spacing_m
+}
+
+/// Full sine cycles across normalised `v` for a feature spacing in metres across pitch width.
+#[inline]
+fn pitch_v_cycles(spacing_m: f32) -> f32 {
+    PITCH_WIDTH_M / spacing_m
+}
+
+/// Procedural pitch albedo at normalised UV `(u, v)` — length along `u`, width along `v`.
+///
+/// Frequencies are derived from real feature sizes on the ~22 m × 3 m wicket so every
+/// band spans several texels at [`PITCH_TEX_LENGTH_PX`]×[`PITCH_TEX_WIDTH_PX`].
+pub fn pitch_albedo_at(u: f32, v: f32) -> [f32; 3] {
+    let u = u.clamp(0.0, 1.0);
+    let v = v.clamp(0.0, 1.0);
+
+    // ~10 cm roller compaction bands along the pitch (≈5 texels/cycle at 1024 px).
+    let roller = (u * pitch_u_cycles(0.10) * TAU).sin() * 0.5 + 0.5;
+    // Cross-pitch straw streaks from linear rolling (~30 cm).
+    let streak = pitch_value_noise(
+        u * pitch_u_cycles(0.55),
+        v * pitch_v_cycles(0.30),
+        3.0,
+        71,
+    ) * 0.5
+        + 0.5;
+    // Decimetre-scale soil mottling.
+    let mottle = pitch_fbm(
+        u * pitch_u_cycles(0.38),
+        v * pitch_v_cycles(0.50),
+        29,
+    ) * 0.5
+        + 0.5;
+    // Fine grit (~9 cm) — visible but safely below Nyquist at this resolution.
+    let fine = pitch_value_noise(
+        u * pitch_u_cycles(0.09),
+        v * pitch_v_cycles(0.11),
+        4.0,
+        17,
+    ) * 0.5
+        + 0.5;
+    let scuff = pitch_fbm(
+        u * pitch_u_cycles(0.14),
+        v * pitch_v_cycles(0.18),
+        53,
+    ) * 0.5
+        + 0.5;
+
+    // Warm tan/khaki prepared wicket — clearly darker than white crease paint.
+    let mut r = 0.46 + roller * 0.10 + fine * 0.06 + mottle * 0.07 + streak * 0.045;
+    let mut g = 0.36 + roller * 0.085 + fine * 0.055 + mottle * 0.06 + streak * 0.038;
+    let mut b = 0.24 + roller * 0.05 + fine * 0.04 + mottle * 0.045 + streak * 0.028;
+
+    let wear = pitch_wear_mask(u, v);
+    r -= wear * 0.22 + scuff * 0.11;
+    g -= wear * 0.19 + scuff * 0.10;
+    b -= wear * 0.16 + scuff * 0.09;
+
+    [r.clamp(0.22, 0.62), g.clamp(0.18, 0.54), b.clamp(0.12, 0.40)]
 }
 
 fn sponsor_board_image(style: u32) -> Image {
@@ -1497,5 +1649,82 @@ mod tests {
         // Mown outfield must stay inside the apron (no regression to floating bowl).
         let outfield_half = (65.0 + 6.0) * 2.05 / 2.0;
         assert!(radius > outfield_half);
+    }
+
+    #[test]
+    fn pitch_albedo_has_lengthwise_variation() {
+        let mid = pitch_albedo_at(0.5, 0.5);
+        let shifted = pitch_albedo_at(0.52, 0.5);
+        assert_ne!(mid, shifted);
+    }
+
+    #[test]
+    fn pitch_crease_zones_are_darker_than_centre() {
+        let span = geo::PITCH_LENGTH + 2.0;
+        let crease_x = geo::PITCH_HALF_LEN - geo::CREASE_DEPTH;
+        let crease_u = (crease_x + span / 2.0) / span;
+        let centre = pitch_albedo_at(0.5, 0.5);
+        let crease = pitch_albedo_at(crease_u, 0.5);
+        let centre_luma = centre[0] * 0.299 + centre[1] * 0.587 + centre[2] * 0.114;
+        let crease_luma = crease[0] * 0.299 + crease[1] * 0.587 + crease[2] * 0.114;
+        assert!(crease_luma < centre_luma - 0.02);
+    }
+
+    #[test]
+    fn pitch_texture_is_deterministic() {
+        let a = pitch_albedo_at(0.33, 0.67);
+        let b = pitch_albedo_at(0.33, 0.67);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn pitch_texture_has_mip_chain_and_aspect() {
+        let image = create_pitch_image();
+        assert_eq!(image.texture_descriptor.size.width, PITCH_TEX_LENGTH_PX);
+        assert_eq!(image.texture_descriptor.size.height, PITCH_TEX_WIDTH_PX);
+        assert!(
+            image.texture_descriptor.mip_level_count > 1,
+            "pitch albedo needs mips for grazing-angle views"
+        );
+        let data = image.data.as_ref().expect("pitch image must have CPU data");
+        assert_eq!(
+            data.len(),
+            outfield_grass::expected_rgba8_mip_data_len(PITCH_TEX_LENGTH_PX, PITCH_TEX_WIDTH_PX)
+        );
+        let aspect = PITCH_TEX_LENGTH_PX as f32 / PITCH_TEX_WIDTH_PX as f32;
+        let world_aspect = PITCH_LENGTH_M / PITCH_WIDTH_M;
+        assert!(
+            (aspect - world_aspect).abs() < 0.35,
+            "texture aspect {aspect:.2} should track wicket aspect {world_aspect:.2}"
+        );
+    }
+
+    #[test]
+    fn pitch_mean_albedo_is_darker_than_crease_white() {
+        let mut sum = [0.0f32; 3];
+        let steps = 32usize;
+        let mut count = 0.0f32;
+        for yi in 0..steps {
+            for xi in 0..steps {
+                let u = (xi as f32 + 0.5) / steps as f32;
+                let v = (yi as f32 + 0.5) / steps as f32;
+                let rgb = pitch_albedo_at(u, v);
+                sum[0] += rgb[0];
+                sum[1] += rgb[1];
+                sum[2] += rgb[2];
+                count += 1.0;
+            }
+        }
+        let mean = [sum[0] / count, sum[1] / count, sum[2] / count];
+        let pitch_luma = mean[0] * 0.299 + mean[1] * 0.587 + mean[2] * 0.114;
+        let crease_luma = 1.0;
+        assert!(
+            pitch_luma < crease_luma - 0.40,
+            "pitch mean {mean:?} luma {pitch_luma:.3} must sit well below crease white"
+        );
+        assert!(
+            mean[0] < 0.58 && mean[1] < 0.48,
+            "pitch mean {mean:?} should read as tan, not cream"
+        );
     }
 }

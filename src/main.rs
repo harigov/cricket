@@ -28,12 +28,14 @@ fn in_live_match() -> impl bevy::ecs::schedule::SystemCondition<()> + Clone {
 }
 
 /// Ball physics, AI and timers freeze while the pause overlay is open.
-fn gameplay_active(
+pub(crate) fn gameplay_active(
     state: Res<State<AppState>>,
     am: Option<Res<ActiveMatch>>,
-    paused: Res<MatchPaused>,
+    paused: Option<Res<MatchPaused>>,
 ) -> bool {
-    *state.get() == AppState::InMatch && am.is_some() && !paused.0
+    *state.get() == AppState::InMatch
+        && am.is_some()
+        && !paused.map(|p| p.0).unwrap_or(false)
 }
 
 fn register_core_plugins(app: &mut App) {
@@ -182,22 +184,23 @@ enum AutotestMode {
 }
 
 struct AutotestScript {
-    presses: [(f32, input::Action); 12],
+    presses: [(f32, input::Action); 13],
     milestones: &'static [f32],
     end_time: f32,
     switches_to_night: bool,
     swings: bool,
 }
 
-// The toss adds a flip, a result slide, a bat/bowl choice and a summary
+// The toss adds a call, a flip, a result slide, a bat/bowl choice and a summary
 // between the venue pick and the first ball; the flip and result slides
-// auto-advance, the other two wait for Confirm.
-const QUICK_MATCH_PRESSES: [(f32, input::Action); 12] = [
+// auto-advance, the other three wait for Confirm.
+const QUICK_MATCH_PRESSES: [(f32, input::Action); 13] = [
     (2.0, input::Action::Confirm),  // Quick Match -> team select
     (3.5, input::Action::Confirm),  // pick your team
     (5.0, input::Action::Confirm),  // pick opponent
     (6.5, input::Action::Confirm),  // overs
     (8.0, input::Action::Confirm),  // stadium (random)
+    (8.5, input::Action::Confirm),  // toss: call heads/tails
     // The toss slides auto-advance on Time<Virtual>, whose delta Bevy clamps
     // to 0.25 s. An unfocused window updates about once a second, so the 3.5 s
     // of slides can take ~14 s of wall clock here. Spread the remaining
@@ -246,6 +249,7 @@ impl AutotestMode {
                     (22.0, input::Action::Confirm),
                     (24.0, input::Action::Confirm),
                     (26.0, input::Action::Confirm),
+                    (28.0, input::Action::Confirm),
                 ],
                 milestones: &[1.5, 5.0, 7.0, 14.0],
                 end_time: 20.0,
@@ -266,6 +270,7 @@ impl AutotestMode {
                     (100.5, input::Action::Confirm),
                     (101.0, input::Action::Confirm),
                     (101.5, input::Action::Confirm),
+                    (102.0, input::Action::Confirm),
                 ],
                 milestones: &[1.5, 5.0, 6.8, 8.5],
                 end_time: 10.0,
@@ -309,6 +314,7 @@ impl AutotestMode {
                     (100.0, input::Action::Confirm),
                     (100.5, input::Action::Confirm),
                     (101.0, input::Action::Confirm),
+                    (101.5, input::Action::Confirm),
                 ],
                 milestones: &[3.4, 4.8, 5.8, 7.4],
                 end_time: 9.0,
@@ -323,7 +329,8 @@ impl AutotestMode {
                     (3.0, input::Action::Confirm), // team -> opponent
                     (4.0, input::Action::Confirm), // opponent -> overs
                     (5.0, input::Action::Confirm), // overs -> stadium
-                    (8.0, input::Action::Confirm), // stadium -> toss flip
+                    (8.0, input::Action::Confirm), // stadium -> toss call
+                    (8.5, input::Action::Confirm), // toss call -> flip
                     (14.0, input::Action::Confirm), // toss choice
                     (99.0, input::Action::Confirm),
                     (99.5, input::Action::Confirm),
@@ -332,7 +339,7 @@ impl AutotestMode {
                     (101.0, input::Action::Confirm),
                     (101.5, input::Action::Confirm),
                 ],
-                milestones: &[6.5, 9.5, 11.5, 13.0, 15.5],
+                milestones: &[6.5, 8.5, 10.0, 12.0, 15.5],
                 end_time: 17.0,
                 switches_to_night: false,
                 swings: false,
@@ -344,6 +351,7 @@ impl AutotestMode {
                     (5.0, input::Action::Confirm),
                     (6.5, input::Action::Confirm),
                     (8.0, input::Action::Confirm),
+                    (8.5, input::Action::Confirm),  // toss: call heads/tails
                     (22.0, input::Action::Confirm), // toss: elect to bat
                     (25.0, input::Action::Confirm), // toss summary -> match
                     (28.0, input::Action::Confirm), // spare
@@ -437,9 +445,9 @@ pub enum StadiumTime {
 struct SkySphere;
 
 /// Day exposure (ev100). Lower = brighter outfield; keep headroom for sky.
-const DAY_EV100: f32 = 10.2;
+const DAY_EV100: f32 = 9.6;
 /// Night exposure — ~0.6 stop brighter than prior pass for TV floodlit readability.
-const NIGHT_EV100: f32 = 8.8;
+const NIGHT_EV100: f32 = 8.5;
 
 /// Aerial broadcast distances (~150–230 m); fog must not fully occlude the far oval.
 /// Scaled with the multi-tier bowl, whose far stands now sit ~330 m from the
@@ -469,20 +477,20 @@ fn lighting_preset(time: StadiumTime) -> LightingPreset {
     match time {
         StadiumTime::Day => LightingPreset {
             ev100: DAY_EV100,
-            fog_color: Color::srgba(0.55, 0.70, 0.88, 1.0),
+            fog_color: Color::srgba(0.58, 0.72, 0.86, 1.0),
             fog_start: DAY_FOG_START,
             fog_end: DAY_FOG_END,
-            ambient_color: Color::srgb(0.72, 0.78, 0.92),
-            ambient_brightness: 520.0,
-            clear_color: Color::srgb(0.50, 0.68, 0.90),
+            ambient_color: Color::srgb(0.80, 0.84, 0.74),
+            ambient_brightness: 500.0,
+            clear_color: Color::srgb(0.54, 0.70, 0.90),
         },
         StadiumTime::Night => LightingPreset {
             ev100: NIGHT_EV100,
             fog_color: Color::srgba(0.04, 0.06, 0.12, 1.0),
             fog_start: NIGHT_FOG_START,
             fog_end: NIGHT_FOG_END,
-            ambient_color: Color::srgb(0.36, 0.40, 0.54),
-            ambient_brightness: 410.0,
+            ambient_color: Color::srgb(0.38, 0.42, 0.52),
+            ambient_brightness: 425.0,
             clear_color: Color::srgb(0.02, 0.03, 0.08),
         },
     }
@@ -535,9 +543,9 @@ fn setup_basics(
     commands.spawn((
         DayEnvironmentLight,
         DirectionalLight {
-            illuminance: 54_000.0,
+            illuminance: 58_000.0,
             shadows_enabled: true,
-            color: Color::srgb(1.0, 0.94, 0.82),
+            color: Color::srgb(1.0, 0.96, 0.86),
             ..default()
         },
         Transform::from_translation(Vec3::new(-52.0, 82.0, 22.0)).looking_at(Vec3::ZERO, Vec3::Y),
@@ -546,9 +554,9 @@ fn setup_basics(
     commands.spawn((
         DayEnvironmentLight,
         DirectionalLight {
-            illuminance: 5_800.0,
+            illuminance: 5_200.0,
             shadows_enabled: false,
-            color: Color::srgb(0.58, 0.68, 0.92),
+            color: Color::srgb(0.62, 0.72, 0.90),
             ..default()
         },
         Transform::from_translation(Vec3::new(42.0, 48.0, -28.0)).looking_at(Vec3::ZERO, Vec3::Y),
@@ -711,16 +719,19 @@ fn enter_match(
     commands.insert_resource(scene);
     commands.insert_resource(CurrentDelivery(None));
     commands.insert_resource(Phase(PhaseEnum::MatchIntro { t: 0.0 }));
-    commands.insert_resource(MatchPaused(false));
 }
 
 /// Tear down the live scene when leaving the match.
-fn exit_match(mut commands: Commands, scene: Option<Res<MatchScene>>) {
+pub(crate) fn exit_match(
+    mut commands: Commands,
+    scene: Option<Res<MatchScene>>,
+    mut paused: ResMut<MatchPaused>,
+) {
     if let Some(s) = scene.as_deref() {
         match_flow::despawn_match_scene(&mut commands, s);
     }
     commands.remove_resource::<ActiveMatch>();
-    commands.remove_resource::<MatchPaused>();
+    paused.0 = false;
     commands.remove_resource::<CurrentDelivery>();
     commands.remove_resource::<Pending>();
     commands.insert_resource(Phase(PhaseEnum::Idle));
