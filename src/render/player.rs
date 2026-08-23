@@ -13,6 +13,7 @@ use bevy::animation::transition::AnimationTransitions;
 use bevy::gltf::GltfAssetLabel;
 use std::time::Duration;
 
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
 
 use crate::core::teams::{KitStyle, Team};
@@ -196,6 +197,10 @@ pub const MODEL_FORWARD_XZ: Vec2 = Vec2::new(0.0, 1.0);
 #[derive(Component)]
 pub struct KitStyled;
 
+/// Marker: frustum culling was disabled on this figure mesh.
+#[derive(Component)]
+pub(crate) struct CullingFixed;
+
 // Legacy – kept so old queries don't break, but no longer spawned.
 #[derive(Component)]
 pub struct Part {
@@ -353,6 +358,37 @@ fn blob_shadow_image() -> Image {
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     )
+}
+
+/// Skinned glTF meshes get bind-pose AABBs that sit near the armature root
+/// (feet). Disable frustum culling once per streamed mesh so close cameras
+/// still draw the posed body when only the origin lies outside the frustum.
+pub fn disable_figure_frustum_culling(
+    mut commands: Commands,
+    figures: Query<(), With<Figure>>,
+    parents: Query<&ChildOf>,
+    meshes: Query<Entity, (With<Mesh3d>, Without<CullingFixed>)>,
+) {
+    for entity in &meshes {
+        let mut current = parents.get(entity).ok().map(ChildOf::parent);
+        let mut is_figure_mesh = false;
+        for _ in 0..24 {
+            let Some(parent) = current else {
+                break;
+            };
+            if figures.contains(parent) {
+                is_figure_mesh = true;
+                break;
+            }
+            current = parents.get(parent).ok().map(ChildOf::parent);
+        }
+        if !is_figure_mesh {
+            continue;
+        }
+        commands
+            .entity(entity)
+            .insert((NoFrustumCulling, CullingFixed));
+    }
 }
 
 /// Keep the imported PBR materials and tint them into believable cricket kit:
