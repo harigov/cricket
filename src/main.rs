@@ -499,6 +499,28 @@ struct LightingPreset {
     clear_color: Color,
 }
 
+/// Blend the preset's haze toward the theme's own horizon.
+///
+/// Not all the way: the preset carries the exposure-tuned density that keeps
+/// distant geometry readable, and the horizon colour alone is too saturated to
+/// sit in front of the stands.
+fn theme_fog_color(
+    theme: crate::core::stadiums::StadiumEnvironment,
+    night: bool,
+    preset: &LightingPreset,
+) -> Color {
+    const THEME_WEIGHT: f32 = 0.65;
+    let horizon = render::sky::sky_horizon_color(theme, night);
+    let base = preset.fog_color.to_linear();
+    let mix = |a: f32, b: f32| a + (b - a) * THEME_WEIGHT;
+    Color::linear_rgba(
+        mix(base.red, horizon[0]),
+        mix(base.green, horizon[1]),
+        mix(base.blue, horizon[2]),
+        1.0,
+    )
+}
+
 fn lighting_preset(time: StadiumTime) -> LightingPreset {
     match time {
         StadiumTime::Day => LightingPreset {
@@ -716,7 +738,10 @@ fn update_stadium_time(
         };
     }
     if let Ok(mut fog) = fog_q.single_mut() {
-        fog.color = preset.fog_color;
+        // Distance haze is the air of the ground you are standing in, so it has
+        // to follow the theme. A fixed blue washed desert dust and tropical
+        // glare toward an English overcast.
+        fog.color = theme_fog_color(sky_textures.theme, is_night, &preset);
         fog.falloff = distance_fog_falloff(*time);
     }
     *ambient = GlobalAmbientLight {
