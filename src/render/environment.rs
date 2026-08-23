@@ -1357,6 +1357,7 @@ pub(crate) fn spawn_environment(
         for placement in &group.placements {
             p.spawn((
                 EnvironmentProp,
+                crate::render::ImportedProp,
                 SceneRoot(scenes[placement.variant % scenes.len()].clone()),
                 Transform::from_translation(placement.pos)
                     .with_rotation(Quat::from_rotation_y(placement.yaw))

@@ -150,6 +150,63 @@ pub fn load_xbot_scene(assets: &AssetServer) -> Handle<Scene> {
     assets.load(GltfAssetLabel::Scene(0).from_asset(path))
 }
 
+/// Scene root whose imported glTF materials need de-metallising.
+///
+/// Kenney's kits are exported from Unity with `metallicFactor` left at the
+/// glTF default of 1.0. A fully metallic surface has no diffuse albedo — it
+/// only mirrors its surroundings — so the pines, rocks and palms came back as
+/// pale cutouts of the sky (a teal leaf tone reflecting as cyan) rather than
+/// as foliage. Nothing in these kits is metal.
+#[derive(Component)]
+pub struct ImportedProp;
+
+/// Mesh already visited by [`demetallise_imported_props`].
+#[derive(Component)]
+pub struct PropMaterialFixed;
+
+/// A prop mesh not yet de-metallised: entity plus its imported material.
+type UnfixedPropMesh<'a> = (Entity, &'a MeshMaterial3d<StandardMaterial>);
+/// Only mesh entities we have not already visited.
+type UnfixedPropMeshFilter = (With<Mesh3d>, Without<PropMaterialFixed>);
+
+/// Rewrite metallic imported materials to dielectric, once per mesh.
+///
+/// glTF materials are shared per asset, so the first instance of a palm fixes
+/// the material for every other palm; the marker just stops us rescanning.
+pub fn demetallise_imported_props(
+    mut commands: Commands,
+    props: Query<(), With<ImportedProp>>,
+    parents: Query<&ChildOf>,
+    meshes: Query<UnfixedPropMesh, UnfixedPropMeshFilter>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (entity, mat_handle) in &meshes {
+        let mut current = parents.get(entity).ok().map(ChildOf::parent);
+        let mut is_prop = false;
+        for _ in 0..24 {
+            let Some(parent) = current else { break };
+            if props.contains(parent) {
+                is_prop = true;
+                break;
+            }
+            current = parents.get(parent).ok().map(ChildOf::parent);
+        }
+        if !is_prop {
+            continue;
+        }
+        if let Some(material) = materials.get_mut(&mat_handle.0)
+            && material.metallic > 0.5
+        {
+            material.metallic = 0.0;
+            // The same export pins roughness at 1.0, which kills every
+            // highlight. Bark, stone and foliage all sit below that.
+            material.perceptual_roughness = material.perceptual_roughness.min(0.85);
+            material.reflectance = 0.18;
+        }
+        commands.entity(entity).insert(PropMaterialFixed);
+    }
+}
+
 /// Renderer-side systems shared across states.
 pub struct RenderPlugin;
 
@@ -174,6 +231,7 @@ impl Plugin for RenderPlugin {
                 player::apply_team_kit_materials,
                 player::attach_animation_players,
                 player::animate_figures,
+                demetallise_imported_props,
             ),
         )
         .add_systems(PostUpdate, player::strip_skeleton_root_motion);

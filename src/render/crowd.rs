@@ -596,6 +596,7 @@ fn spawn_detailed_crowd(
             * Quat::from_rotation_z(pose.roll)
             * Quat::from_rotation_x(-pose.lean);
         p.spawn((
+            crate::render::ImportedProp,
             SceneRoot(crowd_variants[crowd_variant_index(s)].clone()),
             // Feet on the tread and scaled to the merged band's own head line,
             // so the two bands cannot disagree about how tall a spectator is.
