@@ -64,19 +64,28 @@ pub fn stadium_ground_half_extent(bowl_outer_radius: f32) -> f32 {
 /// Every stadium sits in a different world, so the site around the bowl is
 /// tarmac, sand, meadow or dust depending on the theme, and its rim has to
 /// dissolve into that theme's horizon rather than a fixed day blue.
+///
+/// Both colours are **albedos**, not screen values: the disc is a lit surface
+/// and the day exposure returns roughly ten times what it is painted with, so
+/// these are an order of magnitude below the colour they come out as. Build
+/// them with `environment::day_albedo`, which is where that conversion and the
+/// reason for it live.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroundPalette {
-    /// Flat colour of the ground directly around the stadium.
+    /// Flat albedo of the ground directly around the stadium.
     pub base: [f32; 3],
-    /// Colour the rim fades into — match the theme's sky at the horizon.
+    /// Albedo the rim fades into — the one that renders as the theme's sky at
+    /// the horizon, so the edge of the world dissolves instead of glaring.
     pub horizon: [f32; 3],
 }
 
 impl GroundPalette {
-    /// Neutral apron beige fading into the default day horizon.
+    /// Neutral apron beige fading into the default day horizon, for the frame
+    /// or two before a theme's own palette is applied. `day_albedo` of screen
+    /// values `[0.45, 0.44, 0.41]` and the coastal horizon `[0.80, 0.89, 0.95]`.
     pub const DEFAULT: Self = Self {
-        base: [0.431, 0.424, 0.392],
-        horizon: [0.42, 0.62, 0.82],
+        base: [0.016, 0.018, 0.019],
+        horizon: [0.058, 0.084, 0.122],
     };
 }
 
