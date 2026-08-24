@@ -169,6 +169,11 @@ impl BowlLayout {
 
 pub(crate) struct SharedStadiumAssets {
     pub(crate) unit_cuboid: Handle<Mesh>,
+    /// Sponsor board face — see `sg::sponsor_board_mesh`'s doc comment for why
+    /// this exists instead of scaling `unit_cuboid` like every other simple
+    /// prop here: a `Cuboid`'s own per-face UV isn't under our control and
+    /// read mirrored on the face this game happens to put toward the pitch.
+    pub(crate) sponsor_board_mesh: Handle<Mesh>,
     pub(crate) rope_mesh: Handle<Mesh>,
     pub(crate) column_mesh: Handle<Mesh>,
     pub(crate) tower_pole_mesh: Handle<Mesh>,
@@ -263,6 +268,7 @@ fn build_shared_assets(
 
     SharedStadiumAssets {
         unit_cuboid: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+        sponsor_board_mesh: meshes.add(sg::sponsor_board_mesh()),
         rope_mesh: meshes.add(Cuboid::new(1.0, 0.08, 0.08)),
         column_mesh: meshes.add(Cylinder::new(0.22, 1.0)),
         tower_pole_mesh: meshes.add(Cylinder::new(0.38, 1.0)),
@@ -511,6 +517,20 @@ fn spawn_pitch_and_creases(
     }
 }
 
+/// Boundary rope, plus the rope-level sponsor boards — the ones actually in
+/// frame from the bowling-end gameplay camera all game, unlike the similar
+/// (and more elaborate) ring `spawn_bowl_detail` builds via
+/// `sg::hoarding_ring_mesh` a little further out and much higher up.
+///
+/// The sponsor board used to be a bare `unit_cuboid` (a `Cuboid::new(1.0,
+/// 1.0, 1.0)` scaled to size), same as the frame right behind it. That was
+/// the actual cause of the mirrored "MOTION"/"PULSE"/"NOVA"/"STRIKE" text a
+/// real capture of this exact view showed: a `Cuboid`'s per-face UV is
+/// Bevy's own convention, not something this code chose, and on the face
+/// that ends up pitch-facing here it happens to read mirrored. Swapping in
+/// `sg::sponsor_board_mesh` — a single quad using this crate's own
+/// (confirmed-correct-by-screenshot) UV convention — fixes it without
+/// touching the frame, which has no text and was never the problem.
 fn spawn_boundary_ring_and_boards(
     p: &mut ChildSpawnerCommands,
     ctx: &StadiumBuildCtx<'_>,
@@ -544,7 +564,7 @@ fn spawn_boundary_ring_and_boards(
             ));
             track_spawn(spawn_count);
             p.spawn((
-                Mesh3d(ctx.shared.unit_cuboid.clone()),
+                Mesh3d(ctx.shared.sponsor_board_mesh.clone()),
                 MeshMaterial3d(
                     ctx.shared.sponsor_mats[seg % ctx.shared.sponsor_mats.len()].clone(),
                 ),
@@ -585,10 +605,18 @@ fn spawn_sight_screens(
     ctx: &StadiumBuildCtx<'_>,
     spawn_count: &mut usize,
 ) {
-    // Sight screens
+    // Sight screens sit just behind the boundary rope, in the grassed apron
+    // between the rope and the first hoarding ring (~`br + 1.2`, see
+    // `spawn_bowl_detail`'s `hoardings` table) — never inside the boundary
+    // itself. `boundary_radius()` is the actual four/six line (`Stadium::
+    // boundary_radius`'s own doc comment), so a fixed offset of `br - 2.5`
+    // (as this used to read) put a solid, unlabelled box 2.5 m inside the
+    // field of play at each end: exactly the "random box in the field near
+    // the fence" a fielder would run into.
+    const SIGHT_SCREEN_SETBACK: f32 = 0.6;
     let br = ctx.stadium.boundary_radius();
     for sign in [-1.0_f32, 1.0] {
-        let x = sign * (br - 2.5);
+        let x = sign * (br + SIGHT_SCREEN_SETBACK);
         p.spawn((
             Mesh3d(ctx.shared.unit_cuboid.clone()),
             MeshMaterial3d(ctx.shared.sight_screen_mat.clone()),
@@ -1321,6 +1349,29 @@ fn spawn_floodlights(
     }
 }
 
+/// How far past the boundary rope the pitch-end field furniture (the big
+/// screen, its truss and the dugouts, which all share the `sx` anchor below)
+/// must clear before its own footprint starts.
+///
+/// `boundary_radius()` is the actual four/six line (`Stadium::
+/// boundary_radius`'s own doc comment) — nothing solid may sit inside it —
+/// but the old anchor (`sx = -(br - 2.5)`) put the big screen's panel 2.5 m
+/// *inside* the field of play: exactly the "random box in the field near the
+/// fence" a fielder would run into. The first hoarding ring sits at
+/// `br + 1.2` and its backing box reaches a little further still (see
+/// `spawn_bowl_detail`'s `hoardings` table), so this clearance is sized to
+/// reach past that board too, not just the rope — see
+/// `field_furniture_clears_the_boundary_and_first_hoarding_ring` below.
+const FIELD_FURNITURE_CLEARANCE: f32 = 3.0;
+
+/// Same idea for the sponsor tents on the other side of the ground. They
+/// need more clearance than the screen: the screen's footprint trails behind
+/// its `sx` anchor (see the strut feet below, which reach back *toward* the
+/// pitch), while a tent is centred on its own anchor, so the anchor itself
+/// has to clear the rope by a full half-footprint, not just the assembly's
+/// leading edge.
+const TENT_CLEARANCE: f32 = 4.0;
+
 fn spawn_big_screen_and_dugouts(
     p: &mut ChildSpawnerCommands,
     ctx: &mut StadiumBuildCtx<'_>,
@@ -1347,7 +1398,7 @@ fn spawn_big_screen_and_dugouts(
         reflectance: 0.30,
         ..default()
     });
-    let sx = -(br - 2.5);
+    let sx = -(br + FIELD_FURNITURE_CLEARANCE);
     let screen_center = Vec3::new(sx - 1.1, 5.6, 0.0);
     let screen_half_w = 8.0;
 
@@ -1437,7 +1488,7 @@ fn spawn_big_screen_and_dugouts(
     ];
     for i in 0..3 {
         let tz = (i as f32 - 1.0) * 7.5 + 4.0;
-        let tx = br - 5.0;
+        let tx = br + TENT_CLEARANCE;
         p.spawn((
             Mesh3d(ctx.shared.unit_cuboid.clone()),
             MeshMaterial3d(tent_mats[i].clone()),
@@ -2060,6 +2111,56 @@ mod tests {
         // Mown outfield must stay inside the apron (no regression to floating bowl).
         let outfield_half = (65.0 + 6.0) * 2.05 / 2.0;
         assert!(radius > outfield_half);
+    }
+
+    /// Regression: the pitch-end field furniture (`spawn_big_screen_and_
+    /// dugouts`) used to anchor the big screen at `br - 2.5` and the tents at
+    /// `br - 5.0` — both solidly inside `boundary_radius()`, the actual
+    /// four/six line, which is what a real screenshot showed as large flat
+    /// boxes standing in the outfield. Reconstructs each cluster's
+    /// closest-to-origin point from the same offsets the spawn code uses
+    /// (`FIELD_FURNITURE_CLEARANCE`, `TENT_CLEARANCE` and the dugout/tent
+    /// literals below), across the range of ground sizes the game ships.
+    #[test]
+    fn field_furniture_clears_the_boundary_and_first_hoarding_ring() {
+        // First hoarding ring's outer reach (see `spawn_bowl_detail`'s
+        // `hoardings` table: radius `br + 1.25`, plus the board's own
+        // thickness and the backing box just behind it).
+        const FIRST_HOARDING_OUTER_REACH: f32 = 1.5;
+        for br in [55.0_f32, 60.0, 62.0, 65.0, 68.0, 75.0] {
+            let sx = -(br + FIELD_FURNITURE_CLEARANCE);
+
+            // Big screen: the strut feet (`screen_support_mesh`) reach back
+            // toward the pitch from `screen_center.x + 0.9`, where
+            // `screen_center.x = sx - 1.1` — the closest point in the whole
+            // assembly to the origin.
+            let screen_near = (sx - 1.1 + 0.9).abs();
+            assert!(
+                screen_near > br + FIRST_HOARDING_OUTER_REACH,
+                "big screen intrudes on the boundary/hoarding ring at br={br}: {screen_near}"
+            );
+
+            // Dugouts share `sx`; their closest-to-origin point is the small
+            // roof at `sx + 5.2`, combined with the sideline offset `dz`.
+            let dz = br - 6.0;
+            let dugout_near = (sx + 5.2).hypot(dz);
+            assert!(
+                dugout_near > br,
+                "dugout intrudes on the boundary at br={br}: {dugout_near}"
+            );
+
+            // Tents: centred on `tx`, so the closest point to the origin is a
+            // full half-footprint in, not just the assembly's leading edge.
+            // Half-diagonal of a rotated 3.2x3.2 m box bounds every rotation
+            // the `0.18 * i` spin actually uses.
+            let tx = br + TENT_CLEARANCE;
+            let tent_half_footprint = 1.6 * std::f32::consts::SQRT_2;
+            let tent_near = tx - tent_half_footprint;
+            assert!(
+                tent_near > br,
+                "tent intrudes on the boundary at br={br}: {tent_near}"
+            );
+        }
     }
 
     #[test]

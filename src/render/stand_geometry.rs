@@ -84,6 +84,28 @@ const FACE_BOTTOM: usize = 1;
 
 const QUAD_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
 
+/// [`QUAD_UVS`] with the V span inverted, for the sponsor hoardings.
+///
+/// Texture V runs *down* from the top-left of the image, but [`push_quad`]'s
+/// corner order starts at the quad's **bottom**-left, so plain [`QUAD_UVS`]
+/// hands `v = 0` (the top of the art) to the bottom of the board and renders
+/// every sponsor upside down. On a horizontal strip of capital letters an
+/// upside-down board reads as reversed text, which is why the boundary
+/// hoardings showed "WILLOW" as "MOTTIM" and "PULSE" as "3S7Ud" from the
+/// bowling-end camera while `assets/branding/stadium/sponsor-ribbon.png`
+/// itself is authored correctly.
+///
+/// Note the U span is *not* touched: `ring_segment_transform` maps local `+X`
+/// onto `ring_tangent`, which is exactly a pitch-side viewer's right, so U
+/// already runs left-to-right for someone standing in the middle of the
+/// ground. Flipping it as well produced a 180° rotation — legible letters in
+/// reverse order — which is how the true cause was pinned down.
+///
+/// This lives here rather than in [`QUAD_UVS`] because every vertex-coloured
+/// quad in the bowl shares that constant, and for untextured or symmetric
+/// tiling surfaces the V direction is unobservable.
+const QUAD_UVS_FLIP_V: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+
 /// Accumulator for merged, vertex-coloured stadium geometry.
 #[derive(Default)]
 pub(crate) struct StandMesh {
@@ -115,6 +137,21 @@ impl StandMesh {
 
     /// Quad wound counter-clockwise when viewed from its front face.
     pub(crate) fn push_quad(&mut self, corners: [Vec3; 4], color: [f32; 4]) {
+        self.push_quad_uvs(corners, QUAD_UVS, color);
+    }
+
+    /// Quad with an explicit UV per corner.
+    ///
+    /// Only lettered surfaces need this. Every other quad in the bowl is
+    /// vertex-coloured or carries a symmetric tiling texture, where the U
+    /// direction is unobservable — see [`QUAD_UVS_FLIP_V`] for why the
+    /// sponsor boards are the exception.
+    pub(crate) fn push_quad_uvs(
+        &mut self,
+        corners: [Vec3; 4],
+        uvs: [[f32; 2]; 4],
+        color: [f32; 4],
+    ) {
         let normal = (corners[1] - corners[0])
             .cross(corners[2] - corners[0])
             .normalize_or_zero()
@@ -123,7 +160,7 @@ impl StandMesh {
         for (i, c) in corners.iter().enumerate() {
             self.positions.push(c.to_array());
             self.normals.push(normal);
-            self.uvs.push(QUAD_UVS[i]);
+            self.uvs.push(uvs[i]);
             self.colors.push(color);
         }
         self.indices
@@ -1082,8 +1119,41 @@ pub(crate) fn gate_portal_mesh(angles: &[f32], radius: f32, width: f32, height: 
     m.build()
 }
 
+/// Board face offset from the ring anchor, along local +Z (inward, toward the
+/// pitch — see the module doc).
+const HOARDING_BOARD_Z: f32 = 0.06;
+
 /// Advertising hoarding ring with real UVs, so a sponsor texture maps across
 /// each board instead of smearing.
+///
+/// Each board is a flat panel anchored at `radius` with local +X along the
+/// ring tangent, so a board spanning a block of `every` segments is a
+/// **chord** of the ring, not an arc — its straight edges fall short of the
+/// true circle. The exact half-width that makes adjacent chords meet with
+/// zero gap is `r * tan(theta / 2)` (not the naive `r * theta / 2`, which is
+/// what the old `arc * every * 0.47` amounted to and is exactly why it left a
+/// gap): `tan` overshoots its argument by precisely the amount the chord
+/// needs to reach the next board's edge. `r` here is the *effective* radius
+/// the tangent offset is added on, i.e. `radius` less however far the panel
+/// is pushed inward by `face`'s `z` — using the anchor `radius` itself is off
+/// by exactly that shift. See `fence_boards_meet_with_no_gap` below.
+///
+/// One quad per board, not two: an earlier pass added a second, reverse-wound
+/// quad on the theory that the front pass was already correct and only the
+/// (rarely seen, from outside the ground) back face needed compensating. That
+/// pass also flipped the front pass's own UV, on the theory that the flip was
+/// the actual fix. Neither was right. The mirrored hoarding text the player
+/// actually saw came from a *different* mesh entirely —
+/// `spawn_boundary_ring_and_boards` in `stadium.rs`, which stacks a `Cuboid`
+/// primitive at almost the same radius and is what's actually in frame from
+/// the bowling end; see its doc comment for the real fix. This mesh's own
+/// default `push_quad` UV (left edge `u=0`, right edge `u=1` in local `+X`,
+/// i.e. the board's own tangent direction) was already correct the whole
+/// time — confirmed by isolating this ring alone (temporarily disabling the
+/// other function) and rendering an unambiguous half-red/half-blue debug
+/// texture through it. Don't reintroduce a flip here without redoing that
+/// isolation test; with both boards in frame at once it's easy to attribute
+/// the *other* mesh's mirroring to this one.
 pub(crate) fn hoarding_ring_mesh(
     segments: usize,
     radius: f32,
@@ -1092,24 +1162,68 @@ pub(crate) fn hoarding_ring_mesh(
     every: usize,
 ) -> Mesh {
     let every = every.max(1);
-    let arc = TAU * radius / segments as f32;
-    let hw = arc * every as f32 * 0.47;
+    let theta = TAU * every as f32 / segments as f32;
+    // The board sits `HOARDING_BOARD_Z` in from the anchor circle at `radius`
+    // (see `face` below), so the tangent offset is really added on a circle
+    // of radius `radius - z`, not `radius` itself — the chord half-width has
+    // to use *that* effective radius or neighbouring boards miss each other
+    // by the small radial shift, not just round off.
+    let hw = (radius - HOARDING_BOARD_Z) * (theta * 0.5).tan();
     let hh = height * 0.5;
     let mut m = StandMesh::with_capacity(segments / every * 4);
     for s in (0..segments).step_by(every) {
         let a = (s as f32 + 0.5) / segments as f32 * TAU;
         let xf = ring_segment_transform(a, radius, y);
-        // Wound to face the pitch (+Z local) with a 0..1 UV span per board.
-        let face = |x: f32, h: f32| xf.transform_point(Vec3::new(x, h, 0.06));
-        m.push_quad(
+        let face = |x: f32, h: f32| xf.transform_point(Vec3::new(x, h, HOARDING_BOARD_Z));
+        m.push_quad_uvs(
             [face(-hw, -hh), face(hw, -hh), face(hw, hh), face(-hw, hh)],
+            QUAD_UVS_FLIP_V,
             [1.0, 1.0, 1.0, 1.0],
         );
     }
     m.build()
 }
 
+/// Unit-sized flat board face (spans `-0.5..0.5` in local X/Y, sitting at
+/// local `Z = 0.5`) for anything carrying a sponsor texture that needs to
+/// read correctly for a pitch-side viewer.
+///
+/// This exists because [`crate::render::stadium::spawn_boundary_ring_and_boards`]
+/// used to scale a bare `Cuboid::new(1.0, 1.0, 1.0)` for its sponsor boards.
+/// A `Cuboid`'s per-face UV is Bevy's own convention, not this crate's, and
+/// on the face that ends up pitch-facing here it reads mirrored — that's the
+/// actual cause of the mirrored "MOTION"/"PULSE"/"NOVA"/"STRIKE" boards the
+/// player saw from the bowling end (confirmed by isolating it with a
+/// half-red/half-blue debug texture: swapping in *this* mesh with the same
+/// texture reads correctly, the `Cuboid` doesn't). Sitting the quad at local
+/// `Z = 0.5` rather than `0.0` matches the `+Z` face of a unit `Cuboid`, so it
+/// drops in for the old mesh handle with no change to the surrounding
+/// `Transform::with_scale` call — the board still ends up proud of its frame
+/// by the same margin.
+pub(crate) fn sponsor_board_mesh() -> Mesh {
+    let mut m = StandMesh::new();
+    m.push_quad_uvs(
+        [
+            Vec3::new(-0.5, -0.5, 0.5),
+            Vec3::new(0.5, -0.5, 0.5),
+            Vec3::new(0.5, 0.5, 0.5),
+            Vec3::new(-0.5, 0.5, 0.5),
+        ],
+        QUAD_UVS_FLIP_V,
+        [1.0, 1.0, 1.0, 1.0],
+    );
+    m.build()
+}
+
 /// Dark backing box behind a hoarding ring (separate mesh: separate material).
+///
+/// Must clear the board panel ([`HOARDING_BOARD_Z`]) on the radius axis —
+/// sitting at the old fixed `radius - 0.06` put the backing's own
+/// half-thickness (0.11 m either side) straddling the board instead of
+/// behind it, so it poked 0.11 m past the board face on the pitch side (read
+/// as a dark rim in front of every board). It's also narrower than the board
+/// (rather than wider, as before) so it can never peek past the board's
+/// edges through the seam between boards.
 pub(crate) fn hoarding_backing_mesh(
     segments: usize,
     radius: f32,
@@ -1118,15 +1232,21 @@ pub(crate) fn hoarding_backing_mesh(
     every: usize,
 ) -> Mesh {
     let every = every.max(1);
-    let arc = TAU * radius / segments as f32;
+    let theta = TAU * every as f32 / segments as f32;
+    let board_width = 2.0 * radius * (theta * 0.5).tan();
+    // Half-thickness of the backing box (see the `Vec3::new` below) plus a
+    // small clearance past the outward face of the board.
+    const HALF_THICKNESS: f32 = 0.11;
+    const CLEARANCE: f32 = 0.02;
+    let backing_radius = radius - HOARDING_BOARD_Z + HALF_THICKNESS + CLEARANCE;
     let mut m = StandMesh::with_capacity(segments / every * 24);
     for s in (0..segments).step_by(every) {
         let a = (s as f32 + 0.5) / segments as f32 * TAU;
         m.push_ring_box(
             a,
-            radius - 0.06,
+            backing_radius,
             y,
-            Vec3::new(arc * every as f32 * 0.98, height + 0.16, 0.22),
+            Vec3::new(board_width * 0.96, height + 0.16, HALF_THICKNESS * 2.0),
             [0.06, 0.07, 0.09, 1.0],
         );
     }
@@ -1276,8 +1396,10 @@ pub(crate) fn dugout_fitout_mesh(center: Vec3, tones: &[[f32; 3]]) -> Mesh {
 #[cfg(test)]
 mod tests {
     use bevy::camera::primitives::MeshAabb;
+    use bevy::mesh::VertexAttributeValues;
 
     use super::*;
+    use crate::render::ring_geometry::ring_radial;
 
     fn vertex_count(mesh: &Mesh) -> usize {
         mesh.attribute(Mesh::ATTRIBUTE_POSITION)
@@ -1721,11 +1843,185 @@ mod tests {
     fn hoarding_ring_has_uvs_for_sponsor_art() {
         let mesh = hoarding_ring_mesh(96, 66.0, 1.4, 1.2, 2);
         assert!(!mesh.attribute(Mesh::ATTRIBUTE_UV_0).unwrap().is_empty());
-        // One quad per board, 48 boards.
+        // One quad per board (see `hoarding_ring_mesh`'s doc comment on why
+        // the earlier two-quads-per-board pass was reverted), 48 boards.
         assert_eq!(vertex_count(&mesh), 48 * 4);
         assert!(!mesh_is_empty(&hoarding_backing_mesh(
             96, 66.0, 1.4, 1.2, 2
         )));
+    }
+
+    /// Extracts `(position, normal, uv)` per vertex, plus the merged mesh's
+    /// vertex-indexed triangle list, for direct geometric assertions that
+    /// `mesh_is_empty`-style checks can't express.
+    /// Sponsor art must sit the right way up and read left-to-right for a
+    /// player standing in the middle of the ground.
+    ///
+    /// Regression test for the mirrored/upside-down boundary hoardings. Two
+    /// earlier attempts at this bug flipped the *U* span, which only rotated
+    /// the art 180° (legible letters, reverse order) because U was already
+    /// correct — see [`QUAD_UVS_FLIP_V`]. Asserting both axes separately is
+    /// what distinguishes the two failure modes.
+    #[test]
+    fn sponsor_boards_render_upright_and_left_to_right_from_the_pitch() {
+        let radius = 66.0;
+        let mesh = hoarding_ring_mesh(96, radius, 1.4, 1.2, 3);
+        let verts = vertex_data(&mesh);
+
+        // First board's four corners, in push_quad order.
+        let quad = &verts[..4];
+        let uv_of = |i: usize| Vec2::from(quad[i].2);
+
+        // V must increase downward: the corner lower in world space carries
+        // the larger v, because texture v runs down from the image's top.
+        let (low, high) = (quad[0], quad[3]);
+        assert!(low.0.y < high.0.y, "corner 0 should be the lower edge");
+        assert!(
+            uv_of(0).y > uv_of(3).y,
+            "art renders upside down: bottom corner has v={} but top has v={}",
+            uv_of(0).y,
+            uv_of(3).y
+        );
+
+        // U must increase toward a pitch-side viewer's right.
+        let board_mid = (quad[0].0 + quad[1].0) * 0.5;
+        let forward = (board_mid - Vec3::new(0.0, board_mid.y, 0.0)).normalize();
+        let viewer_right = forward.cross(Vec3::Y).normalize();
+        let u_axis = (quad[1].0 - quad[0].0).normalize();
+        assert!(
+            uv_of(1).x > uv_of(0).x,
+            "corner 1 should carry the larger u"
+        );
+        assert!(
+            u_axis.dot(viewer_right) > 0.99,
+            "art reads mirrored: u increases along {u_axis:?}, viewer's right is {viewer_right:?}"
+        );
+    }
+
+    fn vertex_data(mesh: &Mesh) -> Vec<(Vec3, Vec3, [f32; 2])> {
+        let positions = mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap();
+        let normals = mesh.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap();
+        let uvs = mesh.attribute(Mesh::ATTRIBUTE_UV_0).unwrap();
+        let (VertexAttributeValues::Float32x3(pos), VertexAttributeValues::Float32x3(norm)) =
+            (positions, normals)
+        else {
+            panic!("expected float3 position/normal attributes");
+        };
+        let VertexAttributeValues::Float32x2(uv) = uvs else {
+            panic!("expected float2 uv attribute");
+        };
+        pos.iter()
+            .zip(norm.iter())
+            .zip(uv.iter())
+            .map(|((p, n), u)| (Vec3::from_array(*p), Vec3::from_array(*n), *u))
+            .collect()
+    }
+
+    /// Bug fix regression: `hw = arc * every * 0.47` left a ~6% gap between
+    /// adjacent boards because it used the naive `radius * theta / 2` half-arc
+    /// instead of the true chord half-length `radius * tan(theta / 2)`. Two
+    /// boards from neighbouring blocks must now share their edge exactly.
+    #[test]
+    fn fence_boards_meet_with_no_gap() {
+        let segments = 96;
+        let radius = 66.0;
+        let every = 3;
+        let mesh = hoarding_ring_mesh(segments, radius, 1.4, 1.2, every);
+        let verts = vertex_data(&mesh);
+        // One quad per board: 4 vertices each.
+        let per_board = 4;
+        let board = |i: usize| &verts[i * per_board..i * per_board + 4];
+        let board0 = board(0);
+        let board1 = board(1);
+        // Local +X is the board's own "right" edge (see push_quad/QUAD_UVS):
+        // corner index 1 is (+hw, -hh), corner index 0 of the *next* board is
+        // its (-hw, -hh) corner. Adjacent boards must meet there.
+        let right_edge_of_board0 = board0[1];
+        let left_edge_of_board1 = board1[0];
+        let gap = right_edge_of_board0.0.distance(left_edge_of_board1.0);
+        assert!(
+            gap < 1e-3,
+            "adjacent boards should butt up with no gap, got {gap} m \
+             (board0 right edge {:?}, board1 left edge {:?})",
+            right_edge_of_board0.0,
+            left_edge_of_board1.0
+        );
+    }
+
+    /// Deleted `hoarding_faces_read_correctly_from_both_sides_of_the_fence`
+    /// and a later replacement that both assumed *this* mesh's UV was the
+    /// mirrored one and tried to "prove" a flipped assignment correct by
+    /// construction. Neither was right: the mirrored text the player actually
+    /// sees comes from a different mesh entirely (the `Cuboid`-based board in
+    /// `spawn_boundary_ring_and_boards`), and this mesh's plain `push_quad`
+    /// UV was already correct — confirmed by isolating this ring alone and
+    /// rendering a half-red/half-blue debug texture through it, not by
+    /// re-deriving the camera/ring geometry (that derivation looked airtight
+    /// twice in a row and was wrong both times). See `hoarding_ring_mesh`'s
+    /// doc comment. The test below guards the one thing that *is* a stable
+    /// geometric invariant regardless of which way U reads: the board still
+    /// faces the pitch.
+    #[test]
+    fn hoarding_front_face_still_faces_the_pitch() {
+        let radius = 66.0;
+        let mesh = hoarding_ring_mesh(96, radius, 1.4, 1.2, 3);
+        let verts = vertex_data(&mesh);
+        let quad = &verts[0..4];
+        // The angle this particular board sits at, recovered from its own
+        // vertex data rather than assumed, so the test doesn't silently pass
+        // if the mesh's angular placement ever changes.
+        let board_angle = {
+            let c = quad.iter().fold(Vec3::ZERO, |a, v| a + v.0) / 4.0;
+            c.z.atan2(c.x)
+        };
+        let inward = -ring_radial(board_angle);
+        assert!(
+            quad[0].1.dot(inward) > 0.9,
+            "board should still face the pitch: normal={:?} inward={inward:?}",
+            quad[0].1
+        );
+    }
+
+    #[test]
+    fn sponsor_board_mesh_sits_on_the_unit_cuboids_front_face() {
+        // Matches the `+Z` face of `Cuboid::new(1.0, 1.0, 1.0)`
+        // (`BOX_FACE_CORNERS[2]`, scaled to half-extent 0.5) exactly, so it
+        // drops into `spawn_boundary_ring_and_boards` with no transform
+        // changes — see `sponsor_board_mesh`'s doc comment.
+        let mesh = sponsor_board_mesh();
+        let verts = vertex_data(&mesh);
+        assert_eq!(verts.len(), 4);
+        for (p, n, _) in &verts {
+            assert!((p.x.abs() - 0.5).abs() < 1e-6, "x should be ±0.5, got {p}");
+            assert!((p.y.abs() - 0.5).abs() < 1e-6, "y should be ±0.5, got {p}");
+            assert!(
+                (p.z - 0.5).abs() < 1e-6,
+                "z should sit at the +Z face, got {p}"
+            );
+            assert!(n.dot(Vec3::Z) > 0.9, "normal should point +Z, got {n:?}");
+        }
+    }
+
+    /// Bug fix regression: the backing box used to be centred at
+    /// `radius - 0.06` with a 0.22 m radial thickness, straddling the board
+    /// instead of sitting behind it — its inward half poked past the board's
+    /// pitch-facing surface. The backing must now stay entirely on the far
+    /// (outward) side of the board.
+    #[test]
+    fn hoarding_backing_stays_behind_the_board_face() {
+        let radius = 66.0;
+        let backing = hoarding_backing_mesh(96, radius, 1.4, 1.2, 3);
+        let verts = vertex_data(&backing);
+        let innermost = verts
+            .iter()
+            .map(|(p, ..)| Vec2::new(p.x, p.z).length())
+            .fold(f32::INFINITY, f32::min);
+        let outward_board_face_radius = radius - HOARDING_BOARD_Z;
+        assert!(
+            innermost > outward_board_face_radius,
+            "backing's innermost point ({innermost}) must sit behind the outward \
+             board face ({outward_board_face_radius}), not poke past it"
+        );
     }
 
     #[test]

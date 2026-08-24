@@ -95,7 +95,9 @@ fn register_match_systems(app: &mut App) {
                 match_flow::sys_aim,
                 match_flow::sys_runup,
                 match_flow::sys_result_pause,
+                match_flow::sys_ball_return,
                 match_flow::sys_over_break,
+                match_flow::sys_bowler_select,
                 match_flow::sys_innings_break,
                 match_flow::sys_camera_modes,
                 match_flow::sys_stadium_qa_camera.after(match_flow::sys_camera_modes),
@@ -483,13 +485,29 @@ const DAY_EV100: f32 = 9.6;
 /// Night exposure — ~0.6 stop brighter than prior pass for TV floodlit readability.
 const NIGHT_EV100: f32 = 8.5;
 
-/// Aerial broadcast distances (~150–230 m); fog must not fully occlude the far oval.
-/// Scaled with the multi-tier bowl, whose far stands now sit ~330 m from the
-/// establishing camera.
-const DAY_FOG_START: f32 = 300.0;
-const DAY_FOG_END: f32 = 900.0;
-const NIGHT_FOG_START: f32 = 190.0;
-const NIGHT_FOG_END: f32 = 700.0;
+/// Reference visibility distance (the Koschmieder contrast threshold) for the
+/// atmospheric aerial-perspective haze, in world metres.
+///
+/// The original fog was a hard `Linear` ramp that only started at 300 m — but
+/// the seating bowl itself only spans ~70–110 m from the pitch (`BowlLayout`)
+/// and the boundary rope sits at ~55–75 m, so nothing the gameplay cameras
+/// actually look at ever reached the ramp: the boundary and crowd rendered
+/// exactly as sharp at 100 m as the stumps at 2 m. `FogFalloff::Atmospheric`
+/// (via `from_visibility_color`) fixed that — distant geometry desaturates
+/// and lifts toward the fog colour instead of staying pin-sharp — but a first
+/// pass at 170 m overshot it: with the haze doing *all* the distance work,
+/// the aerial establishing shot (`*-3.png`-style, ~150–230 m up) washed the
+/// whole stadium out to near-white, and even the gameplay stands read milky.
+/// That pass predated `gameplay_depth_of_field` (`camera_rig.rs`), which now
+/// carries part of the "push the background back" job through a real lens
+/// blur — so the fog no longer has to do all of it alone, and can sit further
+/// out. These values were arrived at by rendering both the gameplay and
+/// establishing shots and checking the far boundary/crowd are still visibly
+/// softer and less saturated than the batsman without losing the stadium's
+/// colour or blowing the aerial shot to white.
+const DAY_FOG_VISIBILITY: f32 = 280.0;
+/// Floodlit night air reads murkier at a shorter distance than daylight haze.
+const NIGHT_FOG_VISIBILITY: f32 = 200.0;
 
 /// Sky dome radius. Must stay comfortably larger than the furthest camera
 /// distance from the origin: the establishing shot pulls back with the bowl,
@@ -539,8 +557,8 @@ impl IblCubemapCache {
 struct LightingPreset {
     ev100: f32,
     fog_color: Color,
-    fog_start: f32,
-    fog_end: f32,
+    /// Koschmieder visibility distance feeding [`distance_fog_falloff`].
+    fog_visibility: f32,
     ambient_color: Color,
     ambient_brightness: f32,
     clear_color: Color,
@@ -582,8 +600,7 @@ fn lighting_preset(time: StadiumTime) -> LightingPreset {
         StadiumTime::Day => LightingPreset {
             ev100: DAY_EV100,
             fog_color: Color::srgba(0.58, 0.72, 0.86, 1.0),
-            fog_start: DAY_FOG_START,
-            fog_end: DAY_FOG_END,
+            fog_visibility: DAY_FOG_VISIBILITY,
             ambient_color: Color::srgb(0.80, 0.84, 0.74),
             ambient_brightness: 260.0,
             clear_color: Color::srgb(0.54, 0.70, 0.90),
@@ -592,8 +609,7 @@ fn lighting_preset(time: StadiumTime) -> LightingPreset {
         StadiumTime::Night => LightingPreset {
             ev100: NIGHT_EV100,
             fog_color: Color::srgba(0.04, 0.06, 0.12, 1.0),
-            fog_start: NIGHT_FOG_START,
-            fog_end: NIGHT_FOG_END,
+            fog_visibility: NIGHT_FOG_VISIBILITY,
             ambient_color: Color::srgb(0.38, 0.42, 0.52),
             ambient_brightness: 220.0,
             clear_color: Color::srgb(0.02, 0.03, 0.08),
@@ -602,13 +618,14 @@ fn lighting_preset(time: StadiumTime) -> LightingPreset {
     }
 }
 
-fn distance_fog_falloff(time: StadiumTime) -> bevy::pbr::FogFalloff {
-    use bevy::pbr::FogFalloff;
-    let preset = lighting_preset(time);
-    FogFalloff::Linear {
-        start: preset.fog_start,
-        end: preset.fog_end,
-    }
+/// Atmospheric (aerial-perspective) falloff: distant geometry desaturates and
+/// lifts toward `tint` — the same colour the caller is also assigning to
+/// `DistanceFog::color` — rather than the old flat `Linear` ramp, which either
+/// showed nothing (short of `start`) or fully erased geometry (past `end`).
+/// `visibility` is the Koschmieder contrast-threshold distance; see
+/// [`DAY_FOG_VISIBILITY`] for how that distance was chosen.
+fn distance_fog_falloff(visibility: f32, tint: Color) -> bevy::pbr::FogFalloff {
+    bevy::pbr::FogFalloff::from_visibility_color(visibility, tint)
 }
 
 fn setup_basics(
@@ -717,7 +734,7 @@ fn setup_basics(
         },
         DistanceFog {
             color: preset.fog_color,
-            falloff: distance_fog_falloff(*stadium_time),
+            falloff: distance_fog_falloff(preset.fog_visibility, preset.fog_color),
             ..default()
         },
         GeneratedEnvironmentMapLight {
@@ -725,6 +742,7 @@ fn setup_basics(
             intensity: preset.ibl_intensity,
             ..default()
         },
+        render::camera_rig::gameplay_depth_of_field(),
     ));
     commands.insert_resource(GlobalAmbientLight {
         color: preset.ambient_color,
@@ -857,8 +875,9 @@ fn update_stadium_time(
         // Distance haze is the air of the ground you are standing in, so it has
         // to follow the theme. A fixed blue washed desert dust and tropical
         // glare toward an English overcast.
-        fog.color = theme_fog_color(sky_textures.theme, is_night, &preset);
-        fog.falloff = distance_fog_falloff(*time);
+        let tint = theme_fog_color(sky_textures.theme, is_night, &preset);
+        fog.color = tint;
+        fog.falloff = distance_fog_falloff(preset.fog_visibility, tint);
     }
     *ambient = GlobalAmbientLight {
         color: preset.ambient_color,
@@ -997,20 +1016,58 @@ mod fog_tests {
     }
 
     #[test]
-    fn distance_fog_falloff_matches_day_night_constants() {
-        match distance_fog_falloff(StadiumTime::Day) {
-            FogFalloff::Linear { start, end } => {
-                assert_eq!(start, DAY_FOG_START);
-                assert_eq!(end, DAY_FOG_END);
-            }
-            _ => panic!("expected linear day fog"),
-        }
-        match distance_fog_falloff(StadiumTime::Night) {
-            FogFalloff::Linear { start, end } => {
-                assert_eq!(start, NIGHT_FOG_START);
-                assert_eq!(end, NIGHT_FOG_END);
-            }
-            _ => panic!("expected linear night fog"),
-        }
+    fn distance_fog_falloff_is_atmospheric_and_denser_at_night() {
+        // A mid grey tint, not `Color::WHITE`: `from_visibility_color`'s
+        // extinction term is `(1 - channel)`, so a pure-white tint always
+        // produces zero extinction regardless of visibility and the
+        // "denser at night" comparison below would compare two zero vectors.
+        let tint = Color::srgb(0.5, 0.5, 0.5);
+        let day = distance_fog_falloff(DAY_FOG_VISIBILITY, tint);
+        let night = distance_fog_falloff(NIGHT_FOG_VISIBILITY, tint);
+        let (day_ext, day_ins) = match day {
+            FogFalloff::Atmospheric {
+                extinction,
+                inscattering,
+            } => (extinction, inscattering),
+            _ => panic!("expected atmospheric day fog"),
+        };
+        let (night_ext, night_ins) = match night {
+            FogFalloff::Atmospheric {
+                extinction,
+                inscattering,
+            } => (extinction, inscattering),
+            _ => panic!("expected atmospheric night fog"),
+        };
+        // A shorter Koschmieder visibility distance is a denser haze: every
+        // channel's extinction/inscattering density must be larger at night.
+        assert!(
+            night_ext.length() > day_ext.length(),
+            "night extinction {night_ext:?} should be denser than day {day_ext:?}"
+        );
+        assert!(
+            night_ins.length() > day_ins.length(),
+            "night inscattering {night_ins:?} should be denser than day {day_ins:?}"
+        );
+    }
+
+    /// Regression for the original bug: fog that only started at 300 m never
+    /// touched the seating bowl (~70-110 m, see `BowlLayout`) or the boundary
+    /// rope (~55-75 m), so the crowd and fence rendered exactly as sharp as
+    /// the stumps. The visibility distances must stay below that old linear
+    /// start, and night must stay hazier than day, but must *not* regress to
+    /// the 170/110 m pass that overshot the other way and washed the
+    /// establishing shot out to white (see `DAY_FOG_VISIBILITY`'s doc
+    /// comment) — so this also floors both distances comfortably above that.
+    /// (`std::hint::black_box` keeps clippy from folding this into a
+    /// constant-assertion lint, since both sides genuinely are `const`.)
+    #[test]
+    fn fog_visibility_is_tuned_between_the_old_extremes() {
+        const OLD_LINEAR_START: f32 = 300.0;
+        const OVERSHOT_DAY_VISIBILITY: f32 = 170.0;
+        const OVERSHOT_NIGHT_VISIBILITY: f32 = 110.0;
+        assert!(std::hint::black_box(DAY_FOG_VISIBILITY) < OLD_LINEAR_START);
+        assert!(std::hint::black_box(NIGHT_FOG_VISIBILITY) < DAY_FOG_VISIBILITY);
+        assert!(std::hint::black_box(DAY_FOG_VISIBILITY) > OVERSHOT_DAY_VISIBILITY);
+        assert!(std::hint::black_box(NIGHT_FOG_VISIBILITY) > OVERSHOT_NIGHT_VISIBILITY);
     }
 }

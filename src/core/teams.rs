@@ -378,6 +378,14 @@ pub fn pick_bowlers(team: &Team, count: usize) -> Vec<usize> {
     b
 }
 
+/// Every bowling-capable player, ranked by rating. Unlike `pick_bowlers`
+/// (which the automatic AI rotation caps at 5 for variety), the human
+/// bowler-select screen needs the *whole* roster so a captain can turn to
+/// a part-timer once the frontline attack has bowled out its quota.
+pub fn all_bowlers_ranked(team: &Team) -> Vec<usize> {
+    pick_bowlers(team, team.bowlers().len())
+}
+
 /// Total team rating used by the quick simulator.
 pub fn team_rating(team: &Team) -> f32 {
     let bat: f32 = team.players.iter().map(|p| p.batting as f32).sum::<f32>() / 11.0;
@@ -438,5 +446,19 @@ mod tests {
         let o = batting_order(t);
         let last = &t.players[*o.last().unwrap()];
         assert_eq!(last.role, Bowler);
+    }
+
+    #[test]
+    fn all_bowlers_ranked_covers_the_whole_roster_sorted() {
+        let t = &builtin_teams()[0];
+        let all = all_bowlers_ranked(t);
+        assert_eq!(all.len(), t.bowlers().len());
+        assert!(
+            all.len() > 5,
+            "fixture team should have more than 5 bowling options"
+        );
+        for w in all.windows(2) {
+            assert!(t.players[w[0]].bowling >= t.players[w[1]].bowling);
+        }
     }
 }

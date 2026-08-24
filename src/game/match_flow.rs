@@ -12,8 +12,10 @@
 //!   in tests and replays.
 
 use crate::core::geometry::{self as geo};
-use crate::core::rules::{BallOutcome, Dismissal};
-use crate::core::teams::{BowlStyle, Player, batting_order, pick_bowlers};
+use crate::core::rules::{BallOutcome, Dismissal, Innings};
+use crate::core::teams::{
+    BowlStyle, Player, Team, all_bowlers_ranked, batting_order, pick_bowlers,
+};
 use crate::core::{
     Footwork, ShotKind, footwork_from_move_y, select_shot, shot_length_penalty, shot_profile,
 };
@@ -59,6 +61,12 @@ const READY_GATE_GRACE: f32 = 0.5;
 const READY_GATE_TIMEOUT: f32 = 12.0;
 /// Higher top-edge carry chance on mistimed aerial strokes.
 const AERIAL_MISTIME_EDGE_CHANCE: f32 = 0.78;
+/// Hard cap on the retrieval/return phase so a fielder who can never quite
+/// reach the ball (deep in the outfield, an odd bounce, whatever) cannot
+/// soft-lock the match waiting for a throw that will never come.
+const BALL_RETURN_TIMEOUT: f32 = 6.0;
+/// Seconds for the final return throw to cross from the fielder to the bowler.
+const RETURN_THROW_SECS: f32 = 0.6;
 
 // ---------------------------------------------------------------------------
 // Resources tied to the live scene
@@ -435,7 +443,13 @@ pub(crate) struct ReadySceneParams<'w, 's> {
             &'static mut Transform,
             &'static mut Anim,
         ),
+        Without<CricketBall>,
     >,
+    // Parked here (bug: a stale ball from the previous delivery would
+    // otherwise sit wherever it last came to rest, visible through the
+    // whole Ready/Aim phase until `sys_runup`'s first frame finally moved
+    // it — the "phantom ball" players reported).
+    ball_q: Query<'w, 's, (&'static mut BallState, &'static mut Transform), With<CricketBall>>,
     cam: ResMut<'w, CameraRig>,
 }
 
@@ -496,6 +510,23 @@ pub fn sys_ready(
             }
         }
     }
+
+    // Keep the ball pinned in the bowler's hand for the whole Ready/Aim
+    // wait — otherwise it stays wherever the last delivery ended up until
+    // the run-up's first frame snaps it into place.
+    let bowler_pos = Vec2::new(-geo::PITCH_HALF_LEN - 8.0, 0.35);
+    if let Ok((mut bs, mut tf)) = scene.ball_q.single_mut() {
+        let parked = Vec3::new(bowler_pos.x - 0.3, 1.6, bowler_pos.y + 0.25);
+        *bs = BallState {
+            pos: parked,
+            vel: Vec3::ZERO,
+            dead: true,
+            bounced: false,
+            struck: false,
+        };
+        tf.translation = parked;
+    }
+
     scene.cam.mode = if am.user_batting() {
         CamMode::BattingEnd
     } else {
@@ -504,7 +535,11 @@ pub fn sys_ready(
 
     if am.user_bowling() {
         if input.pressed(Action::Confirm) {
-            phase.0 = PhaseEnum::AimLength { t: 0.0, lock: None };
+            phase.0 = PhaseEnum::AimLength {
+                t: 0.0,
+                lock: None,
+                line: None,
+            };
         }
     } else if am.user_batting() {
         if ready_gate_should_release(*t, input.pressed(Action::Confirm)) {
@@ -514,6 +549,108 @@ pub fn sys_ready(
         // AI vs AI: brief beat, then automatic run-in.
         phase.0 = PhaseEnum::RunUp { p: 0.0 };
     }
+}
+
+// ---------------------------------------------------------------------------
+// Delivery variation (human parity with the AI's ai_plan variety)
+// ---------------------------------------------------------------------------
+
+/// A named delivery variation the bowler can pick before running in. The
+/// options offered depend on `BowlStyle` — see `variations_for`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DeliveryVariation {
+    #[default]
+    Stock,
+    Slower,
+    Bouncer,
+    Yorker,
+    Outswing,
+    Inswing,
+    ArmBall,
+    Topspin,
+    /// Off-spinner's wrong'un (turns the "wrong" way, like a leg-break).
+    Doosra,
+    /// Leg-spinner's skidding wrong'un (the leg-spin equivalent of a doosra).
+    Slider,
+}
+
+/// The variation menu appropriate to a bowling style, in cycle order.
+pub fn variations_for(style: BowlStyle) -> &'static [DeliveryVariation] {
+    use DeliveryVariation::*;
+    match style {
+        BowlStyle::Fast | BowlStyle::FastMedium | BowlStyle::Medium => {
+            &[Stock, Slower, Bouncer, Yorker, Outswing, Inswing]
+        }
+        BowlStyle::OffSpin => &[Stock, ArmBall, Topspin, Doosra],
+        BowlStyle::LegSpin => &[Stock, ArmBall, Topspin, Slider],
+    }
+}
+
+/// HUD/label text for a variation.
+pub fn variation_label(v: DeliveryVariation) -> &'static str {
+    match v {
+        DeliveryVariation::Stock => "Stock",
+        DeliveryVariation::Slower => "Slower ball",
+        DeliveryVariation::Bouncer => "Bouncer",
+        DeliveryVariation::Yorker => "Yorker",
+        DeliveryVariation::Outswing => "Outswinger",
+        DeliveryVariation::Inswing => "Inswinger",
+        DeliveryVariation::ArmBall => "Arm ball",
+        DeliveryVariation::Topspin => "Topspinner",
+        DeliveryVariation::Doosra => "Doosra",
+        DeliveryVariation::Slider => "Slider",
+    }
+}
+
+/// Cycle to the next variation available for `style`, wrapping around.
+/// If `current` isn't in that style's menu (e.g. the bowler changed),
+/// falls back to the first entry.
+pub fn next_variation(style: BowlStyle, current: DeliveryVariation) -> DeliveryVariation {
+    let opts = variations_for(style);
+    let idx = opts.iter().position(|&v| v == current).unwrap_or(0);
+    opts[(idx + 1) % opts.len()]
+}
+
+/// Where in the length-oscillation window (centre, amplitude) a variation
+/// aims, in the same `length_from_stumps` units as `build_plan` — small is
+/// full (yorker territory), large is short (bouncer territory).
+fn variation_length_window(variation: DeliveryVariation) -> (f32, f32) {
+    match variation {
+        DeliveryVariation::Bouncer => (12.0, 1.6),
+        DeliveryVariation::Yorker => (3.0, 1.2),
+        DeliveryVariation::Topspin
+        | DeliveryVariation::Doosra
+        | DeliveryVariation::Slider
+        | DeliveryVariation::ArmBall => (7.5, 3.0),
+        _ => (8.0, 5.5), // Stock / Slower / Outswing / Inswing: the classic full sweep
+    }
+}
+
+/// How much harder a variation is to land accurately, scaling the existing
+/// skill-based scatter in `sys_aim`. A yorker or bouncer from a poor bowler
+/// should sometimes end up a full toss or a wide; a stock ball shouldn't.
+fn variation_difficulty(variation: DeliveryVariation) -> f32 {
+    match variation {
+        DeliveryVariation::Stock => 1.0,
+        DeliveryVariation::Slower => 1.15,
+        DeliveryVariation::Outswing | DeliveryVariation::Inswing => 1.2,
+        DeliveryVariation::ArmBall => 1.15,
+        DeliveryVariation::Bouncer => 1.35,
+        DeliveryVariation::Topspin => 1.25,
+        DeliveryVariation::Doosra | DeliveryVariation::Slider => 1.4,
+        DeliveryVariation::Yorker => 1.5, // hardest to land: full and fast
+    }
+}
+
+/// The current variation selection while aiming, reset to `Stock` at the
+/// start of every human bowling turn (see `sys_ready`).
+#[derive(Resource, Default, Clone, Copy)]
+pub struct AimVariation(pub DeliveryVariation);
+
+/// 0..1 oscillating pace-meter value used for both the live marker and the
+/// HUD readout, so they never fall out of sync.
+pub fn aim_pace_value(t: f32) -> f32 {
+    (t * 1.6).sin() * 0.5 + 0.5
 }
 
 // ---------------------------------------------------------------------------
@@ -527,12 +664,13 @@ pub fn sys_aim(
     am: Option<Res<ActiveMatch>>,
     wd: Option<Res<WorldData>>,
     scene: Option<ResMut<MatchScene>>,
+    mut variation: ResMut<AimVariation>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut marker_q: Query<&mut Transform, With<AimMarker>>,
 ) {
-    let PhaseEnum::AimLength { t, lock } = &mut phase.0 else {
+    let PhaseEnum::AimLength { t, lock, line } = &mut phase.0 else {
         return;
     };
     let (Some(am), Some(wd), Some(scene)) = (am, wd, scene) else {
@@ -563,12 +701,18 @@ pub fn sys_aim(
             ))
             .id();
         scene.marker = Some(e);
+        // Fresh aim: start from the bowler's stock ball every time.
+        variation.0 = DeliveryVariation::Stock;
     }
 
-    let length = 8.0 + t.sin() * 5.5; // oscillates 2.5..13.5 m
-    match *lock {
-        None => {
-            // Stage 1: lock the length.
+    match (*lock, *line) {
+        (None, _) => {
+            // Stage 1: pick a variation (free, no lock needed) and lock the length.
+            if input.pressed(Action::CycleType) {
+                variation.0 = next_variation(style, variation.0);
+            }
+            let (center, amp) = variation_length_window(variation.0);
+            let length = (center + t.sin() * amp).max(1.5);
             if let Some(e) = scene.marker
                 && let Ok(mut tf) = marker_q.get_mut(e)
             {
@@ -579,7 +723,7 @@ pub fn sys_aim(
                 *lock = Some(length);
             }
         }
-        Some(locked_len) => {
+        (Some(locked_len), None) => {
             // Stage 2: sweep for line.
             let sweep = (*t * 1.4).sin() * 1.25;
             if let Some(e) = scene.marker
@@ -589,11 +733,27 @@ pub fn sys_aim(
                 tf.translation.z = sweep;
             }
             if input.pressed(Action::Confirm) {
-                let scatter = (1.0 - skill) * 0.5 + 0.08;
+                *line = Some(sweep);
+            }
+        }
+        (Some(locked_len), Some(locked_line)) => {
+            // Stage 3: oscillating pace meter, then release.
+            if let Some(e) = scene.marker
+                && let Ok(mut tf) = marker_q.get_mut(e)
+            {
+                tf.translation.x = geo::PITCH_HALF_LEN - locked_len;
+                tf.translation.z = locked_line;
+            }
+            if input.pressed(Action::Confirm) {
+                let pace = aim_pace_value(*t);
+                let scatter = ((1.0 - skill) * 0.5 + 0.08) * variation_difficulty(variation.0);
                 let plan = build_plan(
                     style,
-                    sweep + gauss() * scatter,
+                    locked_line + gauss() * scatter,
                     (locked_len + gauss() * scatter * 2.5).max(1.5),
+                    variation.0,
+                    pace,
+                    skill,
                 );
                 commands.insert_resource(CurrentDelivery(Some(plan)));
                 if let Some(e) = scene.marker.take() {
@@ -605,32 +765,83 @@ pub fn sys_aim(
     }
 }
 
-/// Build a DeliveryPlan from style + aimed line/length.
-pub fn build_plan(style: BowlStyle, line_z: f32, length_from_stumps: f32) -> DeliveryPlan {
-    let speed = style.base_speed() * 0.72; // playability scaling baked in
-    let swing = match style {
+/// Build a DeliveryPlan from style, aimed line/length, chosen variation and
+/// pace-meter fraction (0 = holding back, 1 = full effort).
+pub fn build_plan(
+    style: BowlStyle,
+    line_z: f32,
+    length_from_stumps: f32,
+    variation: DeliveryVariation,
+    pace_frac: f32,
+    skill: f32,
+) -> DeliveryPlan {
+    // Pace envelope as a fraction of the style's nominal top speed. `0.72`
+    // is the long-standing playability baseline (see history); a better
+    // bowler can push meaningfully harder off the same run-up, but nobody
+    // can exceed their style's `base_speed()` — that's the hard ceiling
+    // applied at the end.
+    let skill = skill.clamp(0.0, 1.0);
+    let min_mul = 0.72;
+    let max_mul = 0.72 + 0.22 * skill;
+    let speed_mul = min_mul + (max_mul - min_mul) * pace_frac.clamp(0.0, 1.0);
+    let mut speed = style.base_speed() * speed_mul;
+
+    let mut swing: f32 = match style {
         BowlStyle::Fast | BowlStyle::FastMedium => 0.9,
         BowlStyle::Medium => 0.4,
         BowlStyle::OffSpin => 0.15,
         BowlStyle::LegSpin => -0.15,
     };
-    let turn = match style {
+    let mut turn: f32 = match style {
         BowlStyle::OffSpin => 2.4,
         BowlStyle::LegSpin => -2.6,
         _ => 0.0,
     };
+
+    match variation {
+        DeliveryVariation::Stock => {}
+        DeliveryVariation::Slower => speed *= 0.78,
+        DeliveryVariation::Bouncer => swing *= 0.5,
+        DeliveryVariation::Yorker => {
+            swing *= 0.6;
+            speed *= 1.02;
+        }
+        DeliveryVariation::Outswing => swing = swing.abs() * 1.6,
+        DeliveryVariation::Inswing => swing = -swing.abs() * 1.6,
+        DeliveryVariation::ArmBall => turn *= 0.15, // skids on, barely turns
+        DeliveryVariation::Topspin => {
+            turn *= 0.35; // extra dip/bounce, less lateral turn
+            speed *= 0.95;
+        }
+        DeliveryVariation::Doosra => turn = -turn.abs() * 1.3, // turns the "wrong" way
+        DeliveryVariation::Slider => {
+            turn = turn.abs() * 0.2; // skids straight on
+            speed *= 1.05;
+        }
+    }
+    // Never exceed what the style/bowler realistically bowl at, whatever
+    // the pace meter + variation multipliers work out to.
+    speed = speed.min(style.base_speed());
+
+    let label = if variation == DeliveryVariation::Stock {
+        style.label().to_string()
+    } else {
+        variation_label(variation).to_string()
+    };
+
     DeliveryPlan {
         speed,
         line_z,
         length_from_stumps,
         swing,
         turn,
-        label: style.label().to_string(),
+        label,
         wide: line_z.abs() > 1.35,
     }
 }
 
-/// AI bowler plan with skill-based scatter and situational variety.
+/// AI bowler plan with skill-based scatter and situational variety, using
+/// the same variation menu the human player gets.
 fn ai_plan(bowler: &Player, pitch: crate::core::stadiums::PitchType) -> DeliveryPlan {
     let style = bowler.style.unwrap_or(BowlStyle::FastMedium);
     let skill = bowler.bowling as f32 / 100.0;
@@ -638,53 +849,64 @@ fn ai_plan(bowler: &Player, pitch: crate::core::stadiums::PitchType) -> Delivery
     // Line: usually tight, occasionally wider to set up
     let line = gauss() * 0.32 * scatter.max(0.25);
 
-    // Length variety: yorkers, bouncers, and pitch-aware fuller/shorter bias
-    let length = match style {
-        s if s.is_spin() => {
-            let roll = unit();
-            if roll < 0.14 {
-                3.2 + unit() * 1.6 // arm ball / yorker-ish
-            } else if roll < 0.82 {
-                6.2 + gauss() * 1.7 + pitch.turn_mul() * 0.22
-            } else {
-                9.2 + unit() * 2.4
-            }
-        }
-        _ => {
-            let roll = unit();
-            if roll < 0.09 {
-                2.0 + unit() * 1.3 // yorker
-            } else if roll < 0.20 {
-                12.2 + unit() * 1.6 // bouncer
-            } else {
-                7.0 + gauss() * 2.6
-            }
-        }
-    }
-    .clamp(2.0, 14.0)
+    let variation = ai_pick_variation(style);
+    let (center, amp) = variation_length_window(variation);
+    let length = (center
+        + gauss() * amp * 0.5
         + match pitch {
             crate::core::stadiums::PitchType::Green => -0.35,
             crate::core::stadiums::PitchType::Dusty => 0.45,
             _ => 0.0,
-        };
+        })
+    .clamp(2.0, 14.0);
 
-    let mut plan = build_plan(style, line, length.clamp(2.0, 14.0));
-    // Speed variation including slower balls for seamers
-    let mut speed_mul = 0.94 + unit() * 0.14;
-    if !style.is_spin() && unit() < 0.13 {
-        speed_mul *= 0.75;
-        plan.label = format!("{} (slower)", plan.label);
-    }
-    // Extra swing on green tops occasionally
+    // AI mostly bowls at a brisk, slightly varied pace off a skill-scaled ceiling.
+    let pace_frac = (0.55 + unit() * 0.4).clamp(0.0, 1.0);
+    let mut plan = build_plan(style, line, length, variation, pace_frac, skill);
+
+    // Extra swing on green tops occasionally, on top of the outswing/inswing bias.
     if matches!(style, BowlStyle::Fast | BowlStyle::FastMedium)
         && pitch == crate::core::stadiums::PitchType::Green
         && unit() < 0.32
     {
         plan.swing *= 1.7;
     }
-    plan.speed *= speed_mul;
     plan.wide = plan.line_z.abs() > 1.35;
     plan
+}
+
+/// Pick a delivery variation for the AI bowler, weighted so a stock ball is
+/// still the most common choice (mirrors the old length-distribution rolls:
+/// ~13% slower balls for seamers, ~9% yorkers, ~11% bouncers, occasional
+/// spin variations).
+fn ai_pick_variation(style: BowlStyle) -> DeliveryVariation {
+    use DeliveryVariation::*;
+    let roll = unit();
+    if style.is_spin() {
+        if roll < 0.55 {
+            Stock
+        } else if roll < 0.75 {
+            ArmBall
+        } else if roll < 0.90 {
+            Topspin
+        } else if style == BowlStyle::OffSpin {
+            Doosra
+        } else {
+            Slider
+        }
+    } else if roll < 0.55 {
+        Stock
+    } else if roll < 0.68 {
+        Slower
+    } else if roll < 0.80 {
+        Bouncer
+    } else if roll < 0.90 {
+        Yorker
+    } else if roll < 0.95 {
+        Outswing
+    } else {
+        Inswing
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,9 +1250,15 @@ pub fn sys_shot_input(
             );
         }
     } else if let (Some(am), Some(wd)) = (shot.am.as_ref(), shot.wd.as_ref())
+        && !user_batting
         && !shot.attempt.ai_scheduled
         && shot.rel.t > shot.rel.t_arrive - 0.45
     {
+        // `!user_batting` matters: without it, a human batter who simply
+        // leaves the ball (never presses Confirm) had this AI-swing
+        // scheduler fire on their behalf once the arrival window opened,
+        // silently playing a shot they never asked for — indistinguishable
+        // from "the ball hit me even though I didn't swing".
         shot.attempt.ai_scheduled = true;
         let batsman = am.striker(wd);
         let q = plan.quality_vs_batsman();
@@ -1203,6 +1431,29 @@ fn resolve_at_bat(
         );
         return None;
     };
+
+    // ---- Wide: never a batted trajectory ----
+    // `plan.wide` is decided at release time and is the single source of
+    // truth for "was this ball even fair to play at". Bug: previously a
+    // registered `attempt.offset` (e.g. the AI's speculative swing timer
+    // firing, or a human pressing Confirm) fell straight through to the
+    // clean-contact branch below with no regard for line, so a wide could
+    // come flying back off the bat exactly like a fair-ball boundary. Gate
+    // it here, before timing/tiering ever runs, so "struck" can only ever
+    // mean "struck at a fair ball".
+    if plan.wide {
+        resolve_unplayed_ball(
+            &mut ctx,
+            bs,
+            plan,
+            UnplayedCommentary {
+                bowled: "BOWLED!",
+                wide: "Wide! Well outside off, no shot to be offered there.",
+                dot: "Wide!",
+            },
+        );
+        return None;
+    }
 
     let ao = offset.abs();
     let profile = shot_profile(attempt.kind);
@@ -1834,7 +2085,6 @@ pub fn sys_runners(
 // ---------------------------------------------------------------------------
 
 pub fn sys_result_pause(
-    mut commands: Commands,
     time: Res<Time>,
     mut phase: ResMut<Phase>,
     am: Option<ResMut<ActiveMatch>>,
@@ -1866,11 +2116,176 @@ pub fn sys_result_pause(
 
     if am.state.result.is_some() {
         phase.0 = PhaseEnum::MatchOver;
-    } else if am.state.innings.over_complete() {
-        phase.0 = PhaseEnum::OverBreak { t: 0.0 };
     } else {
-        enter_ready(&mut commands, &mut phase.0);
+        // Route through the retrieval/return phase first — a fielder has
+        // to actually fetch and throw the ball back before the next
+        // delivery can start (bug: the ball used to just vanish here and
+        // reappear in the bowler's hand next round).
+        phase.0 = PhaseEnum::BallReturn {
+            t: 0.0,
+            then_over_break: am.state.innings.over_complete(),
+        };
     }
+}
+
+fn finish_ball_return(commands: &mut Commands, phase_enum: &mut PhaseEnum, then_over_break: bool) {
+    if then_over_break {
+        *phase_enum = PhaseEnum::OverBreak { t: 0.0 };
+    } else {
+        enter_ready(commands, phase_enum);
+    }
+}
+
+#[derive(SystemParam)]
+pub(crate) struct BallReturnParams<'w, 's> {
+    commands: Commands<'w, 's>,
+    ball_q: Query<'w, 's, (&'static mut BallState, &'static mut Transform), With<CricketBall>>,
+    fielders: Query<
+        'w,
+        's,
+        (
+            &'static Fielder,
+            &'static mut Brain,
+            &'static GlobalTransform,
+        ),
+    >,
+}
+
+/// Fetch-and-return: whoever is already chasing (or, failing that, whoever
+/// is nearest) walks to the dead ball, "carries" it home, then it flies the
+/// last stretch back to the bowler in a short animated throw. Bounded by
+/// [`BALL_RETURN_TIMEOUT`] so this can never hang the match.
+pub fn sys_ball_return(
+    time: Res<Time>,
+    mut phase: ResMut<Phase>,
+    mut p: BallReturnParams,
+    mut was_active: Local<bool>,
+    mut retriever: Local<Option<usize>>,
+    mut throw: Local<Option<(Vec3, f32)>>,
+) {
+    let PhaseEnum::BallReturn { t, then_over_break } = &mut phase.0 else {
+        *was_active = false;
+        return;
+    };
+    *t += time.delta_secs();
+    let t_now = *t;
+    let then_over_break = *then_over_break;
+
+    let bowler_pos = Vec2::new(-geo::PITCH_HALF_LEN - 8.0, 0.35);
+    let bowler_hand = Vec3::new(bowler_pos.x - 0.3, 1.6, bowler_pos.y + 0.25);
+
+    let Ok((mut bs, mut tf)) = p.ball_q.single_mut() else {
+        finish_ball_return(&mut p.commands, &mut phase.0, then_over_break);
+        *was_active = false;
+        return;
+    };
+
+    if !*was_active {
+        *was_active = true;
+        *throw = None;
+        // A struck ball already has a chaser dispatched from contact
+        // resolution — let them keep going. Otherwise (a wide, a leave, a
+        // dot ball nobody was sent after) send whoever is nearest to where
+        // it actually stopped.
+        let already = p
+            .fielders
+            .iter()
+            .find(|(_, b, _)| matches!(**b, Brain::Chase | Brain::Collect | Brain::Return))
+            .map(|(f, _, _)| f.slot);
+        *retriever = already;
+        if retriever.is_none() {
+            let rest = Vec2::new(bs.pos.x, bs.pos.z);
+            let nearest = p
+                .fielders
+                .iter()
+                .map(|(f, _, gt)| {
+                    let d = (Vec2::new(gt.translation().x, gt.translation().z) - rest).length();
+                    (f.slot, d)
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((slot, _)) = nearest {
+                *retriever = Some(slot);
+                for (f, mut brain, _) in &mut p.fielders {
+                    if f.slot == slot {
+                        *brain = Brain::Chase;
+                    }
+                }
+            }
+        }
+    }
+
+    if t_now >= BALL_RETURN_TIMEOUT {
+        bs.pos = bowler_hand;
+        bs.vel = Vec3::ZERO;
+        tf.translation = bowler_hand;
+        finish_ball_return(&mut p.commands, &mut phase.0, then_over_break);
+        *was_active = false;
+        return;
+    }
+
+    let retriever_state = retriever.and_then(|slot| {
+        p.fielders
+            .iter()
+            .find(|(f, _, _)| f.slot == slot)
+            .map(|(_, b, gt)| (*b, gt.translation()))
+    });
+
+    match (retriever_state, *throw) {
+        (Some((Brain::Collect, gt)), _) | (Some((Brain::Return, gt)), _) => {
+            // Carried in the fielder's hands on the walk back.
+            let carry = gt + Vec3::new(0.0, 1.1, 0.0);
+            bs.pos = carry;
+            tf.translation = carry;
+        }
+        (Some((Brain::AtPost, gt)), None) => {
+            // Just arrived home: kick off the final throw from here.
+            *throw = Some((gt + Vec3::new(0.0, 1.1, 0.0), t_now));
+        }
+        (_, Some((start, start_t))) => {
+            let u = ((t_now - start_t) / RETURN_THROW_SECS).clamp(0.0, 1.0);
+            let arc = (u * std::f32::consts::PI).sin() * 1.4; // short lob arc home
+            let pos = start.lerp(bowler_hand, u) + Vec3::new(0.0, arc, 0.0);
+            bs.pos = pos;
+            tf.translation = pos;
+            if u >= 1.0 {
+                finish_ball_return(&mut p.commands, &mut phase.0, then_over_break);
+                *was_active = false;
+            }
+        }
+        (None, _) => {
+            // No fielders in the world at all (e.g. a headless test scene)
+            // — nothing to animate, just hand the ball back.
+            finish_ball_return(&mut p.commands, &mut phase.0, then_over_break);
+            *was_active = false;
+        }
+        _ => {}
+    }
+}
+
+/// Automatic bowler rotation (v1 behaviour): cycles through the top-5
+/// bowlers by over number, nudging one slot along if that would repeat the
+/// bowler who just finished. Used for AI-fielding sides, and as the
+/// fallback if a human captain doesn't choose in time.
+fn automatic_bowler_pick(team: &Team, innings: &Innings) -> Option<usize> {
+    let opts = pick_bowlers(team, 5);
+    if opts.is_empty() {
+        return None;
+    }
+    let over = (innings.legal_balls / 6) as usize;
+    let mut idx = over % opts.len();
+    if Some(opts[idx]) == innings.previous_bowler && opts.len() > 1 {
+        idx = (idx + 1) % opts.len();
+    }
+    Some(opts[idx])
+}
+
+/// Cursor position to open the chooser on: the first eligible bowler in
+/// ranked order, or 0 if (pathologically) nobody is eligible.
+fn default_bowler_cursor(team: &Team, innings: &Innings, overs: u32) -> usize {
+    all_bowlers_ranked(team)
+        .iter()
+        .position(|&p| innings.bowler_eligible(p, overs))
+        .unwrap_or(0)
 }
 
 pub fn sys_over_break(
@@ -1892,19 +2307,81 @@ pub fn sys_over_break(
         return;
     }
 
-    // Rotate to the next bowler (v1: automatic selection).
-    let team = am.fielding_team(&wd);
-    let opts = crate::core::teams::pick_bowlers(team, 5);
-    if !opts.is_empty() {
-        let over = (am.state.innings.legal_balls / 6) as usize;
-        let mut idx = over % opts.len();
-        if Some(opts[idx]) == am.state.innings.previous_bowler && opts.len() > 1 {
-            idx = (idx + 1) % opts.len();
-        }
-        am.bowler_player = opts[idx];
-        am.state.innings.current_bowler = Some(opts[idx]);
+    if am.user_bowling() {
+        // Human captain: hand off to the chooser rather than picking for them.
+        let cursor =
+            default_bowler_cursor(am.fielding_team(&wd), &am.state.innings, am.state.overs);
+        phase.0 = PhaseEnum::BowlerSelect { t: 0.0, cursor };
+        return;
+    }
+
+    // AI-fielding side: automatic rotation (v1 behaviour, unchanged).
+    if let Some(next) = automatic_bowler_pick(am.fielding_team(&wd), &am.state.innings) {
+        am.bowler_player = next;
+        am.state.innings.current_bowler = Some(next);
     }
     enter_ready(&mut commands, &mut phase.0);
+}
+
+/// How long the human bowler-select screen waits before falling back to the
+/// automatic pick, so an idle player can never soft-lock the match.
+const BOWLER_SELECT_TIMEOUT: f32 = 12.0;
+
+/// Human-controlled bowler chooser between overs. Only entered when the
+/// player's side is fielding (see `sys_over_break`); AI sides never see it.
+pub fn sys_bowler_select(
+    mut commands: Commands,
+    time: Res<Time>,
+    input: Res<PlayerInput>,
+    mut phase: ResMut<Phase>,
+    am: Option<ResMut<ActiveMatch>>,
+    wd: Option<Res<WorldData>>,
+) {
+    let PhaseEnum::BowlerSelect { t, cursor } = &mut phase.0 else {
+        return;
+    };
+    let (Some(am), Some(wd)) = (am, wd) else {
+        return;
+    };
+    let am = am.into_inner();
+    *t += time.delta_secs();
+
+    let team = am.fielding_team(&wd);
+    let options = all_bowlers_ranked(team);
+    if options.is_empty() {
+        // No legal bowlers at all (shouldn't happen with 11-a-side rosters).
+        enter_ready(&mut commands, &mut phase.0);
+        return;
+    }
+    *cursor = (*cursor).min(options.len() - 1);
+
+    if input.pressed(Action::Next) {
+        *cursor = (*cursor + 1) % options.len();
+    }
+    if input.pressed(Action::Prev) {
+        *cursor = (*cursor + options.len() - 1) % options.len();
+    }
+
+    if *t >= BOWLER_SELECT_TIMEOUT {
+        if let Some(next) = automatic_bowler_pick(team, &am.state.innings) {
+            am.bowler_player = next;
+            am.state.innings.current_bowler = Some(next);
+        }
+        enter_ready(&mut commands, &mut phase.0);
+        return;
+    }
+
+    if input.pressed(Action::Confirm) {
+        let choice = options[*cursor];
+        // Reject illegal picks outright — no two overs in a row, no bowler
+        // over the one-fifth-of-overs cap. The player just stays on the
+        // screen and can pick again.
+        if am.state.innings.bowler_eligible(choice, am.state.overs) {
+            am.bowler_player = choice;
+            am.state.innings.current_bowler = Some(choice);
+            enter_ready(&mut commands, &mut phase.0);
+        }
+    }
 }
 
 pub fn sys_innings_break(
@@ -1930,7 +2407,9 @@ pub fn sys_innings_break(
     let chasing_idx = am.state.teams[1];
     let bowling_idx = am.state.teams[0];
     let order = batting_order(&wd.teams[chasing_idx]);
-    let bowlers = pick_bowlers(&wd.teams[bowling_idx], 5);
+    // Full roster, not just the top-5 automatic rotation — the human
+    // bowler-select screen needs every bowling-capable player carded up.
+    let bowlers = all_bowlers_ranked(&wd.teams[bowling_idx]);
     am.state.start_chase(order, &bowlers);
     am.bowler_player = bowlers[0];
     am.state.innings.current_bowler = Some(bowlers[0]);
@@ -2120,9 +2599,18 @@ pub fn sys_camera_modes(
             *was_pause = true;
             rig.mode = apply_result_pause_camera(t, &text, *eligible, am, &mut replay, &mut pres);
         }
-        PhaseEnum::OverBreak { .. } | PhaseEnum::InningsBreak | PhaseEnum::MatchOver => {
+        PhaseEnum::OverBreak { .. }
+        | PhaseEnum::BowlerSelect { .. }
+        | PhaseEnum::InningsBreak
+        | PhaseEnum::MatchOver => {
             rig.mode = CamMode::Broadcast;
             replay.active = false;
+        }
+        PhaseEnum::BallReturn { .. } => {
+            // Wide broadcast shot while the fielder walks/throws it home,
+            // rather than leaving whatever tight camera the result pause
+            // last chose pointed at nothing in particular.
+            rig.mode = CamMode::Broadcast;
         }
         PhaseEnum::MatchIntro { .. } => {
             rig.mode = CamMode::MatchIntro;
@@ -2244,6 +2732,8 @@ mod tests {
         app.update();
     }
 
+    /// User's team is `teams[1]` (fielding) here — the bowling-flow tests
+    /// (`sys_aim`, `sys_runup`, etc.) all rely on `user_bowling() == true`.
     fn minimal_active_match() -> ActiveMatch {
         let team = &builtin_teams()[0];
         let order = batting_order(team);
@@ -2254,6 +2744,15 @@ mod tests {
             user_team: Some(1),
             bowler_player: bowlers[0],
         }
+    }
+
+    /// Same as `minimal_active_match`, but the user's team is `teams[0]`
+    /// (batting), so the *other* side is fielding — used to exercise the
+    /// AI-automatic bowler rotation path.
+    fn minimal_active_match_ai_fielding() -> ActiveMatch {
+        let mut am = minimal_active_match();
+        am.user_team = Some(0);
+        am
     }
 
     /// Fielders carry both Figure and Fielder; overlapping Transform queries panic (B0001).
@@ -2330,15 +2829,100 @@ mod tests {
         }
     }
 
+    /// Bug 3: a wide must never produce a batted trajectory, even if a
+    /// shot attempt was somehow registered against it (an AI swing timer
+    /// firing, or a mistaken press). `plan.wide` has to be the authoritative
+    /// gate ahead of any timing/tier logic.
     #[test]
-    fn sys_over_break_waits_about_one_point_three_seconds() {
+    fn resolve_at_bat_never_bats_a_wide_even_with_an_attempt() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(minimal_active_match());
+        app.insert_resource(RecentBalls::default());
+        app.insert_resource(Phase(PhaseEnum::BallLive));
+
+        fn probe(
+            mut commands: Commands,
+            mut recent: ResMut<RecentBalls>,
+            mut phase: ResMut<Phase>,
+            mut am: ResMut<ActiveMatch>,
+        ) {
+            // Well outside the wide threshold (line_z.abs() > 1.35).
+            let plan = build_plan(
+                BowlStyle::Medium,
+                1.9,
+                7.0,
+                DeliveryVariation::Stock,
+                0.7,
+                0.7,
+            );
+            assert!(plan.wide, "test plan should be a wide");
+
+            let attempt = ShotAttempt {
+                pressed: true,
+                offset: Some(0.0), // perfect timing, i.e. "would have middled it"
+                loft: false,
+                dir_x: 0.0,
+                footwork: Footwork::Front,
+                kind: ShotKind::StraightDrive,
+                ai_scheduled: false,
+            };
+            let mut bs = BallState::new_release(
+                Vec3::new(BAT_PLANE_X, 0.9, plan.line_z),
+                Vec3::new(10.0, 0.0, 0.0),
+            );
+            let fielder_pos = vec![Vec2::ZERO; geo::FieldLayout::standard().positions.len()];
+            let layout = CurrentLayout(geo::FieldLayout::standard());
+
+            let chaser = resolve_at_bat(
+                &mut commands,
+                &mut recent,
+                &mut phase.0,
+                &mut am,
+                &plan,
+                &attempt,
+                &mut bs,
+                &fielder_pos,
+                &layout,
+                65.0,
+                0.7,
+            );
+            assert!(chaser.is_none(), "a wide should never dispatch a chaser");
+            assert!(!bs.struck, "a wide ball must never be marked struck");
+        }
+
+        app.add_systems(Update, probe);
+        app.update();
+
+        match &app.world().resource::<Phase>().0 {
+            PhaseEnum::ResultPause { text, .. } => {
+                assert!(
+                    text.to_uppercase().contains("WIDE"),
+                    "expected a wide result, got {text:?}"
+                );
+            }
+            other => panic!("expected ResultPause after a wide, got {other:?}"),
+        }
+        assert_eq!(
+            app.world()
+                .resource::<RecentBalls>()
+                .entries
+                .back()
+                .unwrap(),
+            "Wd"
+        );
+    }
+
+    #[test]
+    fn sys_over_break_waits_about_one_point_three_seconds_then_auto_rotates_for_ai() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_systems(Update, sys_over_break);
 
         app.world_mut()
             .insert_resource(Phase(PhaseEnum::OverBreak { t: 0.0 }));
-        app.world_mut().insert_resource(minimal_active_match());
+        app.world_mut()
+            .insert_resource(minimal_active_match_ai_fielding());
         app.world_mut().insert_resource(WorldData::new());
         app.world_mut().insert_resource(Assets::<Mesh>::default());
         app.world_mut()
@@ -2356,13 +2940,137 @@ mod tests {
                 PhaseEnum::ReadyToBall { .. }
             );
         }
-        assert!(ready, "over break should transition to ready");
+        assert!(
+            ready,
+            "AI-fielding over break should auto-rotate straight to ready"
+        );
         assert!(
             elapsed >= 1.25,
             "over break ended too quickly: {:.2}s",
             elapsed
         );
         assert!(elapsed < 1.45, "over break took too long: {:.2}s", elapsed);
+    }
+
+    #[test]
+    fn sys_over_break_hands_off_to_chooser_when_user_is_fielding() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, sys_over_break);
+
+        app.world_mut()
+            .insert_resource(Phase(PhaseEnum::OverBreak { t: 0.0 }));
+        app.world_mut().insert_resource(minimal_active_match());
+        app.world_mut().insert_resource(WorldData::new());
+        app.world_mut().insert_resource(Assets::<Mesh>::default());
+        app.world_mut()
+            .insert_resource(Assets::<StandardMaterial>::default());
+        prime_test_time(&mut app);
+
+        for _ in 0..30 {
+            advance_test_time(app.world_mut(), 0.05);
+            app.update();
+        }
+
+        match &app.world().resource::<Phase>().0 {
+            PhaseEnum::BowlerSelect { .. } => {}
+            other => panic!("expected BowlerSelect for a human-fielding over break, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sys_bowler_select_rejects_ineligible_and_accepts_eligible_choice() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, sys_bowler_select);
+
+        let wd = WorldData::new();
+        let mut am = minimal_active_match();
+        let ranked = all_bowlers_ranked(am.fielding_team(&wd));
+        // Force the top-ranked bowler to be ineligible (just bowled the last over).
+        am.state.innings.previous_bowler = Some(ranked[0]);
+        app.world_mut()
+            .insert_resource(Phase(PhaseEnum::BowlerSelect { t: 0.0, cursor: 0 }));
+        app.world_mut().insert_resource(am);
+        app.world_mut().insert_resource(WorldData::new());
+        app.world_mut().insert_resource(PlayerInput {
+            just_pressed: vec![Action::Confirm],
+            ..Default::default()
+        });
+        prime_test_time(&mut app);
+        advance_test_time(app.world_mut(), 0.05);
+        app.update();
+
+        // Cursor still on the ineligible top bowler: Confirm must be rejected.
+        match &app.world().resource::<Phase>().0 {
+            PhaseEnum::BowlerSelect { cursor, .. } => assert_eq!(*cursor, 0),
+            other => panic!("ineligible confirm should not advance the phase, got {other:?}"),
+        }
+        assert_eq!(
+            app.world()
+                .resource::<ActiveMatch>()
+                .state
+                .innings
+                .current_bowler,
+            None,
+            "an ineligible pick must never be applied"
+        );
+
+        // Move to the next (eligible) candidate and confirm again.
+        app.world_mut().resource_mut::<PlayerInput>().just_pressed = vec![Action::Next];
+        advance_test_time(app.world_mut(), 0.05);
+        app.update();
+        app.world_mut().resource_mut::<PlayerInput>().just_pressed = vec![Action::Confirm];
+        advance_test_time(app.world_mut(), 0.05);
+        app.update();
+
+        match &app.world().resource::<Phase>().0 {
+            PhaseEnum::ReadyToBall { .. } => {}
+            other => panic!("eligible confirm should hand off to ReadyToBall, got {other:?}"),
+        }
+        assert_eq!(
+            app.world()
+                .resource::<ActiveMatch>()
+                .state
+                .innings
+                .current_bowler,
+            Some(ranked[1])
+        );
+    }
+
+    #[test]
+    fn sys_bowler_select_times_out_to_automatic_pick() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, sys_bowler_select);
+
+        app.world_mut()
+            .insert_resource(Phase(PhaseEnum::BowlerSelect { t: 0.0, cursor: 0 }));
+        app.world_mut().insert_resource(minimal_active_match());
+        app.world_mut().insert_resource(WorldData::new());
+        app.world_mut().insert_resource(PlayerInput::default());
+        prime_test_time(&mut app);
+
+        let mut elapsed = 0.0_f32;
+        while elapsed < BOWLER_SELECT_TIMEOUT + 0.5 {
+            advance_test_time(app.world_mut(), 0.25);
+            elapsed += 0.25;
+            app.update();
+        }
+
+        match &app.world().resource::<Phase>().0 {
+            PhaseEnum::ReadyToBall { .. } => {}
+            other => panic!("timeout should fall back to the automatic pick, got {other:?}"),
+        }
+        assert!(
+            app.world()
+                .resource::<ActiveMatch>()
+                .state
+                .innings
+                .current_bowler
+                .is_some(),
+            "timeout fallback should still assign a bowler"
+        );
     }
 
     #[test]
@@ -2667,7 +3375,14 @@ mod tests {
 
     #[test]
     fn ai_batting_inputs_picks_short_ball_pull() {
-        let plan = build_plan(BowlStyle::Fast, 0.0, 12.5);
+        let plan = build_plan(
+            BowlStyle::Fast,
+            0.0,
+            12.5,
+            DeliveryVariation::Stock,
+            0.7,
+            0.7,
+        );
         let inputs = ai_batting_inputs(&plan, 0.85, 0.7, 0.5, 0.0, 1.0, || 0.5, |_| true)
             .expect("should swing");
         let kind = select_shot(inputs.0, inputs.1, inputs.2);
@@ -2679,7 +3394,14 @@ mod tests {
 
     #[test]
     fn ai_batting_inputs_defends_good_ball_when_not_chasing() {
-        let plan = build_plan(BowlStyle::Medium, 0.05, 7.2);
+        let plan = build_plan(
+            BowlStyle::Medium,
+            0.05,
+            7.2,
+            DeliveryVariation::Stock,
+            0.7,
+            0.7,
+        );
         let inputs = ai_batting_inputs(&plan, 0.8, 0.4, 0.9, 1.0, 1.0, || 0.1, |_| true)
             .expect("should swing");
         assert_eq!(inputs.0, Footwork::Planted);
@@ -2730,5 +3452,50 @@ mod tests {
             ),
             "confirm after grace should skip to ReadyToBall"
         );
+    }
+
+    /// A pull/hook-style shot travels leg-side-and-down-the-ground; the
+    /// fielder sent to fetch it must be on that side (deep midwicket),
+    /// never someone standing square on the off side. Regression check for
+    /// the coordinate hand-off between shot direction and fielder chase
+    /// (bug 2's "runs the wrong way").
+    #[test]
+    fn predict_outcome_sends_deep_midwicket_not_the_off_side() {
+        let layout = geo::FieldLayout::standard();
+        let fielder_pos: Vec<Vec2> = layout
+            .positions
+            .iter()
+            .map(|fp| fp.world_pos(geo::BATSMAN_POS))
+            .collect();
+        let deep_midwicket_slot = layout
+            .positions
+            .iter()
+            .position(|fp| fp.name == "Deep Midwicket")
+            .unwrap();
+
+        // Pull shot profile: angle -62 (leg side), elev 14, speed ~29.
+        let dir = crate::core::angle_dir(-62.0);
+        let speed = 29.0_f32;
+        let elev: f32 = 14.0;
+        let pos = Vec3::new(BAT_PLANE_X, 0.9, geo::BATSMAN_POS.y);
+        let vel = Vec3::new(
+            dir.x * speed,
+            elev.to_radians().sin() * speed,
+            dir.y * speed,
+        );
+
+        let pred = predict_outcome(pos, vel, &fielder_pos, 65.0);
+        let chaser = match pred {
+            Prediction::Runs { chaser, .. } => chaser,
+            Prediction::Caught { slot } => slot,
+            other => panic!("expected a ground/aerial fielding outcome, got {:?}", other),
+        };
+        assert_eq!(
+            chaser, deep_midwicket_slot,
+            "leg-side pull should send deep midwicket, not an off-side fielder"
+        );
+        // Whoever was picked must actually be on the leg side (negative
+        // relative z), matching BATSMAN_POS's leg-side convention.
+        assert!(fielder_pos[chaser].y < geo::BATSMAN_POS.y);
     }
 }

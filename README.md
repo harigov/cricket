@@ -5,6 +5,19 @@ inspired by the Big Ant Studios cricket titles. Play quick matches against
 the AI or compete in a knockout tournament across multiple stadiums, with
 full batting / bowling / fielding gameplay on both keyboard and gamepad.
 
+## Screenshots
+
+![Behind the batsman, waiting on the bowler](docs/screenshots/batting.jpg)
+
+*Behind the striker at the moment of release — MakeHuman player archetypes in
+composited team kit, a full fielding side set to the standard layout, and the
+broadcast scorebug tracking the over.*
+
+| | |
+|---|---|
+| ![Broadcast establishing shot over a city ground](docs/screenshots/stadium-day.jpg) | ![Broadcast establishing shot over a countryside ground](docs/screenshots/stadium-country.jpg) |
+| *The broadcast crane shot — a tiered bowl of ~450 posed spectators, sponsor hoardings and the skyline beyond.* | *Every ground gets its own world: the same crane shot at a countryside venue, with its own boundary size and pitch behaviour.* |
+
 ## Features
 
 - **Full match simulation** — T20-style matches (5/10/20 overs) with
@@ -15,16 +28,21 @@ full batting / bowling / fielding gameplay on both keyboard and gamepad.
 - **Batting** — timing-based shot play with a timing meter, leg/off-side
   aiming, lofted (risky) shots. Perfect/good/late/edge timing tiers drive
   shot power, elevation and direction; edges can be caught behind.
-- **Bowling** — two-stage aim mechanic (lock length, then line) with an
-  execution scatter based on bowler skill; AI batsmen punish bad balls and
-  respect match situation (required run rate pressure). Includes yorkers,
-  bouncers and slower balls.
+- **Bowling** — three-stage aim mechanic (lock length, then line, then pace)
+  with an execution scatter based on bowler skill, plus **delivery variations**
+  chosen per ball: slower ball, bouncer, yorker, out/inswing for the quicks;
+  arm ball, topspin, doosra/slider for the spinners. Harder variations scatter
+  more in weaker hands. AI batsmen punish bad balls and respect the match
+  situation (required run rate pressure).
 - **Fielding** — standard field layouts (keeper + 10 fielders), predictive
   chase AI, catches near the landing point, run-outs on risky second runs,
-  automatic running between wickets with run-bob animation.
+  automatic running between wickets with run-bob animation. Whoever is
+  nearest collects a ball that comes to rest and throws it back to the
+  bowler's end before the next delivery.
 - **Dismissals** — bowled, caught, caught behind, run out, plus wides.
 - **Match flow** — overs/wickets/balls bookkeeping, strike rotation,
-  over changes with bowler rotation, innings break, target chases,
+  over changes with a bowler chooser when you are in the field (the AI
+  rotates automatically), innings break, target chases,
   results & margins, end-of-match scorecard summary.
 - **Tournament mode** — 4-team knockout championship seeded across three
   stadiums; your matches are played, the rest are simulated by a
@@ -59,8 +77,11 @@ full batting / bowling / fielding gameplay on both keyboard and gamepad.
   `Xbot.glb` (MIT, via three.js `examples`) is retained as the source of the
   bundled idle/run mocap clips.
 - **Atmosphere** — procedural sky sphere (day: pale→deep blue, night:
-  starry navy with floodlights, `N` to toggle), distance fog, sun/moon +
-  4 floodlights, ball trail, camera shake, sponsor ribbons & crest pylons.
+  starry navy with floodlights, `N` to toggle), **aerial-perspective haze**
+  paired with a mild **depth-of-field** lens focused on whatever the camera
+  rig is aiming at — so the far boundary and crowd recede behind the action
+  instead of rendering as sharply as the stumps — sun/moon + 4 floodlights,
+  ball trail, camera shake, sponsor ribbons & crest pylons.
 - **Ground** — photoreal outfield grass albedo (embedded, ~4 m tile repeat,
   linear + mipmapped + 8× anisotropic filtering) with runtime mow-band tinting
   and stadium-specific hue; procedural dirt pitch (worn centre), PBR turf
@@ -98,10 +119,15 @@ All keyboard bindings can be changed in **Main → Settings**. Gamepad layout is
 ### Bowling sequence
 1. Press **Confirm** to start your run-up from the Ready screen.
 2. A marker sweeps down the pitch — press **Confirm** to lock the **length**.
+   Press **Cycle delivery** (`Q` / `X`) at any point to pick the variation.
 3. The marker then sweeps across — press **Confirm** to lock the **line**.
+4. A meter sweeps for **pace** — press **Confirm** to release. Top speed is
+   capped by the bowler's rating and style, so a spinner can't bowl 145 kph.
 
 Skillful timing keeps the ball on a good line and length; sloppy timing
-sprays it (wides get called).
+sprays it (wides get called). At the end of an over you pick the next bowler
+yourself, subject to the real limited-overs rules — nobody bowls two overs
+in succession, and nobody exceeds one fifth of the innings.
 
 ### Batting
 Watch the run-up, then press **Confirm** as the ball arrives at the bat.

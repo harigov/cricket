@@ -5,7 +5,7 @@ pub mod match_flow;
 
 use crate::core::rules::{BallOutcome, MatchState, Progression};
 use crate::core::stadiums::{PitchType, Stadium};
-use crate::core::teams::{Player, Team, batting_order, pick_bowlers};
+use crate::core::teams::{Player, Team, batting_order};
 use bevy::prelude::*;
 
 /// All static content (teams, stadiums).
@@ -95,10 +95,15 @@ pub enum PhaseEnum {
     ReadyToBall {
         t: f32,
     },
-    /// Human bowling: choosing length then line.
+    /// Human bowling: choosing length, then line, then pace.
     AimLength {
         t: f32,
+        /// Locked length (metres from stumps); None while still adjusting it.
         lock: Option<f32>,
+        /// Locked line offset; None while still adjusting it. Only
+        /// meaningful once `lock` is `Some`. Both `Some` means the pace
+        /// meter is the active stage.
+        line: Option<f32>,
     },
     /// Bowler running in. `p` 0..1.
     RunUp {
@@ -111,9 +116,26 @@ pub enum PhaseEnum {
         t: f32,
         text: String,
     },
+    /// A fielder (or the keeper) fetches the dead ball and throws it back
+    /// to the bowler's end before the next delivery can start. Bounded by
+    /// a timeout so a pathological chase can never soft-lock the match.
+    BallReturn {
+        t: f32,
+        /// Where to go once the ball is back: the over-break screen if
+        /// this was the sixth ball, otherwise straight to ReadyToBall.
+        then_over_break: bool,
+    },
     /// Between overs: pick next bowler.
     OverBreak {
         t: f32,
+    },
+    /// Between overs, human captain is fielding: choose the next bowler
+    /// from the eligible roster. AI-fielding sides never enter this state —
+    /// `sys_over_break` keeps the old automatic rotation for them.
+    BowlerSelect {
+        t: f32,
+        /// Cursor index into the ranked bowler list shown in the HUD.
+        cursor: usize,
     },
     InningsBreak,
     MatchOver,
@@ -266,6 +288,7 @@ impl Plugin for GameplayPlugin {
             .init_resource::<ReleaseInfo>()
             .init_resource::<ShotAttempt>()
             .init_resource::<RecentBalls>()
+            .init_resource::<match_flow::AimVariation>()
             .init_resource::<crate::render::camera_rig::BallRecording>()
             .init_resource::<crate::render::camera_rig::ReplayState>()
             .init_resource::<crate::render::camera_rig::PresentationState>()
@@ -292,7 +315,10 @@ pub fn build_active_match(setup: &MatchSetup, wd: &WorldData) -> ActiveMatch {
         (team_b, team_a)
     };
     let order = batting_order(bat_first);
-    let bowlers = pick_bowlers(bowl_first, 5);
+    // Give every bowling-capable player a card, not just the automatic
+    // top-5 rotation — the human bowler-select screen can turn to anyone
+    // in the squad once the frontline attack is out of overs.
+    let bowlers = crate::core::teams::all_bowlers_ranked(bowl_first);
     let mut state = MatchState::new(
         setup.overs,
         if setup.user_bats_first {
