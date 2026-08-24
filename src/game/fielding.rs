@@ -164,7 +164,15 @@ pub fn chase_system(
         let pos = Vec2::new(tf.translation.x, tf.translation.z);
 
         match *brain {
-            Brain::Chase if !ball_parked => {
+            // Bug: this used to be gated on `!ball_parked`, so a fielder
+            // still mid-sprint when the ball came to rest fell through to
+            // the `AtPost | Chase` idle branch below and froze facing the
+            // batsman instead of the ball — the "runs the wrong way, then
+            // we're told it's fielded anyway" report. A parked ball still
+            // has a well-defined position (just zero velocity), so the
+            // same intercept logic keeps working; it just walks straight
+            // at it once `ball.vel` drops out of the lead term.
+            Brain::Chase => {
                 let to_ball =
                     Vec2::new(ball.pos.x - tf.translation.x, ball.pos.z - tf.translation.z);
                 let dist = to_ball.length();
@@ -244,7 +252,7 @@ pub fn chase_system(
                     tf.rotation = Quat::from_rotation_y(yaw_to_face(dir));
                 }
             }
-            Brain::AtPost | Brain::Chase => {
+            Brain::AtPost => {
                 smooth_face_target(&mut tf, pos, look_target, dt);
             }
         }

@@ -75,6 +75,10 @@ struct ShotLegendText;
 struct SummaryRoot;
 #[derive(Component)]
 struct SummaryText;
+#[derive(Component)]
+struct BowlerSelectRoot;
+#[derive(Component)]
+struct BowlerSelectText;
 
 pub struct HudPlugin;
 
@@ -94,6 +98,7 @@ impl Plugin for HudPlugin {
                     update_broadcast_chip,
                     update_shot_direction,
                     update_shot_preview,
+                    update_bowler_select,
                 )
                     .run_if(in_state(AppState::InMatch)),
             );
@@ -168,6 +173,7 @@ fn spawn_hud(mut commands: Commands, assets: Res<AssetServer>) {
             spawn_shot_direction_indicator(p, &fonts);
             spawn_shot_preview(p, &fonts);
             spawn_shot_legend(p, &fonts);
+            spawn_bowler_select_panel(p, &fonts);
         });
 }
 
@@ -595,6 +601,36 @@ fn spawn_summary_panel(parent: &mut ChildSpawnerCommands, fonts: &UiFonts) {
         });
 }
 
+fn spawn_bowler_select_panel(parent: &mut ChildSpawnerCommands, fonts: &UiFonts) {
+    parent
+        .spawn((
+            BowlerSelectRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                top: percent(20),
+                left: percent(22),
+                width: percent(56),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexStart,
+                padding: UiRect::all(px(16)),
+                row_gap: px(4),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(palette::panel_bg()),
+            BorderColor::all(palette::panel_border()),
+            Visibility::Hidden,
+        ))
+        .with_children(|c| {
+            c.spawn((
+                BowlerSelectText,
+                label_text("", fonts.regular.clone(), 15.0, palette::text_primary()),
+                TextLayout::new_with_justify(Justify::Left),
+            ));
+        });
+}
+
 fn spawn_timing_meter(parent: &mut ChildSpawnerCommands, fonts: &UiFonts) {
     parent
         .spawn((
@@ -892,11 +928,15 @@ fn update_prompt(
     attempt: Res<ShotAttempt>,
     bindings: Res<KeyBindings>,
     input: Res<PlayerInput>,
+    variation: Option<Res<match_flow::AimVariation>>,
     mut root_q: Query<&mut Visibility, With<PromptRoot>>,
     mut text_q: Query<(&PromptField, &mut Text)>,
 ) {
     let confirm = action_label(Action::Confirm, &bindings, input.gamepad_connected);
     let loft = action_label(Action::Loft, &bindings, input.gamepad_connected);
+    let cycle = action_label(Action::CycleType, &bindings, input.gamepad_connected);
+    let prev = action_label(Action::Prev, &bindings, input.gamepad_connected);
+    let next = action_label(Action::Next, &bindings, input.gamepad_connected);
     let prompt = match &phase.0 {
         PhaseEnum::ReadyToBall { .. } => {
             match am.as_deref().map(|m| (m.user_bowling(), m.user_batting())) {
@@ -905,10 +945,30 @@ fn update_prompt(
                 _ => None,
             }
         }
-        PhaseEnum::AimLength { lock, .. } => match lock {
-            None => Some(("BOWLING", format!("PRESS {confirm} TO LOCK LENGTH"))),
-            Some(_) => Some(("BOWLING", format!("PRESS {confirm} TO LOCK LINE"))),
-        },
+        PhaseEnum::AimLength { t, lock, line } => {
+            let v = variation.as_deref().copied().unwrap_or_default().0;
+            let vlabel = match_flow::variation_label(v);
+            match (lock, line) {
+                (None, _) => Some((
+                    "BOWLING",
+                    format!("{vlabel}  •  {cycle} CYCLE DELIVERY  •  {confirm} LOCK LENGTH"),
+                )),
+                (Some(_), None) => {
+                    Some(("BOWLING", format!("{vlabel}  •  {confirm} TO LOCK LINE")))
+                }
+                (Some(_), Some(_)) => {
+                    let pct = (match_flow::aim_pace_value(*t) * 100.0).round() as i32;
+                    Some((
+                        "BOWLING",
+                        format!("{vlabel}  •  PACE {pct}%  •  {confirm} TO BOWL"),
+                    ))
+                }
+            }
+        }
+        PhaseEnum::BowlerSelect { .. } => Some((
+            "FIELDING",
+            format!("{prev}/{next} SELECT BOWLER  •  {confirm} CONFIRM"),
+        )),
         PhaseEnum::BallLive => {
             if am.as_deref().map(|m| m.user_batting()).unwrap_or(false) {
                 Some((
@@ -1280,4 +1340,66 @@ fn update_summary(
         best_bowler,
         "SPACE to continue"
     );
+}
+
+/// Populates the human bowler-select screen: name, style, overs bowled,
+/// runs, wickets, and an eligibility note for anyone the captain can't
+/// legally turn to (no consecutive overs, one-fifth-of-overs cap).
+fn update_bowler_select(
+    phase: Res<Phase>,
+    am: Option<Res<ActiveMatch>>,
+    wd: Option<Res<WorldData>>,
+    bindings: Res<KeyBindings>,
+    input: Res<PlayerInput>,
+    mut root_q: Query<&mut Visibility, With<BowlerSelectRoot>>,
+    mut text_q: Query<&mut Text, With<BowlerSelectText>>,
+) {
+    let Ok(mut vis) = root_q.single_mut() else {
+        return;
+    };
+    let PhaseEnum::BowlerSelect { cursor, .. } = &phase.0 else {
+        *vis = Visibility::Hidden;
+        return;
+    };
+    let (Some(am), Some(wd)) = (am.as_deref(), wd.as_deref()) else {
+        *vis = Visibility::Hidden;
+        return;
+    };
+    *vis = Visibility::Visible;
+    let Ok(mut txt) = text_q.single_mut() else {
+        return;
+    };
+
+    let team = am.fielding_team(wd);
+    let options = crate::core::teams::all_bowlers_ranked(team);
+    let mut lines = vec!["SELECT NEXT BOWLER".to_string(), String::new()];
+    for (i, &p) in options.iter().enumerate() {
+        let player = &team.players[p];
+        let card = am.state.innings.bowler_card_of(p);
+        let overs_str = format!("{}.{}", card.balls / 6, card.balls % 6);
+        let eligible = am.state.innings.bowler_eligible(p, am.state.overs);
+        let marker = if i == *cursor { ">" } else { " " };
+        let status = if eligible {
+            ""
+        } else if Some(p) == am.state.innings.previous_bowler {
+            "  (bowled last over)"
+        } else {
+            "  (overs used up)"
+        };
+        lines.push(format!(
+            "{marker} {:<16} {:<11} O:{:>5}  R:{:>3}  W:{:>2}{status}",
+            player.name,
+            player.style.map(|s| s.label()).unwrap_or("-"),
+            overs_str,
+            card.runs,
+            card.wickets,
+        ));
+    }
+    lines.push(String::new());
+    let prev = action_label(Action::Prev, &bindings, input.gamepad_connected);
+    let next = action_label(Action::Next, &bindings, input.gamepad_connected);
+    let confirm = action_label(Action::Confirm, &bindings, input.gamepad_connected);
+    lines.push(format!("{prev}/{next} MOVE   {confirm} CONFIRM"));
+
+    **txt = lines.join("\n");
 }

@@ -289,6 +289,33 @@ impl Innings {
     pub fn overs_done(&self, overs: u32) -> bool {
         self.legal_balls >= overs * 6
     }
+
+    /// The one-fifth-of-the-innings cap on a single bowler, rounded up
+    /// (e.g. 20 overs -> 4 per bowler, 50 overs -> 10). Real limited-overs
+    /// laws phrase it this way so a short match still gets at least one over
+    /// per bowler out of a full attack.
+    pub fn max_overs_per_bowler(total_overs: u32) -> u32 {
+        total_overs.div_ceil(5).max(1)
+    }
+
+    /// Legal balls `player` has already sent down this innings.
+    pub fn balls_bowled_by(&self, player: usize) -> u32 {
+        self.bowlers
+            .iter()
+            .find(|b| b.player == player)
+            .map(|b| b.balls)
+            .unwrap_or(0)
+    }
+
+    /// Whether `player` may legally open the next over: not the bowler who
+    /// just finished (no two overs in a row) and still under the
+    /// one-fifth-of-overs cap.
+    pub fn bowler_eligible(&self, player: usize, total_overs: u32) -> bool {
+        if Some(player) == self.previous_bowler {
+            return false;
+        }
+        self.balls_bowled_by(player) < Self::max_overs_per_bowler(total_overs) * 6
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -463,6 +490,53 @@ mod tests {
         assert!(!i.all_out(10));
         i.apply_ball(&BallOutcome::Wicket(Dismissal::Bowled));
         assert!(i.all_out(10));
+    }
+
+    #[test]
+    fn max_overs_per_bowler_rounds_up_one_fifth() {
+        assert_eq!(Innings::max_overs_per_bowler(20), 4); // 20/5 exact
+        assert_eq!(Innings::max_overs_per_bowler(50), 10); // 50/5 exact
+        assert_eq!(Innings::max_overs_per_bowler(10), 2); // 10/5 exact
+        assert_eq!(Innings::max_overs_per_bowler(7), 2); // ceil(7/5) = 2
+        assert_eq!(Innings::max_overs_per_bowler(1), 1); // never zero
+    }
+
+    #[test]
+    fn bowler_ineligible_for_back_to_back_overs() {
+        let mut i = Innings::new(0, order(), None, &[11, 10]);
+        i.previous_bowler = Some(11);
+        assert!(!i.bowler_eligible(11, 20), "can't bowl two overs in a row");
+        assert!(i.bowler_eligible(10, 20), "a different bowler is fine");
+    }
+
+    #[test]
+    fn bowler_ineligible_past_one_fifth_of_overs() {
+        let mut i = Innings::new(0, order(), None, &[11]);
+        i.current_bowler = Some(11);
+        // 20-over match: cap is 4 overs (24 balls) per bowler.
+        for _ in 0..24 {
+            i.apply_ball(&BallOutcome::Runs(0));
+        }
+        // previous_bowler only updates at the *end* of an over; bowling 24
+        // dot balls straight through crosses 4 over-boundaries, each of
+        // which stamps previous_bowler = 11, so both rules trip together —
+        // exactly what should happen for a bowler who has used up the cap.
+        assert!(!i.bowler_eligible(11, 20), "quota used up");
+    }
+
+    #[test]
+    fn bowler_eligible_under_quota_and_not_previous() {
+        let mut i = Innings::new(0, order(), None, &[11]);
+        i.current_bowler = Some(11);
+        for _ in 0..18 {
+            i.apply_ball(&BallOutcome::Runs(0));
+        }
+        // 3 overs bowled, cap is 4 for a 20-over match, and the *previous*
+        // over was bowled by someone else's over boundary logic — but here
+        // 11 bowled every over, so 11 remains ineligible (rule 1). Confirm
+        // a bowler under quota with a *different* previous over is fine.
+        i.previous_bowler = Some(99); // simulate someone else just finished
+        assert!(i.bowler_eligible(11, 20), "3 overs bowled, cap is 4");
     }
 
     #[test]

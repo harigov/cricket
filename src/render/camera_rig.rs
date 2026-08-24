@@ -1,12 +1,60 @@
 //! Camera rig: broadcast-style direction with telephoto gameplay lenses,
 //! impact cuts, boundary cameras and slow-motion replays.
 
+use bevy::post_process::dof::{DepthOfField, DepthOfFieldMode};
 use bevy::prelude::*;
 
 use crate::core::geometry;
 use crate::game::ball::CricketBall;
 use crate::render::ring_geometry::floodlight_radius;
 use crate::render::stadium::BowlLayout;
+
+/// Aperture for the gameplay lens. Broadcast cricket is shot on long glass
+/// wide open, so the crowd behind the action goes soft while the strip stays
+/// sharp. Faster than this and the near stumps start to defocus too.
+const DOF_APERTURE_F_STOPS: f32 = 3.2;
+/// Hard ceiling on the blur radius, in pixels.
+///
+/// This — not the aperture — is what keeps the effect honest. The circle of
+/// confusion grows without bound as depth increases, and the sky dome sits at
+/// `SKY_RADIUS` (600 m), so an uncapped lens would smear the far stands into
+/// a tilt-shift toy. 9 px reads as "a little blur" at 1080p, which is what the
+/// far bowl needs to sit behind the action rather than beside it.
+const DOF_MAX_BLUR_PX: f32 = 9.0;
+/// Treat anything past this as equally far away.
+///
+/// The renderer considers the sky dome infinitely distant, which would peg the
+/// circle of confusion at the cap and give the sky a uniform smear. Clamping
+/// at roughly the far side of the bowl keeps the horizon coherent.
+const DOF_MAX_DEPTH: f32 = 260.0;
+/// Focus never racks nearer than this, so a ball passing the lens on a
+/// follow-cam cannot throw the whole ground out of focus.
+const DOF_MIN_FOCAL_DISTANCE: f32 = 6.0;
+
+/// Distance the lens should focus at, given where the rig sits and aims.
+fn focus_distance(pos: Vec3, look: Vec3) -> f32 {
+    pos.distance(look).max(DOF_MIN_FOCAL_DISTANCE)
+}
+
+/// Depth of field for the gameplay camera.
+///
+/// Aerial haze alone leaves the boundary and crowd pin-sharp — it shifts their
+/// colour but not their acuity, so they still read as being on the same plane
+/// as the batsman. A mild defocus is what actually pushes them back.
+pub fn gameplay_depth_of_field() -> DepthOfField {
+    DepthOfField {
+        // Gaussian rather than Bokeh: cheaper, and this is a background-
+        // separation effect, not a highlight-shaping one.
+        mode: DepthOfFieldMode::Gaussian,
+        // Overwritten every frame by `update_camera` from the rig's own aim
+        // point; this is only the value for the pre-match startup camera.
+        focal_distance: 30.0,
+        aperture_f_stops: DOF_APERTURE_F_STOPS,
+        max_circle_of_confusion_diameter: DOF_MAX_BLUR_PX,
+        max_depth: DOF_MAX_DEPTH,
+        ..default()
+    }
+}
 
 /// Batting-end camera height: 12 ft in metres (12 × 0.3048).
 const BATTING_CAM_HEIGHT_M: f32 = 3.6576;
@@ -220,7 +268,7 @@ pub fn update_camera(
     replay: Res<ReplayState>,
     recording: Res<BallRecording>,
     mut rig: ResMut<CameraRig>,
-    mut cam: Query<(&mut Transform, &mut Projection), With<Camera3d>>,
+    mut cam: Query<(&mut Transform, &mut Projection, Option<&mut DepthOfField>), With<Camera3d>>,
 ) {
     let ball_pos = ball_q.iter().next().map(|t| t.translation);
     let replay_pos = if replay.active {
@@ -281,11 +329,19 @@ pub fn update_camera(
         );
     }
 
-    if let Ok((mut tf, mut proj)) = cam.single_mut() {
+    if let Ok((mut tf, mut proj, dof)) = cam.single_mut() {
         tf.translation = pos;
         tf.look_at(look, Vec3::Y);
         if let Projection::Perspective(p) = &mut *proj {
             p.fov = rig.fov.to_radians();
+        }
+        // Focus on whatever the rig is already aiming at. Every mode — the
+        // 10 ft batting lens, the fixed bowling-end lens, the follow-ball cam
+        // and the 230 m establishing crane — computes its own `look` point, so
+        // deriving focus from it keeps the subject sharp without a per-mode
+        // table that would drift out of sync with `mode_view`.
+        if let Some(mut dof) = dof {
+            dof.focal_distance = focus_distance(pos, look);
         }
     }
 }
@@ -313,6 +369,58 @@ pub fn sample_recording(recording: &[(f32, Vec3)], t: f32) -> Option<Vec3> {
 mod tests {
     use super::*;
     use crate::core::geometry;
+
+    /// The far bowl must actually sit outside the depth of field, otherwise
+    /// the lens is decoration: the whole complaint was that the boundary and
+    /// crowd render as sharply as the stumps.
+    #[test]
+    fn every_playable_lens_focuses_nearer_than_the_far_side_of_the_ground() {
+        let br = geometry::DEFAULT_BOUNDARY_RADIUS;
+        for mode in [
+            CamMode::BattingEnd,
+            CamMode::BowlingEnd,
+            CamMode::Broadcast,
+            CamMode::FollowBall,
+        ] {
+            let (pos, look, _) = mode_view(mode, None, br, None);
+            let focus = focus_distance(pos, look);
+            assert!(
+                focus >= DOF_MIN_FOCAL_DISTANCE,
+                "{mode:?} focuses too near: {focus}"
+            );
+            // Distance from the lens to the far rope, i.e. the crowd behind
+            // the action. Focus must land in front of it for the fence and
+            // stands to defocus at all.
+            let far_side = pos.distance(Vec3::ZERO) + br;
+            assert!(
+                focus < far_side,
+                "{mode:?} focus {focus} is not in front of the far boundary {far_side}"
+            );
+        }
+    }
+
+    /// Guard the blur ceiling: uncapped, the sky dome at 600 m would smear the
+    /// horizon and turn the ground into a tilt-shift model.
+    #[test]
+    fn depth_of_field_blur_stays_mild_and_bounded() {
+        let dof = gameplay_depth_of_field();
+        assert_eq!(dof.mode, DepthOfFieldMode::Gaussian);
+        assert!(
+            (1.0..=32.0).contains(&dof.aperture_f_stops),
+            "aperture out of photographic range: {}",
+            dof.aperture_f_stops
+        );
+        assert!(
+            dof.max_circle_of_confusion_diameter <= 12.0,
+            "blur cap too aggressive for 'a little blur': {}",
+            dof.max_circle_of_confusion_diameter
+        );
+        assert!(
+            dof.max_depth.is_finite() && dof.max_depth < crate::SKY_RADIUS,
+            "max_depth must clamp short of the sky dome: {}",
+            dof.max_depth
+        );
+    }
 
     #[test]
     fn broadcast_pulls_back_beyond_boundary() {

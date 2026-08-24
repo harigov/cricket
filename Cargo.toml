@@ -26,6 +26,10 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "gltf_animation",
     "bevy_log",
     "bevy_pbr",
+    # Depth of field lives behind this feature. Aerial haze alone cannot sell
+    # distance — it desaturates the far bowl but leaves it pin-sharp — so the
+    # gameplay camera pairs the fog with a mild defocus (see `update_camera`).
+    "bevy_post_process",
     "bevy_render",
     "bevy_scene",
     "bevy_sprite",

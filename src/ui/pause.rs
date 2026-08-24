@@ -13,7 +13,7 @@ struct PauseRoot;
 #[derive(Component)]
 struct PauseList;
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 enum PauseScreen {
     #[default]
     Root,
@@ -104,12 +104,18 @@ impl Plugin for PausePlugin {
             )
             .add_systems(
                 Update,
+                // Chained (not an unordered tuple) so each frame is
+                // deterministic: read input -> mutate pause/menu state ->
+                // spawn/despawn the overlay -> redraw its rows. See
+                // `toggle_pause` and `sync_pause_overlay` for why the order
+                // specifically matters here.
                 (
                     toggle_pause,
-                    spawn_pause_ui,
-                    refresh_pause_ui,
                     handle_pause_input,
+                    sync_pause_overlay,
+                    refresh_pause_ui,
                 )
+                    .chain()
                     .run_if(in_state(AppState::InMatch).and(resource_exists::<ActiveMatch>)),
             );
     }
@@ -138,7 +144,11 @@ fn toggle_pause(
         return;
     }
     if paused.0 {
-        // Esc only resumes from the root page; sub-pages handle their own back.
+        // Esc only resumes from the root page; sub-pages handle their own
+        // back. This reads `menu.screen` as it was at the *start* of the
+        // frame (this system runs first in the chain) so an Esc that
+        // `handle_pause_input` uses to step back out of Settings can never
+        // also be seen as "Esc from Root" and unpause in the same frame.
         if menu.screen == PauseScreen::Root {
             paused.0 = false;
         }
@@ -147,16 +157,10 @@ fn toggle_pause(
     }
 }
 
-fn spawn_pause_ui(
-    mut commands: Commands,
-    paused: Res<MatchPaused>,
-    assets: Res<AssetServer>,
-    existing: Query<(), With<PauseRoot>>,
-) {
-    if !paused.0 || !existing.is_empty() {
-        return;
-    }
-    let fonts = UiFonts::load(&assets);
+/// Spawn the overlay entity tree. Callers must ensure it isn't already
+/// present (see `sync_pause_overlay`).
+fn spawn_pause_root(commands: &mut Commands, assets: &AssetServer) {
+    let fonts = UiFonts::load(assets);
     commands
         .spawn((
             PauseRoot,
@@ -178,7 +182,7 @@ fn spawn_pause_ui(
                     flex_direction: FlexDirection::Column,
                     padding: UiRect::all(px(28.0)),
                     row_gap: px(10.0),
-                    min_width: px(520.0),
+                    min_width: px(560.0),
                     border: UiRect::all(px(2.0)),
                     ..default()
                 },
@@ -214,72 +218,140 @@ fn despawn_pause_ui(mut commands: Commands, roots: Query<Entity, With<PauseRoot>
     }
 }
 
-fn settings_tab_strip(active: SettingsTab) -> String {
-    const TABS: [SettingsTab; 3] = [
-        SettingsTab::Audio,
-        SettingsTab::Controls,
-        SettingsTab::Camera,
-    ];
-    let parts = TABS
-        .iter()
-        .map(|tab| {
-            let label = tab.label();
-            if *tab == active {
-                format!("[ {label} ]")
-            } else {
-                format!("  {label}  ")
-            }
-        })
-        .collect::<Vec<_>>();
-    format!("{}   (←/→ or Q/C switch tab)", parts.join(""))
+/// Keep the overlay entity in sync with `MatchPaused`, whichever upstream
+/// system flipped it this frame (`toggle_pause` on Esc, or a Confirm on the
+/// "Resume" row inside `handle_pause_input`). This is what actually fixes
+/// the "settings menu stays around after resuming" bug: previously nothing
+/// ever despawned `PauseRoot` except leaving `AppState::InMatch` entirely,
+/// so unpausing mid-match left the overlay on screen forever.
+///
+/// Runs last-but-one in the chain (before `refresh_pause_ui`) so it always
+/// observes the frame's final `paused.0`, regardless of which system in
+/// this chain changed it.
+fn sync_pause_overlay(
+    mut commands: Commands,
+    paused: Res<MatchPaused>,
+    assets: Res<AssetServer>,
+    roots: Query<Entity, With<PauseRoot>>,
+    mut menu: ResMut<PauseMenuState>,
+    mut rebind: ResMut<RebindState>,
+) {
+    if paused.0 {
+        if roots.is_empty() {
+            spawn_pause_root(&mut commands, &assets);
+        }
+        return;
+    }
+
+    // Not paused (any longer): drop the overlay if it's still there, and
+    // reset the menu so the *next* time the player opens Esc they land on
+    // the root page rather than wherever they last left Settings.
+    for e in &roots {
+        commands.entity(e).despawn();
+    }
+    reset_pause_state(&mut menu, &mut rebind);
 }
 
-fn pause_lines(
+/// Reset menu navigation back to the root page and clear any in-flight key
+/// rebind. Pulled out of `sync_pause_overlay` so it can be unit tested
+/// without needing a full `App` (and an `AssetServer`, which the system
+/// also requires but this reset logic doesn't touch).
+fn reset_pause_state(menu: &mut PauseMenuState, rebind: &mut RebindState) {
+    *menu = PauseMenuState::default();
+    rebind.0 = None;
+}
+
+/// One renderable row of the pause / settings menu.
+///
+/// This replaced a `Vec<String>` built with manual `format!` space padding
+/// (`format!("{label:16} : {key_str}")`) — that only lines up in a
+/// monospace font, and this UI uses a proportional one. Each variant here
+/// maps to a real flexbox row in `spawn_pause_row` instead of padded text.
+enum PauseRow {
+    /// Full-width selectable action button (Resume, Back, Reset…).
+    Action(String),
+    /// The Audio / Controls / Camera tab strip.
+    Tabs(SettingsTab),
+    /// Non-interactive info strip. Still occupies a selectable slot so
+    /// ←/→ can switch tabs from it (see `settings_tab_switch_row`).
+    Hint(String),
+    /// label | value chip | optional hint, laid out as a grid row.
+    KeyValue {
+        label: String,
+        value: String,
+        hint: Option<String>,
+        /// Highlight the value chip (a rebind is in progress for this row).
+        active: bool,
+    },
+}
+
+fn pause_rows(
     menu: &PauseMenuState,
     bindings: &KeyBindings,
     audio: &AudioSettings,
     rebind: &RebindState,
     ui: &UiPreferences,
     rig: &CameraRig,
-) -> Vec<String> {
+) -> Vec<PauseRow> {
     match menu.screen {
         PauseScreen::Root => vec![
-            "Resume".into(),
-            "Settings".into(),
-            "Controls".into(),
-            "Quit to Main Menu".into(),
+            PauseRow::Action("Resume".into()),
+            PauseRow::Action("Settings".into()),
+            PauseRow::Action("Controls".into()),
+            PauseRow::Action("Quit to Main Menu".into()),
         ],
         PauseScreen::Settings => {
-            let mut out = vec![settings_tab_strip(menu.settings_tab)];
+            // Row order/index here MUST match `settings_item_count` and the
+            // `menu.sel` arithmetic in `handle_settings_input` (tab strip is
+            // always row 0; Controls additionally reserves row 1 for the
+            // rebind hint).
+            let mut out = vec![PauseRow::Tabs(menu.settings_tab)];
             match menu.settings_tab {
                 SettingsTab::Audio => {
-                    out.push(format!(
-                        "Master Volume : {:>3}%  (←/→ adjust)",
-                        (audio.master * 100.0) as i32
-                    ));
-                    out.push(format!(
-                        "SFX Volume    : {:>3}%  (←/→ adjust)",
-                        (audio.sfx * 100.0) as i32
-                    ));
-                    out.push(format!(
-                        "Music Volume  : {:>3}%  (←/→ adjust)",
-                        (audio.music * 100.0) as i32
-                    ));
-                    out.push(format!(
-                        "Commentary Vol: {:>3}%  (←/→ adjust)",
-                        (audio.commentary_volume * 100.0) as i32
-                    ));
+                    out.push(PauseRow::KeyValue {
+                        label: "Master Volume".into(),
+                        value: format!("{:>3}%", (audio.master * 100.0) as i32),
+                        hint: Some("←/→ adjust".into()),
+                        active: false,
+                    });
+                    out.push(PauseRow::KeyValue {
+                        label: "SFX Volume".into(),
+                        value: format!("{:>3}%", (audio.sfx * 100.0) as i32),
+                        hint: Some("←/→ adjust".into()),
+                        active: false,
+                    });
+                    out.push(PauseRow::KeyValue {
+                        label: "Music Volume".into(),
+                        value: format!("{:>3}%", (audio.music * 100.0) as i32),
+                        hint: Some("←/→ adjust".into()),
+                        active: false,
+                    });
+                    out.push(PauseRow::KeyValue {
+                        label: "Commentary Vol".into(),
+                        value: format!("{:>3}%", (audio.commentary_volume * 100.0) as i32),
+                        hint: Some("←/→ adjust".into()),
+                        active: false,
+                    });
                     let comm_label = match audio.commentary {
                         CommentaryVoice::Off => "Off",
                         CommentaryVoice::Male => "Ryan (M lead)",
                         CommentaryVoice::Female => "Natasha (F lead)",
                     };
-                    out.push(format!("Commentary Voice : {comm_label:16} (←/→ cycle)"));
+                    out.push(PauseRow::KeyValue {
+                        label: "Commentary Voice".into(),
+                        value: comm_label.into(),
+                        hint: Some("←/→ cycle".into()),
+                        active: false,
+                    });
                 }
                 SettingsTab::Controls => {
-                    out.push("SPACE  rebind selected     ←/→ or Q/C  switch tab".into());
+                    out.push(PauseRow::Hint(
+                        "SPACE rebind selected   ·   ←/→ or Q/C switch tab".into(),
+                    ));
                     for (action, label) in SETTINGS_ACTIONS {
-                        let key_str = if rebind.0 == Some(*action) {
+                        let row_idx = out.len();
+                        let rebinding = rebind.0 == Some(*action);
+                        let value = if rebinding {
                             "Press any key...".to_string()
                         } else {
                             bindings
@@ -288,26 +360,42 @@ fn pause_lines(
                                 .map(|k| key_label(*k))
                                 .unwrap_or_else(|| "-".into())
                         };
-                        out.push(format!("{label:16} : {key_str}"));
+                        // Only surface the rebind hint on the selected row,
+                        // and not while it's already mid-rebind (the chip
+                        // text itself says "Press any key..." then).
+                        let hint = (!rebinding && row_idx == menu.sel)
+                            .then(|| "Press Space to rebind".to_string());
+                        out.push(PauseRow::KeyValue {
+                            label: (*label).into(),
+                            value,
+                            hint,
+                            active: rebinding,
+                        });
                     }
-                    out.push("Reset controls to defaults".into());
+                    out.push(PauseRow::Action("Reset controls to defaults".into()));
                 }
                 SettingsTab::Camera => {
-                    out.push(format!(
-                        "Play camera   : {:16} (←/→ cycle)",
-                        cam_mode_label(rig.mode)
-                    ));
-                    out.push(format!(
-                        "UI Scale      : {:>4.0}%  (←/→ adjust)",
-                        ui.ui_scale * 100.0
-                    ));
-                    out.push(format!(
-                        "High Contrast : {}",
-                        if ui.high_contrast { "On" } else { "Off" }
-                    ));
+                    out.push(PauseRow::KeyValue {
+                        label: "Play camera".into(),
+                        value: cam_mode_label(rig.mode).into(),
+                        hint: Some("←/→ cycle".into()),
+                        active: false,
+                    });
+                    out.push(PauseRow::KeyValue {
+                        label: "UI Scale".into(),
+                        value: format!("{:>4.0}%", ui.ui_scale * 100.0),
+                        hint: Some("←/→ adjust".into()),
+                        active: false,
+                    });
+                    out.push(PauseRow::KeyValue {
+                        label: "High Contrast".into(),
+                        value: if ui.high_contrast { "On" } else { "Off" }.into(),
+                        hint: None,
+                        active: false,
+                    });
                 }
             }
-            out.push("Back".into());
+            out.push(PauseRow::Action("Back".into()));
             out
         }
     }
@@ -329,6 +417,249 @@ fn clear_pause_rows(commands: &mut Commands, root: Entity, children_q: &Query<&C
     }
 }
 
+/// Row-level selection chrome (background/border), shared by every row
+/// variant so the highlight look stays identical to the old single-Text
+/// rows.
+fn row_container_node(scale: f32, selected: bool) -> impl Bundle {
+    (
+        Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::SpaceBetween,
+            padding: UiRect::axes(theme::spx(10.0, scale), theme::spx(5.0, scale)),
+            column_gap: theme::spx(12.0, scale),
+            border: if selected {
+                UiRect::all(px(1.0))
+            } else {
+                UiRect::default()
+            },
+            ..default()
+        },
+        BackgroundColor(if selected {
+            theme::palette::selection_bg()
+        } else {
+            Color::NONE
+        }),
+        BorderColor::all(if selected {
+            theme::palette::selection_border()
+        } else {
+            Color::NONE
+        }),
+    )
+}
+
+fn spawn_tab_strip(
+    parent: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    scale: f32,
+    active: SettingsTab,
+) {
+    const TABS: [SettingsTab; 3] = [
+        SettingsTab::Audio,
+        SettingsTab::Controls,
+        SettingsTab::Camera,
+    ];
+    parent
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: theme::spx(8.0, scale),
+            ..default()
+        })
+        .with_children(|tabs| {
+            for tab in TABS {
+                let is_active = tab == active;
+                tabs.spawn((
+                    Node {
+                        padding: UiRect::axes(theme::spx(12.0, scale), theme::spx(4.0, scale)),
+                        border_radius: BorderRadius::all(theme::spx(4.0, scale)),
+                        ..default()
+                    },
+                    BackgroundColor(if is_active {
+                        theme::palette::selection_bg()
+                    } else {
+                        theme::palette::chip_bg()
+                    }),
+                ))
+                .with_children(|chip| {
+                    chip.spawn((
+                        Text::new(tab.label()),
+                        TextFont {
+                            font: fonts.bold.clone(),
+                            font_size: 15.0 * scale,
+                            ..default()
+                        },
+                        TextColor(if is_active {
+                            theme::palette::gold()
+                        } else {
+                            theme::palette::text_muted()
+                        }),
+                    ));
+                });
+            }
+            tabs.spawn((
+                Text::new("(←/→ or Q/C switch tab)"),
+                TextFont {
+                    font: fonts.regular.clone(),
+                    font_size: 12.0 * scale,
+                    ..default()
+                },
+                TextColor(theme::palette::text_dim()),
+            ));
+        });
+}
+
+/// A keycap-styled chip for a bound key ("Column 2" of the grid).
+fn spawn_key_chip(
+    parent: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    scale: f32,
+    text: &str,
+    active: bool,
+) {
+    parent
+        .spawn((
+            Node {
+                min_width: theme::spx(120.0, scale),
+                padding: UiRect::axes(theme::spx(10.0, scale), theme::spx(4.0, scale)),
+                border: UiRect::all(px(1.0)),
+                border_radius: BorderRadius::all(theme::spx(4.0, scale)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(if active {
+                theme::palette::selection_bg()
+            } else {
+                theme::palette::chip_bg()
+            }),
+            BorderColor::all(if active {
+                theme::palette::selection_border()
+            } else {
+                theme::palette::card_border()
+            }),
+        ))
+        .with_children(|chip| {
+            chip.spawn((
+                Text::new(text),
+                TextFont {
+                    font: fonts.bold.clone(),
+                    font_size: 14.0 * scale,
+                    ..default()
+                },
+                TextColor(if active {
+                    theme::palette::gold()
+                } else {
+                    theme::palette::text_primary()
+                }),
+            ));
+        });
+}
+
+fn spawn_key_value_row(
+    parent: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    scale: f32,
+    label: &str,
+    value: &str,
+    hint: Option<&str>,
+    active: bool,
+    text_color: Color,
+) {
+    // Column 1: fixed-width label so every chip in the tab lines up,
+    // regardless of proportional-font label width.
+    parent.spawn((
+        Text::new(label),
+        TextFont {
+            font: fonts.regular.clone(),
+            font_size: 16.0 * scale,
+            ..default()
+        },
+        TextColor(text_color),
+        Node {
+            width: theme::spx(190.0, scale),
+            flex_shrink: 0.0,
+            ..default()
+        },
+    ));
+    // Column 2: the bound key / current value, as a keycap chip.
+    spawn_key_chip(parent, fonts, scale, value, active);
+    // Column 3 (optional): a hint, e.g. "Press Space to rebind".
+    if let Some(hint) = hint {
+        parent.spawn((
+            Text::new(hint),
+            TextFont {
+                font: fonts.regular.clone(),
+                font_size: 12.0 * scale,
+                ..default()
+            },
+            TextColor(theme::palette::text_dim()),
+            Node {
+                flex_grow: 1.0,
+                justify_content: JustifyContent::FlexEnd,
+                ..default()
+            },
+        ));
+    }
+}
+
+fn spawn_pause_row(
+    parent: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    scale: f32,
+    row: &PauseRow,
+    selected: bool,
+) {
+    let text_color = if selected {
+        theme::palette::text_primary()
+    } else {
+        theme::palette::text_muted()
+    };
+    parent
+        .spawn(row_container_node(scale, selected))
+        .with_children(|cell| match row {
+            PauseRow::Action(text) => {
+                cell.spawn((
+                    Text::new(text.as_str()),
+                    TextFont {
+                        font: fonts.regular.clone(),
+                        font_size: 18.0 * scale,
+                        ..default()
+                    },
+                    TextColor(text_color),
+                ));
+            }
+            PauseRow::Hint(text) => {
+                cell.spawn((
+                    Text::new(text.as_str()),
+                    TextFont {
+                        font: fonts.regular.clone(),
+                        font_size: 14.0 * scale,
+                        ..default()
+                    },
+                    TextColor(theme::palette::text_dim()),
+                ));
+            }
+            PauseRow::Tabs(active) => spawn_tab_strip(cell, fonts, scale, *active),
+            PauseRow::KeyValue {
+                label,
+                value,
+                hint,
+                active,
+            } => spawn_key_value_row(
+                cell,
+                fonts,
+                scale,
+                label,
+                value,
+                hint.as_deref(),
+                *active,
+                text_color,
+            ),
+        });
+}
+
 fn refresh_pause_ui(
     paused: Res<MatchPaused>,
     menu: Res<PauseMenuState>,
@@ -338,7 +669,7 @@ fn refresh_pause_ui(
     ui_prefs: Res<UiPreferences>,
     rig: Res<CameraRig>,
     ui_scale: Res<UiScale>,
-    mut list_q: Query<Entity, With<PauseList>>,
+    list_q: Query<Entity, With<PauseList>>,
     fonts_q: Query<&UiFonts, With<PauseRoot>>,
     children_q: Query<&Children>,
     mut commands: Commands,
@@ -346,7 +677,7 @@ fn refresh_pause_ui(
     if !paused.0 {
         return;
     }
-    let Ok(list) = list_q.single_mut() else {
+    let Ok(list) = list_q.single() else {
         return;
     };
     let Ok(fonts) = fonts_q.single() else {
@@ -354,47 +685,10 @@ fn refresh_pause_ui(
     };
     clear_pause_rows(&mut commands, list, &children_q);
     let scale = ui_scale.0;
-    let lines = pause_lines(&menu, &bindings, &audio, &rebind, &ui_prefs, &rig);
+    let rows = pause_rows(&menu, &bindings, &audio, &rebind, &ui_prefs, &rig);
     commands.entity(list).with_children(|parent| {
-        for (i, line) in lines.iter().enumerate() {
-            let selected = i == menu.sel;
-            parent
-                .spawn((
-                    Node {
-                        padding: UiRect::axes(theme::spx(10.0, scale), theme::spx(5.0, scale)),
-                        border: if selected {
-                            UiRect::all(px(1.0))
-                        } else {
-                            UiRect::default()
-                        },
-                        ..default()
-                    },
-                    BackgroundColor(if selected {
-                        theme::palette::selection_bg()
-                    } else {
-                        Color::NONE
-                    }),
-                    BorderColor::all(if selected {
-                        theme::palette::selection_border()
-                    } else {
-                        Color::NONE
-                    }),
-                ))
-                .with_children(|row| {
-                    row.spawn((
-                        Text::new(line.as_str()),
-                        TextFont {
-                            font: fonts.regular.clone(),
-                            font_size: 18.0 * scale,
-                            ..default()
-                        },
-                        TextColor(if selected {
-                            theme::palette::text_primary()
-                        } else {
-                            theme::palette::text_muted()
-                        }),
-                    ));
-                });
+        for (i, row) in rows.iter().enumerate() {
+            spawn_pause_row(parent, fonts, scale, row, i == menu.sel);
         }
     });
 }
@@ -645,13 +939,13 @@ mod tests {
         (wd, setup)
     }
 
-    fn sample_pause_lines(tab: SettingsTab) -> Vec<String> {
+    fn sample_pause_rows(tab: SettingsTab) -> Vec<PauseRow> {
         let menu = PauseMenuState {
             screen: PauseScreen::Settings,
             sel: 0,
             settings_tab: tab,
         };
-        pause_lines(
+        pause_rows(
             &menu,
             &KeyBindings::default(),
             &AudioSettings::default(),
@@ -662,22 +956,27 @@ mod tests {
     }
 
     #[test]
-    fn settings_item_count_matches_pause_lines_rows() {
+    fn settings_item_count_matches_pause_rows() {
         for tab in [
             SettingsTab::Audio,
             SettingsTab::Controls,
             SettingsTab::Camera,
         ] {
-            let lines = sample_pause_lines(tab);
-            assert_eq!(lines.len(), settings_item_count(tab), "tab {tab:?}");
+            let rows = sample_pause_rows(tab);
+            assert_eq!(rows.len(), settings_item_count(tab), "tab {tab:?}");
         }
     }
 
     #[test]
-    fn settings_tab_strip_marks_active_tab() {
-        let strip = settings_tab_strip(SettingsTab::Controls);
-        assert!(strip.contains("[ Controls ]"));
-        assert!(!strip.contains("[ Audio ]"));
+    fn pause_rows_tab_strip_is_always_row_zero() {
+        for tab in [
+            SettingsTab::Audio,
+            SettingsTab::Controls,
+            SettingsTab::Camera,
+        ] {
+            let rows = sample_pause_rows(tab);
+            assert!(matches!(rows[0], PauseRow::Tabs(t) if t == tab));
+        }
     }
 
     #[test]
@@ -711,6 +1010,26 @@ mod tests {
 
         assert_eq!(menu.settings_tab, SettingsTab::Controls);
         assert_eq!(menu.sel, 0);
+    }
+
+    #[test]
+    fn reset_pause_state_returns_to_root_and_clears_rebind() {
+        // Regression test for the "settings menu stays around after
+        // resuming" bug: closing the overlay must not leave the player
+        // deep in Settings (or mid-rebind) the next time they open it.
+        let mut menu = PauseMenuState {
+            screen: PauseScreen::Settings,
+            sel: 3,
+            settings_tab: SettingsTab::Controls,
+        };
+        let mut rebind = RebindState(Some(Action::Confirm));
+
+        reset_pause_state(&mut menu, &mut rebind);
+
+        assert_eq!(menu.screen, PauseScreen::Root);
+        assert_eq!(menu.sel, 0);
+        assert_eq!(menu.settings_tab, SettingsTab::Audio);
+        assert_eq!(rebind.0, None);
     }
 
     #[test]
