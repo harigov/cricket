@@ -16,7 +16,7 @@ use bevy::window::WindowResolution;
 use game::match_flow::{self, MatchScene};
 use game::*;
 use render::camera_rig::CameraRig;
-use render::sky::{create_sky_texture, sky_texture_for_time};
+use render::sky::{create_environment_cubemap, create_sky_texture, sky_texture_for_time};
 use render::{
     DayEnvironmentLight, FloodlightFixture, FloodlightMaterials, NightEnvironmentLight,
     SkyTextureCache, SkyTextures,
@@ -497,6 +497,45 @@ const NIGHT_FOG_END: f32 = 700.0;
 /// frame and hides the whole ground.
 const SKY_RADIUS: f32 = 600.0;
 
+/// Cubemap that seeds the camera's [`GeneratedEnvironmentMapLight`], one pair
+/// per time of day in the current ground's theme. Kept in lockstep with
+/// [`SkyTextures`]: both are re-pointed together in `sync_sky_theme`, and the
+/// day/night toggle in `update_stadium_time` just swaps the handle.
+#[derive(Resource)]
+struct IblCubemaps {
+    day: Handle<Image>,
+    night: Handle<Image>,
+    theme: crate::core::stadiums::StadiumEnvironment,
+}
+
+/// IBL cubemaps painted so far, keyed by theme — mirrors [`SkyTextureCache`]
+/// so revisiting a ground's theme never repaints its cubemap.
+#[derive(Resource, Default)]
+struct IblCubemapCache {
+    by_theme: std::collections::HashMap<
+        crate::core::stadiums::StadiumEnvironment,
+        (Handle<Image>, Handle<Image>),
+    >,
+}
+
+impl IblCubemapCache {
+    fn get_or_paint(
+        &mut self,
+        theme: crate::core::stadiums::StadiumEnvironment,
+        images: &mut Assets<Image>,
+    ) -> (Handle<Image>, Handle<Image>) {
+        self.by_theme
+            .entry(theme)
+            .or_insert_with(|| {
+                (
+                    images.add(create_environment_cubemap(theme, false)),
+                    images.add(create_environment_cubemap(theme, true)),
+                )
+            })
+            .clone()
+    }
+}
+
 struct LightingPreset {
     ev100: f32,
     fog_color: Color,
@@ -505,6 +544,11 @@ struct LightingPreset {
     ambient_color: Color,
     ambient_brightness: f32,
     clear_color: Color,
+    /// [`GeneratedEnvironmentMapLight::intensity`] (cd/m^2) for this time of
+    /// day. Indirect light now comes from both this and `ambient_brightness`,
+    /// so the two are tuned together rather than the flat ambient alone
+    /// carrying the whole scene the way it used to.
+    ibl_intensity: f32,
 }
 
 /// Blend the preset's haze toward the theme's own horizon.
@@ -531,14 +575,19 @@ fn theme_fog_color(
 
 fn lighting_preset(time: StadiumTime) -> LightingPreset {
     match time {
+        // Ambient brightness is cut from its pre-IBL values (was 500) now that
+        // an `EnvironmentMapLight` supplies directional, colour-varied
+        // indirect light of its own; ambient keeps a lower flat floor so
+        // deep shadow faces are never fully black.
         StadiumTime::Day => LightingPreset {
             ev100: DAY_EV100,
             fog_color: Color::srgba(0.58, 0.72, 0.86, 1.0),
             fog_start: DAY_FOG_START,
             fog_end: DAY_FOG_END,
             ambient_color: Color::srgb(0.80, 0.84, 0.74),
-            ambient_brightness: 500.0,
+            ambient_brightness: 260.0,
             clear_color: Color::srgb(0.54, 0.70, 0.90),
+            ibl_intensity: 1400.0,
         },
         StadiumTime::Night => LightingPreset {
             ev100: NIGHT_EV100,
@@ -546,8 +595,9 @@ fn lighting_preset(time: StadiumTime) -> LightingPreset {
             fog_start: NIGHT_FOG_START,
             fog_end: NIGHT_FOG_END,
             ambient_color: Color::srgb(0.38, 0.42, 0.52),
-            ambient_brightness: 425.0,
+            ambient_brightness: 220.0,
             clear_color: Color::srgb(0.02, 0.03, 0.08),
+            ibl_intensity: 180.0,
         },
     }
 }
@@ -579,6 +629,24 @@ fn setup_basics(
         theme: render::sky::DEFAULT_SKY_THEME,
     });
     commands.init_resource::<SkyTextureCache>();
+
+    // IBL source cubemaps, painted once from the same gradient as the flat
+    // sky texture above so reflections and the dome always agree.
+    let day_ibl = images.add(create_environment_cubemap(
+        render::sky::DEFAULT_SKY_THEME,
+        false,
+    ));
+    let night_ibl = images.add(create_environment_cubemap(
+        render::sky::DEFAULT_SKY_THEME,
+        true,
+    ));
+    commands.insert_resource(IblCubemaps {
+        day: day_ibl.clone(),
+        night: night_ibl,
+        theme: render::sky::DEFAULT_SKY_THEME,
+    });
+    commands.init_resource::<IblCubemapCache>();
+
     let sky_mat = materials.add(StandardMaterial {
         base_color_texture: Some(day_tex),
         unlit: true,
@@ -652,6 +720,11 @@ fn setup_basics(
             falloff: distance_fog_falloff(*stadium_time),
             ..default()
         },
+        GeneratedEnvironmentMapLight {
+            environment_map: day_ibl,
+            intensity: preset.ibl_intensity,
+            ..default()
+        },
     ));
     commands.insert_resource(GlobalAmbientLight {
         color: preset.ambient_color,
@@ -675,6 +748,8 @@ fn sync_sky_theme(
     state: Res<State<AppState>>,
     mut cache: ResMut<SkyTextureCache>,
     mut sky_textures: ResMut<SkyTextures>,
+    mut ibl_cache: ResMut<IblCubemapCache>,
+    mut ibl: ResMut<IblCubemaps>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let wanted = match (state.get(), setup.as_ref(), world_data.as_ref()) {
@@ -695,11 +770,21 @@ fn sync_sky_theme(
         night,
         theme: wanted,
     };
+    // IBL follows the same theme so environment reflections and the flat
+    // dome never disagree about which ground's air the camera is in.
+    let (ibl_day, ibl_night) = ibl_cache.get_or_paint(wanted, &mut images);
+    *ibl = IblCubemaps {
+        day: ibl_day,
+        night: ibl_night,
+        theme: wanted,
+    };
 }
 
 fn update_stadium_time(
+    mut commands: Commands,
     time: Res<StadiumTime>,
     sky_textures: Res<SkyTextures>,
+    ibl: Res<IblCubemaps>,
     mut day_lights: Query<
         &mut Visibility,
         (With<DayEnvironmentLight>, Without<NightEnvironmentLight>),
@@ -717,6 +802,14 @@ fn update_stadium_time(
     mut ambient: ResMut<GlobalAmbientLight>,
     mut cam_q: Query<&mut Camera>,
     mut exposure_q: Query<&mut bevy::camera::Exposure, With<Camera3d>>,
+    mut env_q: Query<
+        (
+            Entity,
+            &mut GeneratedEnvironmentMapLight,
+            Has<EnvironmentMapLight>,
+        ),
+        With<Camera3d>,
+    >,
     mut fixtures: Query<
         &mut MeshMaterial3d<StandardMaterial>,
         (With<FloodlightFixture>, Without<SkySphere>),
@@ -730,6 +823,21 @@ fn update_stadium_time(
     let preset = lighting_preset(*time);
     if let Ok(mut exp) = exposure_q.single_mut() {
         exp.ev100 = preset.ev100;
+    }
+    let wanted_ibl = if is_night { &ibl.night } else { &ibl.day };
+    if let Ok((entity, mut gen_env, has_env)) = env_q.single_mut() {
+        gen_env.intensity = preset.ibl_intensity;
+        if gen_env.environment_map != *wanted_ibl {
+            gen_env.environment_map = wanted_ibl.clone();
+            // `GeneratedEnvironmentMapLight` is only picked up by Bevy's
+            // filtering system for entities that do *not* already carry the
+            // `EnvironmentMapLight` it produces — dropping that component is
+            // what makes it regenerate from the new source cubemap instead
+            // of keeping the stale filtered result forever.
+            if has_env {
+                commands.entity(entity).remove::<EnvironmentMapLight>();
+            }
+        }
     }
     for mut v in &mut day_lights {
         *v = if is_night {

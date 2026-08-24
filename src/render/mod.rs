@@ -1,6 +1,8 @@
 pub mod camera_rig;
 pub mod crowd;
 pub mod environment;
+pub mod glyphs;
+pub mod kit;
 pub mod outfield_grass;
 pub mod player;
 pub mod ring_geometry;
@@ -146,6 +148,18 @@ team_crests! {
     "branding/teams/afg.png" => "../../assets/branding/teams/afg.png",
 }
 
+/// Load one generated player body archetype from `assets/characters/players/`.
+///
+/// Deliberately *not* embedded, unlike the rest of the match art: 27
+/// archetypes at ~1.8 MB each would add ~46 MB to the executable. They stream
+/// from the assets directory instead.
+pub fn load_player_scene(assets: &AssetServer, archetype: &str) -> Handle<Scene> {
+    let path = format!("characters/players/{archetype}.glb");
+    assets.load(GltfAssetLabel::Scene(0).from_asset(path))
+}
+
+/// Load the legacy Xbot scene. Retained only as the source of the bundled
+/// idle/run mocap clips — no figure spawns it any more.
 pub fn load_xbot_scene(assets: &AssetServer) -> Handle<Scene> {
     let path = bevy::asset::embedded_path!("../../assets/characters/Xbot.glb");
     let path = AssetPath::from_path_buf(path).with_source("embedded");
@@ -259,31 +273,34 @@ impl Plugin for RenderPlugin {
         // Shared mocap locomotion graph (idle/run) for every figure.
         player::build_locomotion_clips(app);
         app.init_resource::<RetunedPropMaterials>();
-        app.add_systems(Startup, crowd::init_crowd_palette)
-            .add_systems(
-                Update,
-                (
-                    player::disable_figure_frustum_culling,
-                    player::tag_skeleton_bones,
-                    player::apply_team_kit_materials,
-                    crowd::apply_crowd_materials,
-                    player::attach_animation_players,
-                    retune_imported_prop_materials,
-                ),
-            )
-            .add_systems(
-                PostUpdate,
-                (
-                    player::strip_skeleton_root_motion
-                        .after(AnimationSystems)
-                        .before(TransformSystems::Propagate),
-                    // Procedural poses must run after AnimationPlayer so stopped
-                    // clips do not overwrite batter/non-striker stance each frame.
-                    player::animate_figures
-                        .after(AnimationSystems)
-                        .after(player::strip_skeleton_root_motion)
-                        .before(TransformSystems::Propagate),
-                ),
-            );
+        app.add_systems(
+            Startup,
+            (crowd::init_crowd_palette, player::init_player_skin_palette),
+        )
+        .add_systems(
+            Update,
+            (
+                player::disable_figure_frustum_culling,
+                player::tag_skeleton_bones,
+                player::apply_team_kit_materials,
+                crowd::apply_crowd_materials,
+                player::attach_animation_players,
+                retune_imported_prop_materials,
+            ),
+        )
+        .add_systems(
+            PostUpdate,
+            (
+                player::strip_skeleton_root_motion
+                    .after(AnimationSystems)
+                    .before(TransformSystems::Propagate),
+                // Procedural poses must run after AnimationPlayer so stopped
+                // clips do not overwrite batter/non-striker stance each frame.
+                player::animate_figures
+                    .after(AnimationSystems)
+                    .after(player::strip_skeleton_root_motion)
+                    .before(TransformSystems::Propagate),
+            ),
+        );
     }
 }

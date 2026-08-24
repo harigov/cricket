@@ -213,7 +213,9 @@ pub fn init_crowd_palette(mut commands: Commands, mut materials: ResMut<Assets<S
     commands.insert_resource(build_crowd_palette(&mut materials));
 }
 
-fn mix_hash(seed: u32, salt: u32) -> u32 {
+/// Small deterministic integer hash shared with `player.rs` for per-player
+/// skin-tone assignment — same mixing, different table.
+pub(crate) fn mix_hash(seed: u32, salt: u32) -> u32 {
     let mut h = seed.wrapping_add(salt.wrapping_mul(0x9E37_79B1));
     h ^= h << 13;
     h ^= h >> 17;

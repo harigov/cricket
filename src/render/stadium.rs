@@ -5,6 +5,7 @@ use crate::core::stadiums::Stadium;
 use crate::core::teams::Team;
 use crate::render::crowd;
 use crate::render::environment;
+use crate::render::glyphs;
 use crate::render::outfield_grass::{self, MOW_BAND_COUNT, append_rgba8_srgb_mip_chain};
 use crate::render::ring_geometry::{
     floodlight_angles, floodlight_radius, ring_band_specs, ring_boxes_mesh, ring_position,
@@ -1895,19 +1896,6 @@ pub fn pitch_albedo_at(u: f32, v: f32) -> [f32; 3] {
 fn gate_number_image(number: usize) -> Image {
     use bevy::asset::RenderAssetUsages;
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-    /// 3x5 digit cells, one bit per column, most significant bit leftmost.
-    const DIGITS: [[u8; 5]; 10] = [
-        [0b111, 0b101, 0b101, 0b101, 0b111],
-        [0b010, 0b110, 0b010, 0b010, 0b111],
-        [0b111, 0b001, 0b111, 0b100, 0b111],
-        [0b111, 0b001, 0b111, 0b001, 0b111],
-        [0b101, 0b101, 0b111, 0b001, 0b001],
-        [0b111, 0b100, 0b111, 0b001, 0b111],
-        [0b111, 0b100, 0b111, 0b101, 0b111],
-        [0b111, 0b001, 0b001, 0b001, 0b001],
-        [0b111, 0b101, 0b111, 0b101, 0b111],
-        [0b111, 0b101, 0b111, 0b001, 0b111],
-    ];
     const W: u32 = 64;
     const H: u32 = 64;
     const CELL: u32 = 9;
@@ -1922,32 +1910,13 @@ fn gate_number_image(number: usize) -> Image {
     for _ in 0..W * H {
         data.extend_from_slice(&[0x0C, 0x14, 0x10, 0xFF]);
     }
-    let glyph_w = 3 * CELL;
+    let glyph_w = glyphs::DIGIT_3X5_COLS * CELL;
     let total_w = glyph_w * digits.len() as u32 + CELL * (digits.len() as u32 - 1);
     let ox = (W - total_w) / 2;
-    let oy = (H - 5 * CELL) / 2;
+    let oy = (H - glyphs::DIGIT_3X5_ROWS * CELL) / 2;
     for (i, &d) in digits.iter().enumerate() {
         let gx = ox + i as u32 * (glyph_w + CELL);
-        for (row, &bits) in DIGITS[d].iter().enumerate() {
-            for col in 0..3u32 {
-                if bits & (1 << (2 - col)) == 0 {
-                    continue;
-                }
-                for py in 0..CELL {
-                    for px in 0..CELL {
-                        let x = gx + col * CELL + px;
-                        let y = oy + row as u32 * CELL + py;
-                        if x >= W || y >= H {
-                            continue;
-                        }
-                        let idx = ((y * W + x) * 4) as usize;
-                        data[idx] = 0xE8;
-                        data[idx + 1] = 0xF0;
-                        data[idx + 2] = 0xDC;
-                    }
-                }
-            }
-        }
+        glyphs::draw_digit_3x5(&mut data, W, H, d, gx, oy, CELL, [0xE8, 0xF0, 0xDC]);
     }
     Image::new(
         Extent3d {
@@ -2028,110 +1997,6 @@ fn big_screen_image(home: &str, away: &str) -> Image {
     const W: u32 = 256;
     const H: u32 = 128;
 
-    fn draw_glyph(data: &mut [u8], ch: u8, ox: u32, oy: u32) {
-        const FONT: [[u8; 7]; 26] = [
-            [
-                0b11100, 0b10100, 0b11100, 0b10100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b01000, 0b10100, 0b11100, 0b10100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b11100, 0b10000, 0b10000, 0b11100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b11100, 0b10000, 0b01100, 0b10000, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b11100, 0b10100, 0b01100, 0b00100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b11100, 0b10000, 0b11000, 0b10000, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b11100, 0b10000, 0b10100, 0b11100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b10100, 0b10100, 0b11100, 0b10100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b11100, 0b01000, 0b01000, 0b11100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b00100, 0b00100, 0b00100, 0b11100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b10100, 0b11000, 0b11000, 0b10100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b10000, 0b10000, 0b10000, 0b11100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b10100, 0b11100, 0b10100, 0b10100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b10100, 0b11100, 0b11100, 0b10100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b11100, 0b10100, 0b10100, 0b11100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b11100, 0b10100, 0b11100, 0b10000, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b11100, 0b10100, 0b11100, 0b00100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b11100, 0b11000, 0b11000, 0b10100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b11100, 0b10000, 0b11100, 0b00100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b11100, 0b01000, 0b01000, 0b01000, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b10100, 0b10100, 0b10100, 0b11100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b10100, 0b10100, 0b10100, 0b01000, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b10100, 0b10100, 0b11100, 0b10100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b10100, 0b01000, 0b01000, 0b10100, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b10100, 0b01000, 0b01000, 0b01000, 0b00000, 0b00000, 0b00000,
-            ],
-            [
-                0b11100, 0b00100, 0b01000, 0b11100, 0b00000, 0b00000, 0b00000,
-            ],
-        ];
-        let i = ch.saturating_sub(b'A') as usize % 26;
-        for (row, &glyph_row) in FONT[i].iter().enumerate() {
-            for col in 0..5 {
-                if glyph_row & (1 << (4 - col)) != 0 {
-                    let px = ox + col * 2;
-                    let py = oy + row as u32 * 2;
-                    for dy in 0..2 {
-                        for dx in 0..2 {
-                            let x = px + dx;
-                            let y = py + dy;
-                            if x < W && y < H {
-                                let idx = ((y * W + x) * 4) as usize;
-                                data[idx] = 0x40;
-                                data[idx + 1] = 0xE0;
-                                data[idx + 2] = 0x60;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     let mut data = vec![0u8; (W * H * 4) as usize];
     for y in 0..H {
         for x in 0..W {
@@ -2151,9 +2016,7 @@ fn big_screen_image(home: &str, away: &str) -> Image {
     let chars: Vec<u8> = format!("{home} V {away}").bytes().collect();
     let mut ox = 24;
     for ch in &chars {
-        if *ch >= b'A' && *ch <= b'Z' {
-            draw_glyph(&mut data, *ch, ox, 44);
-        }
+        glyphs::draw_glyph_5x7(&mut data, W, H, *ch, ox, 44, 2, [0x40, 0xE0, 0x60]);
         ox += 16;
     }
     Image::new(

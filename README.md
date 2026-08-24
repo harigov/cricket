@@ -45,11 +45,19 @@ full batting / bowling / fielding gameplay on both keyboard and gamepad.
   shared palette materials (6 skin / 10 shirt / 5 pants / 3 shoes / 5 hair —
   one shared material per colour, no per-instance clones) and deterministic
   per-seat colour variation; life-sized GLBs via `SceneRoot`.
-- **Realistic human models** — MIT-licensed **Xbot glTF** (Mixamo rig,
-  `assets/characters/Xbot.glb` 2.8 MB via three.js `examples` — MIT, PBR,
-  16k tris, 55-bone humanoid). Skinned, code-driven skeletal animation
-  (idle waggle, run, bowling windmill, bat swing) — fully MIT-distributable
-  and retarget-friendly for future Mixamo clips.
+- **Realistic human players** — 27 **MakeHuman/MPFB2** body archetypes
+  (CC0, `assets/characters/players/` — 3 heights x 3 builds x 3 ancestries,
+  ~51k tris / 1.8 MB each) generated headlessly by
+  `scripts/build_player_asset.py`. Each carries MPFB's built-in **Mixamo**
+  skeleton, so the existing code-driven quaternion animation drives them
+  unchanged, and wears shirt/trousers/shoes/hair shells derived from the
+  body's own bone weight groups. Five named material slots — `Skin`,
+  `Shirt`, `Pants`, `Shoes`, `Hair` — are recoloured per player at runtime,
+  with the shirt composited from team colours, pattern, squad number, player
+  name and crest. Stature spans 1.68-1.92 m. See
+  `assets/characters/ATTRIBUTION.md` for the full asset contract.
+  `Xbot.glb` (MIT, via three.js `examples`) is retained as the source of the
+  bundled idle/run mocap clips.
 - **Atmosphere** — procedural sky sphere (day: pale→deep blue, night:
   starry navy with floodlights, `N` to toggle), distance fog, sun/moon +
   4 floodlights, ball trail, camera shake, sponsor ribbons & crest pylons.
@@ -215,7 +223,8 @@ src/
 │   └── match_flow.rs# Delivery cycle, contact resolution, AI
 ├── render/
 │   ├── camera_rig.rs# Camera modes + toggle + shake
-│   ├── player.rs    # Xbot glTF human (MIT) + skeletal code-driven anim
+│   ├── kit.rs       # Shirt texture compositing: colours, pattern, number, name, crest
+│   ├── player.rs    # MakeHuman player archetypes + skeletal code-driven anim
 │   └── stadium.rs   # Procedural stadium: stripes, crowd, sight screens
 ├── ui/
 │   ├── hud.rs       # Scoreboard, prompts, timing meter, match summary

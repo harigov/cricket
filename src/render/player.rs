@@ -10,7 +10,7 @@
 use bevy::animation::AnimationPlayer;
 use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNodeIndex};
 use bevy::animation::transition::AnimationTransitions;
-use bevy::gltf::GltfAssetLabel;
+use bevy::gltf::{GltfAssetLabel, GltfMaterialName};
 use std::time::Duration;
 
 use bevy::camera::visibility::NoFrustumCulling;
@@ -18,6 +18,8 @@ use bevy::prelude::*;
 
 use crate::core::ShotKind;
 use crate::core::teams::{KitStyle, Team};
+use crate::render::crowd;
+use crate::render::kit::{self, ShirtSpec};
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Figure {
@@ -86,7 +88,26 @@ pub struct Bone {
 
 /// Imported glTF local rotation captured when the bone is first tagged.
 #[derive(Component, Clone, Copy, Debug)]
-pub(crate) struct BoneBindPose(pub Quat);
+pub(crate) struct SkeletonBone {
+    /// Bind-pose local translation, restored every frame so the retarget of the
+    /// Xbot clips is rotation-only. See `strip_skeleton_root_motion`.
+    pub bind_translation: Vec3,
+}
+
+/// Bind-pose rotation and translation for a bone the procedural poses drive.
+#[derive(Component)]
+pub(crate) struct BoneBindPose {
+    /// Procedural pose deltas compose onto this (see `compose_pose_rotation`).
+    pub rotation: Quat,
+    /// Bone's bind-pose rotation in armature space, used to re-express the
+    /// pose library in this rig's bone axes. See `compose_pose_rotation`.
+    pub world_rotation: Quat,
+    /// Re-pinned onto the hips every frame by `strip_skeleton_root_motion`.
+    /// Captured per figure rather than hard-coded, because each generated
+    /// archetype has its own hip height — and because the legacy Xbot armature
+    /// is centimetre-scaled while the generated ones are in metres.
+    pub translation: Vec3,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoneKind {
     Hips,
@@ -199,25 +220,39 @@ pub struct TeamKit {
     secondary_color: Color,
     kit_style: KitStyle,
     crest: Handle<StandardMaterial>,
+    /// Short team code (e.g. `"IND"`), kept for deterministic per-player skin
+    /// tone assignment — see [`player_skin_seed`].
+    team_short: String,
+    /// Player name shown across the upper back of a named-slot `Shirt` mesh.
+    /// `None` on every figure today: no call site threads a roster identity
+    /// through [`spawn_figure`] yet, so the name row simply stays blank
+    /// until one does.
+    player_name: Option<String>,
+    /// Squad number shown large on the back of a named-slot `Shirt` mesh.
+    /// `None` for the same reason as `player_name`.
+    squad_number: Option<u8>,
 }
 
 /// Crest badge already parented to the chest bone.
 #[derive(Component)]
 pub(crate) struct CrestAttached;
 
-/// Bind-pose foot height above the imported armature origin (metres).
-const FOOT_BIND_Y: f32 = 0.0844;
-/// Lift the streamed scene so bind-pose feet sit on the pitch (y = 0).
-const SCENE_GROUND_Y: f32 = -FOOT_BIND_Y;
-/// World-space pitch surface — foot clamp target.
-/// Mixamo hips rest translation in armature space (metres, after glTF scale).
-const HIPS_BIND_TRANSLATION: Vec3 = Vec3::new(0.0, 1.039_914_7, 0.020_760_939);
+/// Lift the streamed scene so the asset's soles rest on the pitch.
+///
+/// The generated archetypes are authored ground-flat: `build_player_asset.py`
+/// clamps the shoe soles to z = 0, leaving every mesh at y >= -0.004 m, so no
+/// correction is needed. Kept as a named constant because the legacy Xbot
+/// asset did need one and a silent ground offset is easy to reintroduce.
+const SCENE_GROUND_Y: f32 = 0.0;
 
-/// Mixamo bone local translations are centimetre-like; the imported `Armature`
-/// node applies `scale = 0.01` so `mixamorig:Hips` y = 103.99 → 1.04 m in
-/// world space. Equipment parented to a bone must be sized and offset in bone
-/// units, not metres.
-const BONE_UNITS_PER_METRE: f32 = 100.0;
+/// MPFB exports the armature in metres with the root at `scale = 1.0`, so a
+/// bone's local units *are* metres and equipment needs no rescaling.
+///
+/// The legacy Xbot armature was the opposite — centimetre bone translations
+/// under a `scale = 0.01` root (`mixamorig:Hips` y = 103.99) — which is why
+/// this indirection exists. Every equipment size and offset routes through
+/// [`metres_to_bone`], so this one constant rescales all of them together.
+const BONE_UNITS_PER_METRE: f32 = 1.0;
 
 fn metres_to_bone(metres: f32) -> f32 {
     metres * BONE_UNITS_PER_METRE
@@ -275,6 +310,248 @@ enum KitMeshKind {
     Joints,
 }
 
+// ---------------------------------------------------------------------------
+// Named glTF material slots (the future MPFB body/kit asset)
+// ---------------------------------------------------------------------------
+
+/// A mesh's glTF material slot, when the asset names it explicitly instead of
+/// relying on baked colour classification (see [`kit_mesh_kind`]). The
+/// upcoming realistic-human asset carries all four on one Mixamo-named
+/// armature; the legacy Xbot asset carries none, so this path only ever
+/// engages once that asset lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NamedKitSlot {
+    Skin,
+    Shirt,
+    Pants,
+    Shoes,
+    Hair,
+}
+
+fn named_kit_slot(material_slot_name: &str) -> Option<NamedKitSlot> {
+    match material_slot_name {
+        "Skin" => Some(NamedKitSlot::Skin),
+        "Shirt" => Some(NamedKitSlot::Shirt),
+        "Pants" => Some(NamedKitSlot::Pants),
+        "Shoes" => Some(NamedKitSlot::Shoes),
+        "Hair" => Some(NamedKitSlot::Hair),
+        _ => None,
+    }
+}
+
+/// Skin tones players are drawn from — a richer spread than the crowd's 6
+/// tones ([`crowd::crowd_skin_color`]) covering caucasian, south-asian and
+/// african ranges, since players are seen at much closer camera distance.
+const PLAYER_SKIN_TONES: [Color; 12] = [
+    Color::srgb(0.980_4, 0.878_4, 0.784_3), // FA E0 C8 - pale
+    Color::srgb(0.945_1, 0.788_2, 0.615_7), // F1 C9 9D
+    Color::srgb(0.909_8, 0.721_6, 0.556_9), // E8 B8 8E
+    Color::srgb(0.866_7, 0.650_9, 0.478_4), // DD A6 7A - south asian mid
+    Color::srgb(0.776_5, 0.545_1, 0.368_6), // C6 8B 5E
+    Color::srgb(0.690_2, 0.462_7, 0.298_0), // B0 76 4C
+    Color::srgb(0.603_9, 0.403_9, 0.270_6), // 9A 67 45
+    Color::srgb(0.541_2, 0.352_9, 0.223_5), // 8A 5A 39 - south asian deep
+    Color::srgb(0.462_7, 0.305_9, 0.215_7), // 76 4E 37
+    Color::srgb(0.360_8, 0.227_5, 0.129_4), // 5C 3A 21 - african mid
+    Color::srgb(0.270_6, 0.168_6, 0.094_1), // 45 2B 18
+    Color::srgb(0.188_2, 0.113_7, 0.062_7), // 30 1D 10 - african deep
+];
+
+/// Hair tones players are drawn from, independent of skin tone.
+const PLAYER_HAIR_TONES: [Color; 6] = [
+    Color::srgb(0.070_6, 0.070_6, 0.070_6), // 12 12 12 - black
+    Color::srgb(0.180_4, 0.121_6, 0.078_4), // 2E 1F 14 - dark brown
+    Color::srgb(0.325_5, 0.223_5, 0.145_1), // 53 39 25 - brown
+    Color::srgb(0.545_1, 0.396_1, 0.231_4), // 8B 65 3B - light brown
+    Color::srgb(0.792_2, 0.647_1, 0.376_5), // CA A5 60 - blonde
+    Color::srgb(0.454_9, 0.454_9, 0.462_7), // 74 74 76 - grey
+];
+
+/// Shared skin-tone and hair materials for player figures — one handle per
+/// tone, reused across every figure via [`player_skin_tone_index`] and
+/// [`player_hair_tone_index`]. Mirrors `crowd::CrowdPalette` (shared
+/// handles, no per-player clones).
+#[derive(Resource)]
+pub struct PlayerSkinPalette {
+    pub skin: Vec<Handle<StandardMaterial>>,
+    pub hair: Vec<Handle<StandardMaterial>>,
+}
+
+/// Build the shared player skin/hair palette once at app startup.
+pub fn build_player_skin_palette(materials: &mut Assets<StandardMaterial>) -> PlayerSkinPalette {
+    let make = |materials: &mut Assets<StandardMaterial>, c: Color, roughness: f32| {
+        materials.add(StandardMaterial {
+            base_color: c,
+            perceptual_roughness: roughness,
+            metallic: 0.0,
+            reflectance: 0.05,
+            ..Default::default()
+        })
+    };
+    PlayerSkinPalette {
+        skin: PLAYER_SKIN_TONES
+            .iter()
+            .map(|&c| make(materials, c, 0.75))
+            .collect(),
+        hair: PLAYER_HAIR_TONES
+            .iter()
+            .map(|&c| make(materials, c, 0.55))
+            .collect(),
+    }
+}
+
+pub fn init_player_skin_palette(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.insert_resource(build_player_skin_palette(&mut materials));
+}
+
+/// Every generated body archetype, in the order
+/// `scripts/build_player_asset.py` emits them (height x build x ancestry).
+///
+/// Ancestry here varies body and facial proportion only — visible skin tone is
+/// an independent runtime tint from [`PLAYER_SKIN_TONES`], so any archetype can
+/// wear any tone.
+pub const PLAYER_ARCHETYPES: [&str; 27] = [
+    "short_thin_caucasian",
+    "short_thin_south_asian",
+    "short_thin_african",
+    "short_regular_caucasian",
+    "short_regular_south_asian",
+    "short_regular_african",
+    "short_heavy_caucasian",
+    "short_heavy_south_asian",
+    "short_heavy_african",
+    "medium_thin_caucasian",
+    "medium_thin_south_asian",
+    "medium_thin_african",
+    "medium_regular_caucasian",
+    "medium_regular_south_asian",
+    "medium_regular_african",
+    "medium_heavy_caucasian",
+    "medium_heavy_south_asian",
+    "medium_heavy_african",
+    "tall_thin_caucasian",
+    "tall_thin_south_asian",
+    "tall_thin_african",
+    "tall_regular_caucasian",
+    "tall_regular_south_asian",
+    "tall_regular_african",
+    "tall_heavy_caucasian",
+    "tall_heavy_south_asian",
+    "tall_heavy_african",
+];
+
+/// Pick a body archetype for a per-player seed from [`player_skin_seed`].
+///
+/// Mixed with a different salt than the skin and hair tones so a player's build
+/// and colouring vary independently rather than moving in lockstep.
+pub fn archetype_for_seed(seed: u32) -> &'static str {
+    PLAYER_ARCHETYPES[(crowd::mix_hash(seed, 31) as usize) % PLAYER_ARCHETYPES.len()]
+}
+
+/// Deterministic per-player seed: same team + role always resolves to the
+/// same skin tone, without storing a persistent per-figure random pick.
+pub fn player_skin_seed(team_short: &str, kind: FigureKind) -> u32 {
+    let mut h: u32 = 0x9E37_79B1;
+    for b in team_short.bytes() {
+        h = crowd::mix_hash(h, b as u32);
+    }
+    let kind_tag: u32 = match kind {
+        FigureKind::Batter => 1,
+        FigureKind::NonStriker => 2,
+        FigureKind::Bowler => 3,
+        FigureKind::Keeper => 4,
+        FigureKind::Fielder(slot) => 100 + slot as u32,
+        FigureKind::Umpire => 5,
+    };
+    crowd::mix_hash(h, kind_tag)
+}
+
+/// Skin palette index for a per-player seed from [`player_skin_seed`].
+pub fn player_skin_tone_index(seed: u32) -> usize {
+    (crowd::mix_hash(seed, 7) as usize) % PLAYER_SKIN_TONES.len()
+}
+
+/// Hair palette index for a per-player seed from [`player_skin_seed`] — a
+/// different salt than [`player_skin_tone_index`] so skin tone and hair
+/// colour don't move in lockstep.
+pub fn player_hair_tone_index(seed: u32) -> usize {
+    (crowd::mix_hash(seed, 13) as usize) % PLAYER_HAIR_TONES.len()
+}
+
+/// Simple team-coloured material for the `Pants`/`Shoes` named slots. These
+/// aren't a parameterizable deliverable like the shirt — cricket trousers
+/// and boots are almost always plain — so they just tint from the kit.
+fn named_slot_solid(
+    materials: &mut Assets<StandardMaterial>,
+    color: Color,
+    roughness: f32,
+) -> Handle<StandardMaterial> {
+    materials.add(StandardMaterial {
+        base_color: color,
+        perceptual_roughness: roughness,
+        metallic: 0.0,
+        reflectance: 0.05,
+        ..Default::default()
+    })
+}
+
+/// Cricket trousers are almost always white/cream regardless of kit colour;
+/// only the trim reads as team colour on the real garment. Boots follow suit.
+const KIT_TROUSER_COLOR: Color = Color::srgb(0.933_3, 0.929_4, 0.898_0); // F0 ED E5
+const KIT_BOOT_COLOR: Color = Color::srgb(0.964_7, 0.964_7, 0.945_1); // F6 F6 F1
+
+/// Resolve the shared/generated material for one named glTF kit slot.
+fn named_slot_material(
+    slot: NamedKitSlot,
+    kit: &TeamKit,
+    fig_kind: FigureKind,
+    skin_palette: Option<&PlayerSkinPalette>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+) -> Option<Handle<StandardMaterial>> {
+    match slot {
+        NamedKitSlot::Skin => {
+            let palette = skin_palette?;
+            let seed = player_skin_seed(&kit.team_short, fig_kind);
+            let idx = player_skin_tone_index(seed);
+            palette.skin.get(idx).cloned()
+        }
+        NamedKitSlot::Hair => {
+            let palette = skin_palette?;
+            let seed = player_skin_seed(&kit.team_short, fig_kind);
+            let idx = player_hair_tone_index(seed);
+            palette.hair.get(idx).cloned()
+        }
+        NamedKitSlot::Shirt => {
+            let mut spec = ShirtSpec::new(kit.primary_color, kit.secondary_color, kit.kit_style);
+            if let Some(name) = &kit.player_name {
+                spec = spec.with_name(name.clone());
+            }
+            if let Some(number) = kit.squad_number {
+                spec = spec.with_number(number);
+            }
+            // The 3D chest-crest badge (see `attach_chest_crest`) already
+            // puts the sponsor mark on the model; baking it into the shirt
+            // texture too would double it up, so the composited crest stays
+            // unused here (`None`) until that badge is retired in favour of
+            // the texture.
+            let image = kit::build_shirt_image(&spec, None);
+            Some(materials.add(StandardMaterial {
+                base_color_texture: Some(images.add(image)),
+                perceptual_roughness: 0.92,
+                metallic: 0.0,
+                reflectance: 0.06,
+                ..Default::default()
+            }))
+        }
+        NamedKitSlot::Pants => Some(named_slot_solid(materials, KIT_TROUSER_COLOR, 0.88)),
+        NamedKitSlot::Shoes => Some(named_slot_solid(materials, KIT_BOOT_COLOR, 0.7)),
+    }
+}
+
 /// Marker: frustum culling was disabled on this figure mesh.
 #[derive(Component)]
 pub(crate) struct CullingFixed;
@@ -303,7 +580,8 @@ pub fn spawn_figure(
     team: &Team,
     kind: FigureKind,
 ) -> Entity {
-    let scene = crate::render::load_xbot_scene(asset_server);
+    let archetype = archetype_for_seed(player_skin_seed(&team.short, kind));
+    let scene = crate::render::load_player_scene(asset_server, archetype);
     let crest_mat = materials.add(StandardMaterial {
         base_color_texture: Some(crate::render::load_team_crest(
             asset_server,
@@ -323,6 +601,9 @@ pub fn spawn_figure(
                 secondary_color: team.secondary_color,
                 kit_style: team.kit_style,
                 crest: crest_mat.clone(),
+                team_short: team.short.clone(),
+                player_name: None,
+                squad_number: None,
             },
             Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
             Visibility::default(),
@@ -341,7 +622,7 @@ pub fn spawn_figure(
         ..Default::default()
     });
     commands.entity(fig).with_children(|p| {
-        // Scene offset grounds bind-pose feet on y = 0 (see FOOT_BIND_Y).
+        // Archetypes are authored ground-flat (see SCENE_GROUND_Y).
         p.spawn((
             SceneRoot(scene),
             Transform::from_xyz(0.0, SCENE_GROUND_Y, 0.0),
@@ -462,39 +743,73 @@ pub fn disable_figure_frustum_culling(
     }
 }
 
-/// Mesh rows still awaiting a team-kit tint: entity, optional glTF node name
-/// and the PBR material handle imported with the figure.
+/// Mesh rows still awaiting a team-kit tint: entity, optional glTF node name,
+/// optional glTF material *slot* name (set when the asset names its
+/// materials, e.g. `Skin`/`Shirt`/`Pants`/`Shoes`) and the PBR material
+/// handle imported with the figure.
 type UnstyledKitMesh<'a> = (
     Entity,
     Option<&'a Name>,
+    Option<&'a GltfMaterialName>,
     &'a MeshMaterial3d<StandardMaterial>,
 );
 /// Only untinted figure meshes — equipment (bat, pads) is recoloured elsewhere.
 type UnstyledKitMeshFilter = (Without<KitStyled>, With<Mesh3d>, Without<Equipment>);
 
-/// Keep the imported PBR materials and tint them into believable cricket kit:
-/// `Beta_Surface` becomes the long-sleeve jersey/trousers (stronger primary
-/// tint), `Beta_Joints` takes the secondary colour as trim/helmet shade.
+/// Keep the imported PBR materials and tint them into believable cricket kit.
+///
+/// Two paths, tried in order:
+/// - **Named slots** (the future MPFB asset): a mesh whose glTF material slot
+///   is literally named `Skin`/`Shirt`/`Pants`/`Shoes` gets styled from that
+///   name directly — see [`named_kit_slot`].
+/// - **Legacy classification** (today's Xbot asset, which names none of its
+///   slots): `Beta_Surface` becomes the long-sleeve jersey/trousers (stronger
+///   primary tint), `Beta_Joints` takes the secondary colour as trim/helmet
+///   shade, both inferred from the mesh's baked colour by [`kit_mesh_kind`].
+#[allow(clippy::too_many_arguments)]
 pub fn apply_team_kit_materials(
     mut commands: Commands,
     kits: Query<&TeamKit>,
+    figures: Query<&Figure>,
+    skin_palette: Option<Res<PlayerSkinPalette>>,
     parents: Query<&ChildOf>,
     meshes: Query<UnstyledKitMesh, UnstyledKitMeshFilter>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    for (entity, name, mat_handle) in &meshes {
+    for (entity, name, mat_name, mat_handle) in &meshes {
         let mut cur = parents.get(entity).ok().map(ChildOf::parent);
-        let mut kit = None;
+        let mut fig_ent = None;
         for _ in 0..32 {
             let Some(parent) = cur else { break };
-            if let Ok(found) = kits.get(parent) {
-                kit = Some(found);
+            if kits.contains(parent) {
+                fig_ent = Some(parent);
                 break;
             }
             cur = parents.get(parent).ok().map(ChildOf::parent);
         }
-        let Some(kit) = kit else { continue };
+        let Some(fig_ent) = fig_ent else { continue };
+        let Ok(kit) = kits.get(fig_ent) else { continue };
+
+        if let Some(slot) = mat_name.and_then(|n| named_kit_slot(n.as_ref())) {
+            let fig_kind = figures.get(fig_ent).ok().map(|f| f.kind);
+            if let Some(handle) = fig_kind.and_then(|fig_kind| {
+                named_slot_material(
+                    slot,
+                    kit,
+                    fig_kind,
+                    skin_palette.as_deref(),
+                    &mut materials,
+                    &mut images,
+                )
+            }) {
+                commands
+                    .entity(entity)
+                    .insert((MeshMaterial3d(handle), KitStyled));
+                continue;
+            }
+        }
+
         let Some(mut mat) = materials.get(&mat_handle.0).cloned() else {
             continue;
         };
@@ -560,6 +875,7 @@ pub fn tag_skeleton_bones(
     kits: Query<&TeamKit>,
     candidates: Query<(Entity, &Name, &Transform, Option<&ChildOf>), Without<Bone>>,
     parents: Query<&ChildOf>,
+    transforms: Query<&Transform>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -578,9 +894,9 @@ pub fn tag_skeleton_bones(
         .collect();
 
     for (ent, name, transform, child_of) in &candidates {
-        let Some(kind) = bone_kind_for_name(name.as_str()) else {
+        if !name.as_str().contains("mixamorig:") {
             continue;
-        };
+        }
         let mut cur = child_of.map(|c| c.parent());
         let mut fig_ent = None;
         let mut steps = 0;
@@ -600,9 +916,37 @@ pub fn tag_skeleton_bones(
             }
         }
         let Some(fig) = fig_ent else { continue };
-        commands
-            .entity(ent)
-            .insert((Bone { figure: fig, kind }, BoneBindPose(transform.rotation)));
+        // Every bone gets its bind translation recorded, even the ones no pose
+        // targets — the imported clips animate all 67 of them.
+        commands.entity(ent).insert(SkeletonBone {
+            bind_translation: transform.translation,
+        });
+        let Some(kind) = bone_kind_for_name(name.as_str()) else {
+            continue;
+        };
+        // Accumulate bind rotation up to (but excluding) the figure root, so
+        // the figure's own yaw is not folded into the correction.
+        let mut world_rotation = transform.rotation;
+        let mut ancestor = child_of.map(|c| c.parent());
+        let mut hops = 0;
+        while let Some(a) = ancestor {
+            if a == fig || hops > 16 {
+                break;
+            }
+            if let Ok(tf) = transforms.get(a) {
+                world_rotation = tf.rotation * world_rotation;
+            }
+            ancestor = parents.get(a).ok().map(ChildOf::parent);
+            hops += 1;
+        }
+        commands.entity(ent).insert((
+            Bone { figure: fig, kind },
+            BoneBindPose {
+                rotation: transform.rotation,
+                world_rotation,
+                translation: transform.translation,
+            },
+        ));
 
         let fk = figure_kind.get(&fig).copied();
         let kit_col = figure_kit.get(&fig).copied();
@@ -901,6 +1245,7 @@ pub fn attach_animation_players(
             }
         }
         let Some(fig) = fig else { continue };
+
         commands.entity(player_ent).insert((
             PlayerOf(fig),
             ClipState::None,
@@ -937,12 +1282,20 @@ pub fn batter_stance_quat(from: Vec2, to: Vec2) -> Quat {
     face_target_quat(from, to) * Quat::from_rotation_y(BATTER_STANCE_YAW)
 }
 
-/// Strip vertical root motion from mocap clips so feet stay grounded.
-pub fn strip_skeleton_root_motion(mut bones: Query<(&Bone, &mut Transform)>) {
+/// Restore every bone's bind-pose translation, leaving the clips rotation-only.
+///
+/// This does two jobs. It strips root motion so feet stay grounded, and it
+/// absorbs the unit mismatch between the Xbot-authored idle/run clips and the
+/// generated archetypes they now play on: Xbot's armature is centimetre-scaled
+/// under a 0.01 root, the archetypes are metres under a 1.0 root, and the clips
+/// animate translation on **all 67 bones**. Left alone, each bone is displaced
+/// about a hundredfold and the figures balloon across the ground.
+///
+/// Rotations retarget cleanly between the two scales, so discarding every
+/// translation track is exactly the right correction rather than a workaround.
+pub fn strip_skeleton_root_motion(mut bones: Query<(&SkeletonBone, &mut Transform)>) {
     for (bone, mut tf) in &mut bones {
-        if bone.kind == BoneKind::Hips {
-            tf.translation = HIPS_BIND_TRANSLATION;
-        }
+        tf.translation = bone.bind_translation;
     }
 }
 
@@ -959,19 +1312,26 @@ fn idle_state_uses_locomotion_clip(kind: FigureKind) -> bool {
     !matches!(kind, FigureKind::Batter | FigureKind::NonStriker)
 }
 
-/// Locomotion clip selection for hybrid animation (idle/run clips vs procedural).
+/// Locomotion clip selection — currently always procedural.
+///
+/// The bundled Xbot idle/run clips set **absolute bone-local rotations** in the
+/// Mixamo bone frame. Bevy's animation system writes those straight onto the
+/// skeleton before any of our systems run, so unlike the procedural pose
+/// library there is no seam at which to apply the basis change that
+/// [`compose_pose_rotation`] performs. Played verbatim on a MakeHuman rig they
+/// produce a near-bind pose, so figures stand with their arms out.
+///
+/// Idle and run therefore go through `idle_sway` and `run_pose` instead. The
+/// clips and their graph are retained: retargeting them offline onto the
+/// generated rig is the natural way to reinstate mocap locomotion.
 fn locomotion_clip_for_anim(
-    state: AnimState,
-    kind: FigureKind,
-    clips: &LocomotionClips,
+    _state: AnimState,
+    _kind: FigureKind,
+    _clips: &LocomotionClips,
 ) -> Option<(AnimationNodeIndex, ClipState)> {
-    match state {
-        AnimState::Idle if idle_state_uses_locomotion_clip(kind) => {
-            Some((clips.idle, ClipState::Idle))
-        }
-        AnimState::Run { .. } => Some((clips.run, ClipState::Run)),
-        _ => None,
-    }
+    // Reinstate the idle/run mapping here once the clips are retargeted onto
+    // the generated rig offline; see the doc comment above.
+    None
 }
 
 /// Drive every figure: locomotion through real mocap clips (idle/run), and
@@ -1077,10 +1437,25 @@ pub fn animate_figures(
     }
 }
 
-/// Compose a procedural delta (authored in bone-local space) onto the imported
-/// bind rotation. Identity delta restores the bind pose.
-fn compose_pose_rotation(bind: Quat, delta: Quat) -> Quat {
-    bind * delta
+/// Compose a procedural delta onto the imported bind rotation, re-expressing it
+/// in this rig's bone axes. Identity delta restores the bind pose.
+///
+/// Every pose in this file was authored against the Mixamo/Xbot rig, whose bind
+/// rotation is **identity at every bone** — the skeleton's shape lives entirely
+/// in the bone translations. That makes an Xbot-authored delta effectively a
+/// *world-space* rotation.
+///
+/// The generated MakeHuman archetypes use Blender's convention instead: bones
+/// point along their own local +Y and carry a non-identity bind rotation. The
+/// same quaternion therefore means a different pose, and applying the library
+/// verbatim leaves every figure in its T-pose.
+///
+/// Conjugating by the bone's bind rotation in armature space maps the delta
+/// back into world space and out into this bone's frame, so one correction
+/// makes the entire pose library — stance, bowl action, every shot — transfer
+/// without re-authoring a single angle.
+fn compose_pose_rotation(bind: Quat, world: Quat, delta: Quat) -> Quat {
+    bind * (world.inverse() * delta * world)
 }
 
 /// Local rotation targets per bone for one frame of procedural animation.
@@ -1285,11 +1660,16 @@ fn non_striker_stance(t: f32, pose: &mut PoseTargets) {
 
 /// Relaxed fielder/bowler idle with subtle weight shift.
 fn idle_sway(t: f32, pose: &mut PoseTargets) {
+    // Fielders, bowler and keeper reach this instead of the Xbot idle clip, so
+    // the arms must be brought down from the T-pose bind here.
+    arms_bind_neutral(pose);
     let sway = (t * 0.7).sin() * 0.045;
     pose.spine = rz(sway);
     pose.hips = rz(-sway * 0.4);
-    pose.ra = rx(0.06 * (t * 0.9).sin());
-    pose.la = rx(-0.06 * (t * 0.9).sin());
+    // Compose onto the neutral hang rather than replacing it, or the arms snap
+    // back to the T-pose bind and only the sway survives.
+    pose.ra *= rx(0.06 * (t * 0.9).sin());
+    pose.la *= rx(-0.06 * (t * 0.9).sin());
 }
 
 /// Jog cycle used where the mocap clip can't reach (e.g. brief repositions).
@@ -1807,7 +2187,7 @@ fn apply_pose(
             continue;
         }
         let delta = pose.delta_for(bone.kind);
-        let target = compose_pose_rotation(bind.0, delta);
+        let target = compose_pose_rotation(bind.rotation, bind.world_rotation, delta);
         tf.rotation = tf.rotation.slerp(target, blend);
     }
 }
@@ -1827,11 +2207,63 @@ mod tests {
 
     #[test]
     fn metres_to_bone_units_scales_by_armature_ratio() {
-        assert!((metres_to_bone(1.0) - 100.0).abs() < 1e-5);
-        assert!((metres_to_bone(0.44) - 44.0).abs() < 1e-5);
+        // The generated archetypes export bone translations in metres under a
+        // root at scale 1.0, so bone units and metres coincide. (The legacy
+        // Xbot armature was centimetres under a 0.01 root, hence the ratio.)
+        assert!((metres_to_bone(1.0) - 1.0).abs() < 1e-5);
+        assert!((metres_to_bone(0.44) - 0.44).abs() < 1e-5);
         let tf = equipment_transform_m(Vec3::new(0.0, -0.44, 0.10), Quat::IDENTITY);
-        assert!((tf.translation.y + 44.0).abs() < 1e-4);
-        assert!((tf.translation.z - 10.0).abs() < 1e-4);
+        assert!((tf.translation.y + 0.44).abs() < 1e-4);
+        assert!((tf.translation.z - 0.10).abs() < 1e-4);
+    }
+
+    #[test]
+    fn every_archetype_name_has_a_built_asset() {
+        // Guards the asset contract: a typo here, or a rename in
+        // `scripts/build_player_asset.py`, would otherwise surface as an
+        // invisible player at runtime rather than a failing build.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let missing: Vec<&str> = PLAYER_ARCHETYPES
+            .iter()
+            .copied()
+            .filter(|name| {
+                !root
+                    .join(format!("assets/characters/players/{name}.glb"))
+                    .exists()
+            })
+            .collect();
+        assert!(missing.is_empty(), "no GLB for archetypes: {missing:?}");
+    }
+
+    #[test]
+    fn archetype_selection_is_deterministic_and_spreads() {
+        let seed = player_skin_seed("IND", FigureKind::Bowler);
+        assert_eq!(archetype_for_seed(seed), archetype_for_seed(seed));
+
+        // Eleven fielders must not all end up the same shape.
+        let picks: std::collections::HashSet<&str> = (0..11)
+            .map(|slot| archetype_for_seed(player_skin_seed("IND", FigureKind::Fielder(slot))))
+            .collect();
+        assert!(
+            picks.len() >= 5,
+            "archetypes barely vary across a side: {picks:?}"
+        );
+    }
+
+    #[test]
+    fn archetype_and_skin_tone_vary_independently() {
+        // Same body, different colouring across teams — the two must not be
+        // locked together, or every tall player would share a skin tone.
+        let pairs: std::collections::HashSet<(&str, usize)> = ["IND", "AUS", "ENG", "RSA", "NZL"]
+            .into_iter()
+            .map(|team| {
+                let seed = player_skin_seed(team, FigureKind::Batter);
+                (archetype_for_seed(seed), player_skin_tone_index(seed))
+            })
+            .collect();
+        let bodies: std::collections::HashSet<&str> = pairs.iter().map(|(a, _)| *a).collect();
+        let tones: std::collections::HashSet<usize> = pairs.iter().map(|(_, t)| *t).collect();
+        assert!(bodies.len() > 1 && tones.len() > 1);
     }
 
     #[test]
@@ -2008,7 +2440,8 @@ mod tests {
     #[test]
     fn compose_pose_identity_delta_restores_bind() {
         let bind = Quat::from_rotation_y(1.2) * Quat::from_rotation_x(0.31);
-        let target = compose_pose_rotation(bind, Quat::IDENTITY);
+        let world = Quat::from_rotation_z(0.7);
+        let target = compose_pose_rotation(bind, world, Quat::IDENTITY);
         assert!(
             target.dot(bind).abs() > 0.999,
             "expected bind, got {target:?}"
@@ -2016,12 +2449,36 @@ mod tests {
     }
 
     #[test]
-    fn compose_pose_delta_is_local_to_bind() {
+    fn compose_pose_delta_is_local_to_bind_on_a_mixamo_frame_rig() {
+        // Xbot's bind rotation is identity at every bone, so on that rig the
+        // correction collapses and a delta stays a plain local rotation.
         let bind = Quat::from_rotation_x(0.5);
         let delta = Quat::from_rotation_z(0.25);
-        let target = compose_pose_rotation(bind, delta);
-        let expected = bind * delta;
-        assert!(target.dot(expected).abs() > 0.999);
+        let target = compose_pose_rotation(bind, Quat::IDENTITY, delta);
+        assert!(target.dot(bind * delta).abs() > 0.999);
+    }
+
+    #[test]
+    fn compose_pose_applies_delta_in_world_space_whatever_the_bone_frame() {
+        // The pose library is authored against Xbot, whose bones sit in world
+        // orientation at bind. A rig whose bones are rotated differently must
+        // still swing the *same way in the world*, or the whole library would
+        // have to be re-authored per rig.
+        let delta = Quat::from_rotation_z(0.4);
+        for world in [
+            Quat::IDENTITY,
+            Quat::from_rotation_y(1.1),
+            Quat::from_rotation_x(-0.8) * Quat::from_rotation_z(2.2),
+        ] {
+            // A root-level bone whose bind orientation in armature space is
+            // `world`, so its posed world rotation is just its local rotation.
+            let posed_world = compose_pose_rotation(world, world, delta);
+            let want = delta * world;
+            assert!(
+                posed_world.dot(want).abs() > 0.999,
+                "world-space swing differs for bone frame {world:?}"
+            );
+        }
     }
 
     #[test]
@@ -2048,7 +2505,11 @@ mod tests {
     }
 
     #[test]
-    fn field_roles_use_idle_clip_in_idle_state() {
+    fn field_roles_fall_back_to_procedural_idle() {
+        // The Xbot mocap clips cannot retarget onto the generated MakeHuman rig
+        // — see `locomotion_clip_for_anim` — so every role now poses
+        // procedurally. `idle_state_uses_locomotion_clip` still distinguishes
+        // batters (who get a batting stance) from everyone else (idle sway).
         let kinds = [
             FigureKind::Bowler,
             FigureKind::Keeper,
@@ -2058,7 +2519,7 @@ mod tests {
         for kind in kinds {
             assert!(
                 idle_state_uses_locomotion_clip(kind),
-                "{kind:?} should use idle locomotion clip",
+                "{kind:?} should idle-sway rather than take a batting stance",
             );
             assert!(
                 locomotion_clip_for_anim(
@@ -2070,10 +2531,23 @@ mod tests {
                         run: AnimationNodeIndex::new(1),
                     }
                 )
-                .is_some(),
-                "{kind:?} should resolve to idle clip",
+                .is_none(),
+                "{kind:?} must not resolve to a clip while retarget is unavailable",
             );
         }
+    }
+
+    #[test]
+    fn idle_sway_brings_arms_down_from_the_tpose_bind() {
+        // Without the clip, this is the only thing stopping fielders standing
+        // with their arms straight out.
+        let mut pose = PoseTargets::default();
+        idle_sway(0.0, &mut pose);
+        assert!(
+            pose.la.angle_between(Quat::IDENTITY) > 0.35
+                && pose.ra.angle_between(Quat::IDENTITY) > 0.35,
+            "upper arms are still at the T-pose bind",
+        );
     }
 
     #[test]
@@ -2185,6 +2659,9 @@ mod tests {
                     secondary_color: india.secondary_color,
                     kit_style: india.kit_style,
                     crest: crest.clone(),
+                    team_short: india.short.clone(),
+                    player_name: None,
+                    squad_number: None,
                 },
             ))
             .id();
@@ -2199,6 +2676,9 @@ mod tests {
                     secondary_color: australia.secondary_color,
                     kit_style: australia.kit_style,
                     crest: crest.clone(),
+                    team_short: australia.short.clone(),
+                    player_name: None,
+                    squad_number: None,
                 },
             ))
             .id();
@@ -2253,5 +2733,192 @@ mod tests {
 
         assert!(world.entity(india_mesh).contains::<KitStyled>());
         assert!(world.entity(aus_mesh).contains::<KitStyled>());
+    }
+
+    #[test]
+    fn player_skin_tone_index_is_deterministic_and_in_range() {
+        for seed in 0..2000_u32 {
+            let a = player_skin_tone_index(seed);
+            let b = player_skin_tone_index(seed);
+            assert_eq!(a, b, "same seed must give the same tone every time");
+            assert!(a < PLAYER_SKIN_TONES.len());
+        }
+    }
+
+    #[test]
+    fn player_skin_seed_is_deterministic_per_team_and_role() {
+        let a = player_skin_seed("IND", FigureKind::Fielder(3));
+        let b = player_skin_seed("IND", FigureKind::Fielder(3));
+        assert_eq!(a, b);
+        let batter = player_skin_seed("IND", FigureKind::Batter);
+        let bowler = player_skin_seed("IND", FigureKind::Bowler);
+        assert_ne!(
+            batter, bowler,
+            "distinct roles should not collide trivially"
+        );
+        let other_team = player_skin_seed("AUS", FigureKind::Batter);
+        assert_ne!(
+            batter, other_team,
+            "distinct teams should not collide trivially"
+        );
+    }
+
+    #[test]
+    fn player_skin_tones_span_a_broad_range() {
+        // Section 1 asks for a richer set than the crowd's 6 tones, spanning
+        // caucasian / south-asian / african ranges.
+        assert!(PLAYER_SKIN_TONES.len() > 6);
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..5000_u32 {
+            seen.insert(player_skin_tone_index(seed));
+        }
+        assert_eq!(
+            seen.len(),
+            PLAYER_SKIN_TONES.len(),
+            "every tone in the palette should be reachable"
+        );
+    }
+
+    #[test]
+    fn apply_team_kit_materials_uses_named_skin_slot_over_legacy_classification() {
+        use crate::core::teams::builtin_teams;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Assets<Image>>();
+        app.add_systems(Update, apply_team_kit_materials);
+
+        let india = &builtin_teams()[0];
+        let crest = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let skin_palette = build_player_skin_palette(
+            &mut app.world_mut().resource_mut::<Assets<StandardMaterial>>(),
+        );
+        let expected_idx =
+            player_skin_tone_index(player_skin_seed(&india.short, FigureKind::Batter));
+        let expected_handle = skin_palette.skin[expected_idx].clone();
+        app.insert_resource(skin_palette);
+
+        let fig = app
+            .world_mut()
+            .spawn((
+                Figure {
+                    kind: FigureKind::Batter,
+                },
+                TeamKit {
+                    primary_color: india.primary_color,
+                    secondary_color: india.secondary_color,
+                    kit_style: india.kit_style,
+                    crest: crest.clone(),
+                    team_short: india.short.clone(),
+                    player_name: None,
+                    squad_number: None,
+                },
+            ))
+            .id();
+        // A colour that would otherwise be classified as `Joints` by the
+        // legacy path — proves the named slot takes precedence rather than
+        // falling through to colour classification.
+        let baked = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                base_color: Color::srgb(0.1, 0.1, 0.1),
+                ..Default::default()
+            });
+        let mesh = app
+            .world_mut()
+            .spawn((
+                GltfMaterialName("Skin".to_string()),
+                Mesh3d(Handle::default()),
+                MeshMaterial3d(baked),
+                ChildOf(fig),
+            ))
+            .id();
+
+        app.update();
+
+        let world = app.world();
+        let handle = world
+            .entity(mesh)
+            .get::<MeshMaterial3d<StandardMaterial>>()
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(
+            handle, expected_handle,
+            "Skin slot should use the shared palette handle"
+        );
+        assert!(world.entity(mesh).contains::<KitStyled>());
+    }
+
+    #[test]
+    fn apply_team_kit_materials_builds_composited_shirt_texture_for_named_slot() {
+        use crate::core::teams::builtin_teams;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Assets<Image>>();
+        app.add_systems(Update, apply_team_kit_materials);
+
+        let india = &builtin_teams()[0];
+        let crest = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+
+        let fig = app
+            .world_mut()
+            .spawn((
+                Figure {
+                    kind: FigureKind::Bowler,
+                },
+                TeamKit {
+                    primary_color: india.primary_color,
+                    secondary_color: india.secondary_color,
+                    kit_style: india.kit_style,
+                    crest: crest.clone(),
+                    team_short: india.short.clone(),
+                    player_name: None,
+                    squad_number: None,
+                },
+            ))
+            .id();
+        let baked = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let mesh = app
+            .world_mut()
+            .spawn((
+                GltfMaterialName("Shirt".to_string()),
+                Mesh3d(Handle::default()),
+                MeshMaterial3d(baked),
+                ChildOf(fig),
+            ))
+            .id();
+
+        app.update();
+
+        let world = app.world();
+        let handle = world
+            .entity(mesh)
+            .get::<MeshMaterial3d<StandardMaterial>>()
+            .unwrap()
+            .0
+            .clone();
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        let images = world.resource::<Assets<Image>>();
+        let tex_handle = materials
+            .get(&handle)
+            .and_then(|m| m.base_color_texture.clone())
+            .expect("named Shirt slot should get a composited texture");
+        let image = images.get(&tex_handle).unwrap();
+        assert_eq!(image.texture_descriptor.size.width, kit::SHIRT_TEXTURE_SIZE);
+        assert!(world.entity(mesh).contains::<KitStyled>());
     }
 }

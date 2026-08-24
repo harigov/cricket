@@ -4,15 +4,27 @@
 //! plateau is not the air over an alpine valley, and the sky is the largest
 //! single surface on screen, so it carries most of the theme.
 
+use std::f32::consts::{FRAC_PI_2, TAU};
+
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+use bevy::render::render_resource::{
+    Extent3d, TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
+    TextureViewDimension,
+};
 
 use crate::core::stadiums::StadiumEnvironment;
 
 const SKY_W: u32 = 2048;
 const SKY_H: u32 = 1024;
+
+/// Edge length of one face of the procedural IBL cubemap. Small on purpose:
+/// [`GeneratedEnvironmentMapLight`](bevy::light::GeneratedEnvironmentMapLight)
+/// blurs this down into diffuse/specular convolutions on the GPU, so the
+/// source only needs to carry the broad gradient, not the star field detail
+/// the flat sky texture has.
+pub const IBL_CUBE_SIZE: u32 = 64;
 
 /// Palette used before a stadium is picked (menus and the shared startup dome).
 /// Coastal is the closest of the five to the single palette this used to have,
@@ -280,6 +292,84 @@ pub fn sky_texture_for_time<'a>(
     if night { night_tex } else { day }
 }
 
+/// World-space direction for texel `(s, t)` (each in `[-1, 1]`) of cubemap
+/// `face`, using the standard `+X, -X, +Y, -Y, +Z, -Z` array-layer order.
+fn cube_face_direction(face: u32, s: f32, t: f32) -> Vec3 {
+    match face {
+        0 => Vec3::new(1.0, -t, -s),
+        1 => Vec3::new(-1.0, -t, s),
+        2 => Vec3::new(s, 1.0, t),
+        3 => Vec3::new(s, -1.0, -t),
+        4 => Vec3::new(s, -t, 1.0),
+        _ => Vec3::new(-s, -t, -1.0),
+    }
+    .normalize()
+}
+
+/// Map a world direction onto the same `(u, v)` convention [`sample_sky_color`]
+/// expects (`v = 0` horizon, `v = 1` zenith).
+///
+/// Directions below the horizon fall back to the horizon colour: the dome
+/// this reuses only paints sky, and a probe that samples "ground" as pitch
+/// black would darken indirect light on the underside of every prop.
+fn direction_to_sky_uv(dir: Vec3) -> (f32, f32) {
+    let elevation = dir.y.clamp(-1.0, 1.0).asin();
+    let v = (elevation / FRAC_PI_2).clamp(0.0, 1.0);
+    let azimuth = dir.z.atan2(dir.x);
+    let u = azimuth / TAU + 0.5;
+    (u, v)
+}
+
+/// Paint all six faces of the IBL source cubemap, back to back in array-layer
+/// order, for one theme/time-of-day pair.
+fn paint_cubemap_texels(theme: StadiumEnvironment, night: bool) -> Vec<u8> {
+    let size = IBL_CUBE_SIZE;
+    let mut data = Vec::with_capacity((size * size * 6 * 4) as usize);
+    for face in 0..6 {
+        for y in 0..size {
+            // t runs top-to-bottom in texel space, so flip to NDC's bottom-up y.
+            let t = 1.0 - 2.0 * (y as f32 + 0.5) / size as f32;
+            for x in 0..size {
+                let s = 2.0 * (x as f32 + 0.5) / size as f32 - 1.0;
+                let dir = cube_face_direction(face, s, t);
+                let (u, v) = direction_to_sky_uv(dir);
+                let rgb = sample_sky_color(u, v, night, theme);
+                data.extend_from_slice(&[
+                    (rgb[0] * 255.0) as u8,
+                    (rgb[1] * 255.0) as u8,
+                    (rgb[2] * 255.0) as u8,
+                    255,
+                ]);
+            }
+        }
+    }
+    data
+}
+
+/// Build a small procedural cubemap `Image` for use with
+/// [`GeneratedEnvironmentMapLight`](bevy::light::GeneratedEnvironmentMapLight),
+/// sampling the same gradient the flat sky dome uses so the two always agree.
+pub fn create_environment_cubemap(theme: StadiumEnvironment, night: bool) -> Image {
+    let data = paint_cubemap_texels(theme, night);
+    let mut img = Image::new(
+        Extent3d {
+            width: IBL_CUBE_SIZE,
+            height: IBL_CUBE_SIZE,
+            depth_or_array_layers: 6,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    img.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    img.texture_view_descriptor = Some(TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::Cube),
+        ..Default::default()
+    });
+    img
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,5 +578,90 @@ mod tests {
             sky_texture_for_time(true, &day, &night),
             &night
         ));
+    }
+
+    #[test]
+    fn cubemap_has_six_faces_of_the_expected_size() {
+        let img = create_environment_cubemap(DEFAULT_SKY_THEME, false);
+        assert_eq!(img.texture_descriptor.size.width, IBL_CUBE_SIZE);
+        assert_eq!(img.texture_descriptor.size.height, IBL_CUBE_SIZE);
+        assert_eq!(img.texture_descriptor.size.depth_or_array_layers, 6);
+        assert!(IBL_CUBE_SIZE.is_power_of_two());
+        let expected_bytes = (IBL_CUBE_SIZE * IBL_CUBE_SIZE * 6 * 4) as usize;
+        assert_eq!(img.data.as_ref().unwrap().len(), expected_bytes);
+        assert_eq!(
+            img.texture_view_descriptor
+                .as_ref()
+                .and_then(|d| d.dimension),
+            Some(TextureViewDimension::Cube)
+        );
+    }
+
+    #[test]
+    fn cubemap_generation_is_deterministic() {
+        assert_eq!(
+            paint_cubemap_texels(DEFAULT_SKY_THEME, false),
+            paint_cubemap_texels(DEFAULT_SKY_THEME, false)
+        );
+    }
+
+    #[test]
+    fn cubemap_day_and_night_differ() {
+        for theme in StadiumEnvironment::ALL {
+            assert_ne!(
+                paint_cubemap_texels(theme, false),
+                paint_cubemap_texels(theme, true),
+                "{theme:?} IBL cubemap does not change between day and night"
+            );
+        }
+    }
+
+    #[test]
+    fn cubemap_faces_all_carry_colour() {
+        // Every face should differ from pure black — a broken face-direction
+        // mapping tends to collapse a face to a single (0,0,0) corner sample.
+        let data = paint_cubemap_texels(DEFAULT_SKY_THEME, false);
+        let face_bytes = (IBL_CUBE_SIZE * IBL_CUBE_SIZE * 4) as usize;
+        for face in 0..6 {
+            let start = face * face_bytes;
+            let slice = &data[start..start + face_bytes];
+            assert!(
+                slice.iter().any(|&b| b > 0),
+                "cubemap face {face} is entirely black"
+            );
+        }
+    }
+
+    #[test]
+    fn top_face_is_brighter_than_bottom_face() {
+        // +Y (index 2) looks toward the zenith, -Y (index 3) below the
+        // horizon; the zenith may be a deep blue but the fallback horizon
+        // colour used below the horizon should never be darker than it.
+        let data = paint_cubemap_texels(DEFAULT_SKY_THEME, false);
+        let face_bytes = (IBL_CUBE_SIZE * IBL_CUBE_SIZE * 4) as usize;
+        let avg_luma = |face: usize| -> f32 {
+            let slice = &data[face * face_bytes..(face + 1) * face_bytes];
+            let mut sum = 0.0;
+            let mut n = 0.0;
+            for texel in slice.chunks_exact(4) {
+                sum += texel[0] as f32 * 0.299 + texel[1] as f32 * 0.587 + texel[2] as f32 * 0.114;
+                n += 1.0;
+            }
+            sum / n
+        };
+        let bottom = avg_luma(3);
+        let all_faces_bright = (0..6).map(avg_luma).all(|l| l > 0.0);
+        assert!(all_faces_bright, "some face rendered fully black");
+        assert!(bottom > 0.0, "below-horizon face should not be black");
+    }
+
+    #[test]
+    fn direction_to_sky_uv_maps_zenith_and_horizon() {
+        let (_, zenith_v) = direction_to_sky_uv(Vec3::Y);
+        assert!((zenith_v - 1.0).abs() < 1e-5, "zenith should map to v=1");
+        let (_, horizon_v) = direction_to_sky_uv(Vec3::X);
+        assert!(horizon_v.abs() < 1e-5, "eye-level should map to v=0");
+        let (_, below_v) = direction_to_sky_uv(-Vec3::Y);
+        assert_eq!(below_v, 0.0, "below the horizon should clamp to v=0");
     }
 }
